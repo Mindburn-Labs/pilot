@@ -142,48 +142,50 @@ async function persistDecisionCourtRun(
     credentialBoundary: 'no_raw_credentials_or_session_payloads_in_prompt',
   };
 
-  await deps.db.insert(auditLog).values({
-    id: auditEventId,
-    workspaceId,
-    action: 'DECISION_COURT_RUN',
-    actor: `workspace:${workspaceId}`,
-    target: params.result.mode,
-    verdict: params.result.status,
-    reason:
-      params.result.governanceDenialReason ??
-      params.result.unavailableReason ??
-      params.result.finalRecommendation?.reasoning ??
-      null,
-    metadata,
-  });
+  await deps.db.transaction(async (tx) => {
+    await tx.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId,
+      action: 'DECISION_COURT_RUN',
+      actor: `workspace:${workspaceId}`,
+      target: params.result.mode,
+      verdict: params.result.status,
+      reason:
+        params.result.governanceDenialReason ??
+        params.result.unavailableReason ??
+        params.result.finalRecommendation?.reasoning ??
+        null,
+      metadata,
+    });
 
-  const evidenceItemId = await appendEvidenceItem(deps.db, {
-    workspaceId,
-    auditEventId,
-    evidenceType: 'decision_court_run',
-    sourceType: 'decision_court',
-    title: `Decision Court ${params.result.status}`,
-    summary:
-      params.result.finalRecommendation?.reasoning ??
-      params.result.governanceDenialReason ??
-      params.result.unavailableReason ??
-      `Decision Court completed with status ${params.result.status}.`,
-    redactionState: 'redacted',
-    sensitivity: 'internal',
-    contentHash: `sha256:${hashJson(metadata)}`,
-    replayRef,
-    metadata,
-  });
+    const evidenceItemId = await appendEvidenceItem(tx, {
+      workspaceId,
+      auditEventId,
+      evidenceType: 'decision_court_run',
+      sourceType: 'decision_court',
+      title: `Decision Court ${params.result.status}`,
+      summary:
+        params.result.finalRecommendation?.reasoning ??
+        params.result.governanceDenialReason ??
+        params.result.unavailableReason ??
+        `Decision Court completed with status ${params.result.status}.`,
+      redactionState: 'redacted',
+      sensitivity: 'internal',
+      contentHash: `sha256:${hashJson(metadata)}`,
+      replayRef,
+      metadata,
+    });
 
-  await deps.db
-    .update(auditLog)
-    .set({
-      metadata: {
-        ...metadata,
-        evidenceItemId,
-      },
-    })
-    .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+    await tx
+      .update(auditLog)
+      .set({
+        metadata: {
+          ...metadata,
+          evidenceItemId,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+  });
 }
 
 function decisionCourtHelmDocumentVersionPins(result: CourtResult): Record<string, string> {
