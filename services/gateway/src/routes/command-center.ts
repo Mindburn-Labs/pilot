@@ -755,14 +755,16 @@ export function commandCenterRoutes(deps: GatewayDeps) {
             eq(taskRuns.id, rootTaskRunId),
             eq(taskRuns.rootTaskRunId, rootTaskRunId),
             eq(taskRuns.parentTaskRunId, rootTaskRunId),
-            eq(taskRuns.spawnedByActionId, rootTaskRunId),
           ),
         ),
       )
       .orderBy(asc(taskRuns.runSequence), asc(taskRuns.startedAt), asc(taskRuns.id))
       .limit(200);
+    const proofDagTaskRunRows = taskRunRows.filter((row) =>
+      taskRunBelongsToProofDag(row, rootTaskRunId),
+    );
 
-    const taskRunIds = Array.from(new Set(taskRunRows.map((row) => row.id)));
+    const taskRunIds = Array.from(new Set(proofDagTaskRunRows.map((row) => row.id)));
     const handoffRows =
       taskRunIds.length === 0
         ? []
@@ -802,7 +804,7 @@ export function commandCenterRoutes(deps: GatewayDeps) {
       productionReady: false,
       capability,
       dag: {
-        taskRuns: taskRunRows,
+        taskRuns: proofDagTaskRunRows,
         agentHandoffs: handoffRows,
         evidencePacks: evidenceRows,
       },
@@ -946,6 +948,17 @@ function parseComputerReplayRef(
   const match = /^computer:([^:]+):(\d+)$/.exec(replayRef);
   if (!match) return null;
   return { actionId: match[1]!, replayIndex: Number(match[2]) };
+}
+
+function taskRunBelongsToProofDag(
+  row: typeof taskRuns.$inferSelect,
+  rootTaskRunId: string,
+): boolean {
+  return (
+    row.id === rootTaskRunId ||
+    row.rootTaskRunId === rootTaskRunId ||
+    row.parentTaskRunId === rootTaskRunId
+  );
 }
 
 function uniqueStrings(values: Array<string | undefined>): string[] {

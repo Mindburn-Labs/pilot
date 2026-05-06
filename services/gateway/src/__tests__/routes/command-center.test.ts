@@ -881,6 +881,7 @@ describe('commandCenterRoutes', () => {
     const rootTaskRunId = '00000000-0000-4000-8000-000000000101';
     const spawnTaskRunId = '00000000-0000-4000-8000-000000000102';
     const childTaskRunId = '00000000-0000-4000-8000-000000000103';
+    const pollutedTaskRunId = '00000000-0000-4000-8000-000000000104';
     const { fetch } = createApp([
       [
         {
@@ -921,6 +922,17 @@ describe('commandCenterRoutes', () => {
           spawnedByActionId: spawnTaskRunId,
           lineageKind: 'subagent_action',
           startedAt: new Date('2026-05-05T09:02:00Z'),
+        },
+        {
+          id: pollutedTaskRunId,
+          taskId: 'task-1',
+          status: 'completed',
+          actionTool: 'finish',
+          parentTaskRunId: '00000000-0000-4000-8000-000000009998',
+          rootTaskRunId: '00000000-0000-4000-8000-000000009999',
+          spawnedByActionId: rootTaskRunId,
+          lineageKind: 'subagent_action',
+          startedAt: new Date('2026-05-05T09:03:00Z'),
         },
       ],
       [
@@ -975,6 +987,7 @@ describe('commandCenterRoutes', () => {
       'subagent_spawn',
       'subagent_action',
     ]);
+    expect(body.dag.taskRuns.map((run) => run.id)).not.toContain(pollutedTaskRunId);
     expect(body.dag.taskRuns.find((run) => run.id === childTaskRunId)?.spawnedByActionId).toBe(
       spawnTaskRunId,
     );
