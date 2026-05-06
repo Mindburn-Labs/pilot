@@ -109,6 +109,52 @@ function makeMockDb(options: { failInsertTable?: unknown; failUpdateTable?: unkn
   return db;
 }
 
+function makeTransactionalSpawnDb(options: { failEvidenceInsert?: boolean } = {}) {
+  let autoId = 0;
+  const committedInserts: Array<{ table: unknown; row: Record<string, unknown> }> = [];
+
+  const makeFacade = (sink: Array<{ table: unknown; row: Record<string, unknown> }>) => ({
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((row: Record<string, unknown>) => {
+        if (table !== 'evidencePacks' && options.failEvidenceInsert) {
+          throw new Error('evidence item insert failed');
+        }
+        sink.push({ table, row });
+        return {
+          returning: vi.fn(async () => [{ id: `row_${++autoId}` }]),
+        };
+      }),
+    })),
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          orderBy: vi.fn(() => ({
+            limit: vi.fn(async () => []),
+          })),
+          limit: vi.fn(async () => []),
+        })),
+      })),
+    })),
+    update: vi.fn(() => ({
+      set: vi.fn(() => ({
+        where: vi.fn(async () => []),
+      })),
+    })),
+  });
+
+  const db = {
+    ...makeFacade(committedInserts),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; row: Record<string, unknown> }> = [];
+      const result = await callback(makeFacade(stagedInserts));
+      committedInserts.push(...stagedInserts);
+      return result;
+    }),
+  } as any;
+
+  return { db, committedInserts };
+}
+
 function makePolicy(): PolicyConfig {
   return {
     killSwitch: false,
@@ -513,6 +559,25 @@ describe('Conductor.spawn', () => {
     expect(result.verdict).toBe('failed');
     expect(result.error).toBe('subagent_persistence_failed');
     expect(result.summary).toContain('Failed to persist agent handoff');
+    expect(llm.complete).not.toHaveBeenCalled();
+  });
+
+  it('does not commit a spawn evidence pack when spawn evidence item persistence fails', async () => {
+    const registry = new SubagentRegistry([makeDef({ name: 'scout_x' })]);
+    const { db, committedInserts } = makeTransactionalSpawnDb({ failEvidenceInsert: true });
+    const llm = makeLlm();
+    const tools = new ToolRegistry(db);
+    const conductor = new Conductor(db, registry, tools, makePolicy(), llm);
+
+    const result = await conductor.spawn(baseCtx, {
+      name: 'scout_x',
+      task: 'scan market',
+    });
+
+    expect(result.verdict).toBe('failed');
+    expect(result.error).toBe('subagent_persistence_failed');
+    expect(result.summary).toContain('Failed to persist SUBAGENT_SPAWN evidence pack');
+    expect(committedInserts).toEqual([]);
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
