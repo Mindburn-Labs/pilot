@@ -666,24 +666,79 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     for (const _job of jobs) {
       try {
         const cutoff = new Date(Date.now() - 10 * 60 * 1000);
-        const stuck = await deps.db
-          .update(tasks)
-          .set({ status: 'failed', updatedAt: new Date() })
-          .where(and(eq(tasks.status, 'running'), lt(tasks.updatedAt, cutoff)))
-          .returning({ id: tasks.id });
+        const now = new Date();
+        const reaped = await deps.db.transaction(async (tx) => {
+          const stuck = await tx
+            .update(tasks)
+            .set({ status: 'failed', updatedAt: now })
+            .where(and(eq(tasks.status, 'running'), lt(tasks.updatedAt, cutoff)))
+            .returning({ id: tasks.id, workspaceId: tasks.workspaceId });
 
-        if (stuck.length === 0) continue;
+          for (const row of stuck) {
+            const taskRunId = randomUUID();
+            const auditEventId = randomUUID();
+            const reason = 'Task reaped after 10min without progress — presumed crashed';
+            const metadata = {
+              taskId: row.id,
+              taskRunId,
+              cutoff: cutoff.toISOString(),
+              reapedAt: now.toISOString(),
+              reason,
+              evidenceItemId: null,
+            };
+            const contentHash = hashJson(metadata);
 
-        for (const row of stuck) {
-          await deps.db.insert(taskRuns).values({
-            taskId: row.id,
-            status: 'failed',
-            verdict: 'reaped',
-            error: 'Task reaped after 10min without progress — presumed crashed',
-            completedAt: new Date(),
-          });
-        }
-        log.warn({ count: stuck.length, taskIds: stuck.map((r) => r.id) }, 'Reaped stuck tasks');
+            await tx.insert(taskRuns).values({
+              id: taskRunId,
+              taskId: row.id,
+              status: 'failed',
+              actionTool: 'system.tasks.reap_stuck',
+              actionInput: { cutoff: cutoff.toISOString() },
+              actionHash: contentHash,
+              actionOutput: { status: 'failed', reapedAt: now.toISOString() },
+              verdict: 'reaped',
+              error: reason,
+              completedAt: now,
+            });
+            await tx.insert(auditLog).values({
+              id: auditEventId,
+              workspaceId: row.workspaceId,
+              action: 'TASK_REAPED_STUCK',
+              actor: 'job:tasks.reap_stuck',
+              target: row.id,
+              verdict: 'allow',
+              metadata,
+            });
+            const evidenceItemId = await appendEvidenceItem(tx, {
+              workspaceId: row.workspaceId,
+              taskRunId,
+              auditEventId,
+              evidenceType: 'task_reaped_stuck',
+              sourceType: 'task_reaper',
+              title: `Stuck task reaped: ${row.id}`,
+              summary: reason,
+              redactionState: 'redacted',
+              sensitivity: 'internal',
+              contentHash: `sha256:${contentHash}`,
+              replayRef: `task-reaper:${row.id}:${contentHash.slice(0, 16)}`,
+              metadata,
+            });
+            await tx
+              .update(auditLog)
+              .set({
+                metadata: {
+                  ...metadata,
+                  evidenceItemId,
+                },
+              })
+              .where(and(eq(auditLog.workspaceId, row.workspaceId), eq(auditLog.id, auditEventId)));
+          }
+
+          return stuck;
+        });
+
+        if (reaped.length === 0) continue;
+        log.warn({ count: reaped.length, taskIds: reaped.map((r) => r.id) }, 'Reaped stuck tasks');
       } catch (err) {
         log.error({ err }, 'Task reaper failed');
         throw err;
