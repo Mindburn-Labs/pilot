@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
 import { and, eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { appendEvidenceItem } from '@pilot/db';
 import {
+  auditLog,
   cofounderCandidates,
   founderAssessments,
   founderProfiles,
@@ -14,7 +17,7 @@ import {
   CreateFounderProfileInput,
 } from '@pilot/shared/schemas';
 import { type GatewayDeps } from '../index.js';
-import { getWorkspaceId } from '../lib/workspace.js';
+import { getWorkspaceId, requireWorkspaceRole } from '../lib/workspace.js';
 
 export function founderRoutes(deps: GatewayDeps) {
   const app = new Hono();
@@ -210,6 +213,8 @@ export function founderRoutes(deps: GatewayDeps) {
   app.put('/candidates/:id/status', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'mutate cofounder candidate status');
+    if (roleDenied) return roleDenied;
 
     const body = (await c.req.json().catch(() => ({}))) as { status?: string };
     const allowed = new Set([
@@ -230,22 +235,92 @@ export function founderRoutes(deps: GatewayDeps) {
       );
     }
 
-    const [candidate] = await deps.db
-      .update(cofounderCandidates)
-      .set({ status: body.status, updatedAt: new Date() })
-      .where(
-        and(
-          eq(cofounderCandidates.id, c.req.param('id')),
-          eq(cofounderCandidates.workspaceId, workspaceId),
-        ),
-      )
-      .returning();
+    const candidateId = c.req.param('id');
+    const result = await deps.db
+      .transaction(async (tx) => {
+        const [existing] = await tx
+          .select()
+          .from(cofounderCandidates)
+          .where(
+            and(
+              eq(cofounderCandidates.id, candidateId),
+              eq(cofounderCandidates.workspaceId, workspaceId),
+            ),
+          )
+          .limit(1);
 
-    if (!candidate) {
-      return c.json({ error: 'Candidate not found' }, 404);
-    }
+        if (!existing) return null;
 
-    return c.json(candidate);
+        const [candidate] = await tx
+          .update(cofounderCandidates)
+          .set({ status: body.status, updatedAt: new Date() })
+          .where(
+            and(
+              eq(cofounderCandidates.id, candidateId),
+              eq(cofounderCandidates.workspaceId, workspaceId),
+            ),
+          )
+          .returning();
+
+        if (!candidate) throw new Error('failed to update candidate status');
+
+        const auditEventId = randomUUID();
+        const replayRef = `cofounder-candidate:${workspaceId}:${candidateId}:status:${existing.status}->${body.status}`;
+        const auditMetadata = {
+          candidateId,
+          previousStatus: existing.status,
+          status: body.status,
+          evidenceContract: 'cofounder_candidate_status_evidence_required',
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'COFOUNDER_CANDIDATE_STATUS_UPDATED',
+          actor: `user:${c.get('userId') ?? 'unknown'}`,
+          target: candidateId,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'cofounder_candidate_status_updated',
+            replayRef,
+            ...auditMetadata,
+          },
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'cofounder_candidate_status_updated',
+          sourceType: 'gateway_founder',
+          title: `Cofounder candidate status updated: ${candidateId}`,
+          summary: `Cofounder candidate status changed from ${existing.status} to ${body.status}.`,
+          redactionState: 'none',
+          sensitivity: 'internal',
+          replayRef,
+          metadata: auditMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'cofounder_candidate_status_updated',
+              replayRef,
+              evidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return { candidate, evidenceItemId };
+      })
+      .catch(() => undefined);
+
+    if (result === null) return c.json({ error: 'Candidate not found' }, 404);
+    if (result === undefined)
+      return c.json({ error: 'Failed to update candidate status evidence' }, 500);
+
+    return c.json({ ...result.candidate, evidenceItemId: result.evidenceItemId });
   });
 
   // Legacy compatibility routes while surfaces migrate.
