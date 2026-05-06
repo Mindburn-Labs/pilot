@@ -67,6 +67,65 @@ function updatedValue(deps: ReturnType<typeof createMockDeps>, table: unknown) {
   return builder.set.mock.calls[0]?.[0] as Record<string, unknown>;
 }
 
+function createDecisionCourtPersistenceDb(options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => [mockOpportunity({ id: 'opp-1', workspaceId })]),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'decision-court-evidence-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => ({
+        where: vi.fn(async () => {
+          updateSink.push({ table, value });
+          return [];
+        }),
+      })),
+    })),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const result = await callback(createDbFacade(stagedInserts, stagedUpdates));
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates };
+}
+
 describe('decideRoutes', () => {
   it('requires partner role to run Decision Court', async () => {
     const deps = createMockDeps();
@@ -221,5 +280,20 @@ describe('decideRoutes', () => {
       ...auditMetadata,
       evidenceItemId: expect.any(String),
     });
+  });
+
+  it('fails closed without committing Decision Court audit when evidence persistence fails', async () => {
+    const { db, inserts, updates } = createDecisionCourtPersistenceDb({
+      failEvidence: true,
+    });
+    const deps = createMockDeps({ db: db as never });
+    const { fetch } = testApp(decideRoutes, deps);
+
+    const res = await fetch('POST', '/court', { opportunityIds: ['opp-1'] }, partnerHeaders);
+    const body = await expectJson<{ error: string; capability?: unknown }>(res, 500);
+
+    expect(body.error).toContain('evidence unavailable');
+    expect(inserts).toEqual([]);
+    expect(updates).toEqual([]);
   });
 });
