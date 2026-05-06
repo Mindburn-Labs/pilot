@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { auditLog, cofounderCandidates, evidenceItems } from '@pilot/db/schema';
+import {
+  auditLog,
+  cofounderCandidates,
+  evidenceItems,
+  founderAssessments,
+  founderProfiles,
+} from '@pilot/db/schema';
 import { founderRoutes } from '../../routes/founder.js';
 import { testApp, expectJson, createMockDeps } from '../helpers.js';
 
@@ -91,6 +97,186 @@ function createCandidateStatusDb(
   return { db, inserts, updates };
 }
 
+function createFounderProfileDb(
+  workspaceId: string,
+  options: { failEvidence?: boolean; profile?: Record<string, unknown> } = {},
+) {
+  const profile = options.profile ?? {
+    id: 'fp-1',
+    workspaceId,
+    name: 'Test Founder',
+    background: null,
+    experience: null,
+    interests: [],
+    createdAt: new Date('2026-01-01'),
+    updatedAt: new Date('2026-01-01'),
+  };
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => []),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        if (table === founderProfiles) {
+          return {
+            onConflictDoUpdate: vi.fn(() => ({
+              returning: vi.fn(async () => [profile]),
+            })),
+            returning: vi.fn(async () => [profile]),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([profile]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([profile]).catch(reject),
+          };
+        }
+        return {
+          returning: vi.fn(async () => {
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-founder-profile-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, profile };
+}
+
+function createFounderAssessmentDb(
+  workspaceId: string,
+  options: {
+    failEvidence?: boolean;
+    existingProfile?: Record<string, unknown> | null;
+    assessment?: Record<string, unknown>;
+  } = {},
+) {
+  const existingProfile =
+    'existingProfile' in options ? options.existingProfile : { id: 'fp-1', workspaceId };
+  const assessment = options.assessment ?? {
+    id: 'fa-1',
+    founderId: 'fp-1',
+    assessmentType: 'personality',
+    responses: { q1: 'a1', q2: 'a2' },
+    analysis: null,
+    createdAt: new Date('2026-01-01'),
+  };
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => (existingProfile ? [existingProfile] : [])),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === founderAssessments) return [assessment];
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-founder-assessment-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, assessment };
+}
+
 describe('founderRoutes', () => {
   let deps: ReturnType<typeof createMockDeps>;
   let fetch: ReturnType<typeof testApp>['fetch'];
@@ -139,6 +325,22 @@ describe('founderRoutes', () => {
   // ── POST /:workspaceId ──
 
   describe('POST /:workspaceId', () => {
+    it('denies members from upserting founder profiles', async () => {
+      const res = await fetch(
+        'POST',
+        '/ws-1',
+        {
+          name: 'Test Founder',
+        },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+      expect(deps.db.insert).not.toHaveBeenCalled();
+    });
+
     it('returns 400 on invalid body (empty name)', async () => {
       const res = await fetch(
         'POST',
@@ -154,29 +356,10 @@ describe('founderRoutes', () => {
     });
 
     it('creates/upserts founder profile and returns 201', async () => {
-      const profile = {
-        id: 'fp-1',
-        workspaceId: 'ws-1',
-        name: 'Test Founder',
-        background: null,
-        experience: null,
-        interests: [],
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      };
+      const { db, inserts, updates } = createFounderProfileDb('ws-1');
+      const scoped = testApp(founderRoutes, createMockDeps({ db: db as never }));
 
-      deps.db.insert = vi.fn(() => ({
-        values: vi.fn(() => ({
-          onConflictDoUpdate: vi.fn(() => ({
-            returning: vi.fn(async () => [profile]),
-            then: (r: any) => r([profile]),
-          })),
-          returning: vi.fn(async () => [profile]),
-          then: (r: any) => r([profile]),
-        })),
-      })) as any;
-
-      const res = await fetch(
+      const res = await scoped.fetch(
         'POST',
         '/ws-1',
         {
@@ -188,12 +371,89 @@ describe('founderRoutes', () => {
 
       expect(json.id).toBe('fp-1');
       expect(json.name).toBe('Test Founder');
+      expect(json.evidenceItemId).toBe('evidence-founder-profile-1');
+      expect(inserts.map((insert) => insert.table)).toEqual([
+        founderProfiles,
+        auditLog,
+        evidenceItems,
+      ]);
+      expect(updates.map((update) => update.table)).toEqual([auditLog]);
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'FOUNDER_PROFILE_UPSERTED',
+        actor: 'user:user-1',
+        target: 'fp-1',
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'founder_profile_upserted',
+          replayRef: 'founder-profile:ws-1:fp-1:upsert',
+          founderProfileId: 'fp-1',
+          fields: ['name', 'interests'],
+          evidenceContract: 'founder_profile_evidence_required',
+        },
+      });
+      expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        auditEventId: auditInsert.id,
+        evidenceType: 'founder_profile_upserted',
+        sourceType: 'gateway_founder',
+        replayRef: 'founder-profile:ws-1:fp-1:upsert',
+        metadata: {
+          founderProfileId: 'fp-1',
+          fields: ['name', 'interests'],
+          evidenceContract: 'founder_profile_evidence_required',
+        },
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: {
+          evidenceItemId: 'evidence-founder-profile-1',
+        },
+      });
+    });
+
+    it('fails closed without committing profile when evidence persistence fails', async () => {
+      const { db, inserts, updates } = createFounderProfileDb('ws-1', { failEvidence: true });
+      const scoped = testApp(founderRoutes, createMockDeps({ db: db as never }));
+
+      const res = await scoped.fetch(
+        'POST',
+        '/ws-1',
+        {
+          name: 'Test Founder',
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to upsert founder profile evidence');
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
     });
   });
 
   // ── POST /:founderId/assessment ──
 
   describe('POST /:founderId/assessment', () => {
+    it('denies members from creating founder assessments', async () => {
+      const res = await fetch(
+        'POST',
+        '/fp-1/assessment',
+        {
+          assessmentType: 'personality',
+          responses: { q1: 'a1', q2: 'a2' },
+        },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+      expect(deps.db.insert).not.toHaveBeenCalled();
+    });
+
     it('returns 400 when required fields are missing', async () => {
       const res = await fetch(
         'POST',
@@ -209,29 +469,29 @@ describe('founderRoutes', () => {
       expect(json.error).toBe('assessmentType and responses are required');
     });
 
+    it('returns 404 when the founder profile is outside the workspace', async () => {
+      const { db } = createFounderAssessmentDb('ws-1', { existingProfile: null });
+      const scoped = testApp(founderRoutes, createMockDeps({ db: db as never }));
+
+      const res = await scoped.fetch(
+        'POST',
+        '/fp-1/assessment',
+        {
+          assessmentType: 'personality',
+          responses: { q1: 'a1', q2: 'a2' },
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 404);
+
+      expect(json.error).toBe('Founder profile not found');
+    });
+
     it('creates assessment and returns 201', async () => {
-      const assessment = {
-        id: 'fa-1',
-        founderId: 'fp-1',
-        assessmentType: 'personality',
-        responses: { q1: 'a1', q2: 'a2' },
-        analysis: null,
-        createdAt: new Date(),
-      };
+      const { db, inserts, updates } = createFounderAssessmentDb('ws-1');
+      const scoped = testApp(founderRoutes, createMockDeps({ db: db as never }));
 
-      deps.db.insert = vi.fn(() => ({
-        values: vi.fn(() => ({
-          returning: vi.fn(async () => [assessment]),
-          then: (r: any) => r([assessment]),
-        })),
-      })) as any;
-      const origSelect = deps.db.select;
-      deps.db.select = vi.fn(() => {
-        deps.db._setResult([{ id: 'fp-1' }]);
-        return origSelect();
-      }) as any;
-
-      const res = await fetch(
+      const res = await scoped.fetch(
         'POST',
         '/fp-1/assessment',
         {
@@ -244,6 +504,69 @@ describe('founderRoutes', () => {
 
       expect(json.id).toBe('fa-1');
       expect(json.assessmentType).toBe('personality');
+      expect(json.evidenceItemId).toBe('evidence-founder-assessment-1');
+      expect(inserts.map((insert) => insert.table)).toEqual([
+        founderAssessments,
+        auditLog,
+        evidenceItems,
+      ]);
+      expect(updates.map((update) => update.table)).toEqual([auditLog]);
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'FOUNDER_ASSESSMENT_CREATED',
+        actor: 'user:user-1',
+        target: 'fa-1',
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'founder_assessment_created',
+          replayRef: 'founder-assessment:ws-1:fp-1:fa-1',
+          founderId: 'fp-1',
+          assessmentId: 'fa-1',
+          assessmentType: 'personality',
+          evidenceContract: 'founder_assessment_evidence_required',
+        },
+      });
+      expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        auditEventId: auditInsert.id,
+        evidenceType: 'founder_assessment_created',
+        sourceType: 'gateway_founder',
+        replayRef: 'founder-assessment:ws-1:fp-1:fa-1',
+        metadata: {
+          founderId: 'fp-1',
+          assessmentId: 'fa-1',
+          assessmentType: 'personality',
+          evidenceContract: 'founder_assessment_evidence_required',
+        },
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: {
+          evidenceItemId: 'evidence-founder-assessment-1',
+        },
+      });
+    });
+
+    it('fails closed without committing assessment when evidence persistence fails', async () => {
+      const { db, inserts, updates } = createFounderAssessmentDb('ws-1', { failEvidence: true });
+      const scoped = testApp(founderRoutes, createMockDeps({ db: db as never }));
+
+      const res = await scoped.fetch(
+        'POST',
+        '/fp-1/assessment',
+        {
+          assessmentType: 'personality',
+          responses: { q1: 'a1', q2: 'a2' },
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to create founder assessment evidence');
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
     });
   });
 
