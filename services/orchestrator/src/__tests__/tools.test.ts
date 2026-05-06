@@ -157,17 +157,25 @@ function createComputerActionDb(options: { failEvidenceInsert?: boolean } = {}) 
   };
 }
 
-function createArtifactDb() {
+function createArtifactDb(options: { failEvidenceInsert?: boolean } = {}) {
   const insertedArtifacts: unknown[] = [];
   const insertedArtifactVersions: unknown[] = [];
   const insertedEvidenceItems: unknown[] = [];
   const insertedAudit: unknown[] = [];
   const updatedAudit: unknown[] = [];
-  const db = {
+  const transactionInsertOrder: string[] = [];
+
+  const createDbFacade = (
+    artifactSink: unknown[],
+    artifactVersionSink: unknown[],
+    evidenceSink: unknown[],
+    auditSink: unknown[],
+    auditUpdateSink: unknown[],
+  ) => ({
     insert: vi.fn((table: unknown) => ({
       values: vi.fn((value: unknown) => {
         if (table === artifacts) {
-          insertedArtifacts.push(value);
+          artifactSink.push(value);
           return {
             returning: vi.fn(async () => [
               {
@@ -179,21 +187,27 @@ function createArtifactDb() {
           };
         }
         if (table === artifactVersions) {
-          insertedArtifactVersions.push(value);
+          transactionInsertOrder.push('artifact_versions');
+          artifactVersionSink.push(value);
           return {};
         }
         if (table === auditLog) {
-          insertedAudit.push(value);
+          transactionInsertOrder.push('audit_log');
+          auditSink.push(value);
           return {};
         }
         if (table === evidenceItems) {
-          insertedEvidenceItems.push(value);
+          transactionInsertOrder.push('evidence_items');
+          evidenceSink.push(value);
           return {
-            returning: vi.fn(async () => [
-              {
-                id: '00000000-0000-4000-8000-000000000021',
-              },
-            ]),
+            returning: vi.fn(async () => {
+              if (options.failEvidenceInsert) throw new Error('evidence ledger unavailable');
+              return [
+                {
+                  id: '00000000-0000-4000-8000-000000000021',
+                },
+              ];
+            }),
           };
         }
         return { returning: vi.fn(async () => []) };
@@ -201,10 +215,42 @@ function createArtifactDb() {
     })),
     update: vi.fn((table: unknown) => ({
       set: vi.fn((value: unknown) => {
-        if (table === auditLog) updatedAudit.push(value);
+        if (table === auditLog) auditUpdateSink.push(value);
         return { where: vi.fn(async () => []) };
       }),
     })),
+  });
+
+  const db = {
+    ...createDbFacade(
+      insertedArtifacts,
+      insertedArtifactVersions,
+      insertedEvidenceItems,
+      insertedAudit,
+      updatedAudit,
+    ),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedArtifacts: unknown[] = [];
+      const stagedArtifactVersions: unknown[] = [];
+      const stagedEvidenceItems: unknown[] = [];
+      const stagedAudit: unknown[] = [];
+      const stagedAuditUpdates: unknown[] = [];
+      const result = await callback(
+        createDbFacade(
+          stagedArtifacts,
+          stagedArtifactVersions,
+          stagedEvidenceItems,
+          stagedAudit,
+          stagedAuditUpdates,
+        ),
+      );
+      insertedArtifacts.push(...stagedArtifacts);
+      insertedArtifactVersions.push(...stagedArtifactVersions);
+      insertedEvidenceItems.push(...stagedEvidenceItems);
+      insertedAudit.push(...stagedAudit);
+      updatedAudit.push(...stagedAuditUpdates);
+      return result;
+    }),
   };
   return {
     db,
@@ -213,6 +259,7 @@ function createArtifactDb() {
     insertedEvidenceItems,
     insertedAudit,
     updatedAudit,
+    transactionInsertOrder,
   };
 }
 
@@ -782,6 +829,7 @@ describe('ToolRegistry', () => {
         insertedEvidenceItems,
         insertedAudit,
         updatedAudit,
+        transactionInsertOrder,
       } = createArtifactDb();
       const registry = createRegistryWithDb(db);
 
@@ -857,6 +905,9 @@ describe('ToolRegistry', () => {
           evidenceItemId: '00000000-0000-4000-8000-000000000021',
         }),
       });
+      expect(transactionInsertOrder.indexOf('audit_log')).toBeLessThan(
+        transactionInsertOrder.indexOf('evidence_items'),
+      );
       expect(result).toMatchObject({
         id: '00000000-0000-4000-8000-000000000020',
         name: 'pilot-homepage-copy.md',
@@ -864,6 +915,39 @@ describe('ToolRegistry', () => {
         version: 1,
         evidenceItemId: '00000000-0000-4000-8000-000000000021',
       });
+    });
+
+    it('does not commit artifact state when evidence persistence fails', async () => {
+      const workspaceId = '00000000-0000-4000-8000-000000000001';
+      const taskId = '00000000-0000-4000-8000-000000000002';
+      const actionId = '00000000-0000-4000-8000-000000000003';
+      const {
+        db,
+        insertedArtifacts,
+        insertedArtifactVersions,
+        insertedEvidenceItems,
+        insertedAudit,
+        updatedAudit,
+      } = createArtifactDb({ failEvidenceInsert: true });
+      const registry = createRegistryWithDb(db);
+
+      const result = await registry.execute(
+        'create_artifact',
+        {
+          type: 'landing_page',
+          name: 'pilot-homepage-copy.md',
+          description: 'Homepage copy draft',
+          content: '# Pilot\nAutonomous founder OS',
+        },
+        { workspaceId, taskId, actionId },
+      );
+
+      expect(result).toEqual({ error: 'evidence ledger unavailable' });
+      expect(insertedArtifacts).toEqual([]);
+      expect(insertedArtifactVersions).toEqual([]);
+      expect(insertedEvidenceItems).toEqual([]);
+      expect(insertedAudit).toEqual([]);
+      expect(updatedAudit).toEqual([]);
     });
   });
 
