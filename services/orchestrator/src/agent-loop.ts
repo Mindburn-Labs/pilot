@@ -290,12 +290,17 @@ export class AgentLoop {
       // Phase 16 Track N — snapshot every N iterations so a crashed
       // orchestrator can rehydrate at boot from the latest checkpoint.
       if (iteration % CHECKPOINT_EVERY_N_ITERATIONS === 0 && this.lastTaskRunId) {
-        await writeCheckpoint(this.db, this.lastTaskRunId, {
-          iteration,
-          actions,
-          runUsage: this.runUsage,
-          runCost: this.runCost,
-        });
+        await writeCheckpoint(
+          this.db,
+          this.lastTaskRunId,
+          {
+            iteration,
+            actions,
+            runUsage: this.runUsage,
+            runCost: this.runCost,
+          },
+          { required: true },
+        );
       }
 
       // 4. Check if LLM signalled done via a special tool

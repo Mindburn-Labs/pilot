@@ -129,6 +129,42 @@ describe('AgentLoop', () => {
     expect(mockLlm.complete).toHaveBeenCalledTimes(3);
   });
 
+  it('fails closed when required long-run checkpoint persistence fails', async () => {
+    let updateCount = 0;
+    const db = {
+      ...mockDb,
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn(async () => [{ id: 'task-run-1' }]),
+        })),
+      })),
+      update: vi.fn(() => {
+        updateCount++;
+        if (updateCount === 1) {
+          throw new Error('checkpoint store unavailable');
+        }
+        return {
+          set: vi.fn(() => ({
+            where: vi.fn(async () => []),
+          })),
+        };
+      }),
+    } as any;
+    const llm = {
+      complete: vi.fn(async () => '{"tool":"search","input":{}}'),
+    } as any;
+    const loop = new AgentLoop(db, mockTrust);
+    loop.setLlm(llm);
+    loop.setTools(mockTools);
+    mockTrust.evaluate.mockReturnValue({ verdict: 'allow' });
+
+    await expect(loop.execute({ ...baseParams(), iterationBudget: 10 })).rejects.toThrow(
+      'Checkpoint persistence failed for task run task-run-1: checkpoint store unavailable',
+    );
+    expect(llm.complete).toHaveBeenCalledTimes(10);
+    expect(mockTools.execute).toHaveBeenCalledTimes(10);
+  });
+
   it('execute() stops on trust deny and returns blocked', async () => {
     const loop = new AgentLoop(mockDb, mockTrust);
     loop.setLlm(mockLlm);
