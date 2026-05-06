@@ -148,6 +148,82 @@ describe('a2aRoutes', () => {
     expect(deps.db.insert).toHaveBeenCalledWith(a2aMessages);
   });
 
+  it('does not commit A2A thread state when message persistence fails', async () => {
+    const deps = createMockDeps();
+    const committedThreads: unknown[] = [];
+    const committedMessages: unknown[] = [];
+    deps.db.insert = vi.fn((table: unknown) => {
+      if (table === a2aThreads || table === a2aMessages) {
+        throw new Error('A2A durable state must be persisted inside a transaction');
+      }
+      return {
+        values: vi.fn(() => ({
+          returning: vi.fn(async () => [{ id: 'task-row-1' }]),
+        })),
+      };
+    }) as unknown as typeof deps.db.insert;
+    deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedThreads: unknown[] = [];
+      const stagedMessages: unknown[] = [];
+      const tx = {
+        ...deps.db,
+        insert: vi.fn((table: unknown) => ({
+          values: vi.fn((value: unknown) => {
+            if (table === a2aThreads) {
+              stagedThreads.push(value);
+              return { returning: vi.fn(async () => [{ id: 'thread-1' }]) };
+            }
+            if (table === a2aMessages) {
+              stagedMessages.push(value);
+              throw new Error('a2a message ledger unavailable');
+            }
+            return {
+              returning: vi.fn(async () => [{ id: 'task-row-1' }]),
+            };
+          }),
+        })),
+      };
+      const result = await callback(tx);
+      committedThreads.push(...stagedThreads);
+      committedMessages.push(...stagedMessages);
+      return result;
+    }) as typeof deps.db.transaction;
+    const runConductMock = vi.fn(async () => ({
+      status: 'completed',
+      actions: [{ tool: 'finish', input: { summary: 'All done.' } }],
+    }));
+    (deps.orchestrator as unknown as { runConduct: typeof runConductMock }).runConduct =
+      runConductMock;
+
+    const { fetch } = testApp(a2aRoutes, deps);
+    const res = await fetch(
+      'POST',
+      '/a2a',
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tasks/send',
+        params: {
+          message: {
+            role: 'user',
+            parts: [{ type: 'text', text: 'Find AI opportunities' }],
+          },
+        },
+      },
+      { authorization: `Bearer ${BEARER}` },
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { error?: { code: number; message: string } };
+    expect(body.error).toMatchObject({
+      code: -32603,
+      message: 'a2a message ledger unavailable',
+    });
+    expect(runConductMock).toHaveBeenCalledTimes(1);
+    expect(committedThreads).toEqual([]);
+    expect(committedMessages).toEqual([]);
+  });
+
   it('tasks/get reconstructs durable A2A state from DB after route re-instantiation', async () => {
     const deps = createMockDeps();
     let selectCount = 0;
