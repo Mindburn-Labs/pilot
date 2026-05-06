@@ -652,6 +652,80 @@ describe('founderRoutes', () => {
     });
   });
 
+  describe('POST /candidates/:id/score', () => {
+    it('denies members from scoring cofounder candidates', async () => {
+      const res = await fetch(
+        'POST',
+        '/candidates/cand-1/score',
+        undefined,
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('passes actor context and returns score evidence metadata', async () => {
+      const scoreCandidate = vi.fn(async () => ({
+        id: 'eval-1',
+        workspaceId: 'ws-1',
+        candidateId: 'cand-1',
+        overallScore: 82,
+        evidenceItemId: 'evidence-candidate-score-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { scoreCandidate } as never,
+        }),
+      );
+
+      const res = await scoped.fetch('POST', '/candidates/cand-1/score', undefined, wsHeader);
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        id: 'eval-1',
+        evidenceItemId: 'evidence-candidate-score-1',
+      });
+      expect(scoreCandidate).toHaveBeenCalledWith('ws-1', 'cand-1', { actorUserId: 'user-1' });
+    });
+
+    it('returns 404 when the candidate is not in the workspace', async () => {
+      const scoreCandidate = vi.fn(async () => {
+        throw new Error('Candidate not found');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { scoreCandidate } as never,
+        }),
+      );
+
+      const res = await scoped.fetch('POST', '/candidates/cand-1/score', undefined, wsHeader);
+      const json = await expectJson<{ error: string }>(res, 404);
+
+      expect(json.error).toBe('Candidate not found');
+    });
+
+    it('fails closed when score evidence fails', async () => {
+      const scoreCandidate = vi.fn(async () => {
+        throw new Error('evidence unavailable');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { scoreCandidate } as never,
+        }),
+      );
+
+      const res = await scoped.fetch('POST', '/candidates/cand-1/score', undefined, wsHeader);
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to score candidate evidence');
+    });
+  });
+
   describe('PUT /candidates/:id/status', () => {
     it('denies members from mutating candidate status', async () => {
       const res = await fetch(
