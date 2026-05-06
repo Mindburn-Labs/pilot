@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   auditLog,
   cofounderCandidates,
+  cofounderCandidateNotes,
   cofounderCandidateSources,
   cofounderMatchEvaluations,
   evidenceItems,
@@ -215,6 +216,98 @@ function createCandidateScoreDb(
   return { db, inserts, updates };
 }
 
+function createCandidateNoteDb(
+  options: {
+    failEvidence?: boolean;
+    existingCandidate?: Record<string, unknown> | null;
+  } = {},
+) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const existingCandidate =
+    'existingCandidate' in options
+      ? options.existingCandidate
+      : {
+          id: 'candidate-1',
+          workspaceId: 'ws-1',
+          name: 'Candidate One',
+          status: 'reviewing',
+          createdAt: new Date('2026-01-01'),
+          updatedAt: new Date('2026-01-01'),
+        };
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => (table === cofounderCandidates && existingCandidate ? [existingCandidate] : [])),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === cofounderCandidateNotes) {
+              return [
+                {
+                  id: 'note-1',
+                  ...value,
+                  createdAt: new Date('2026-01-02'),
+                },
+              ];
+            }
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-candidate-note-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+  };
+
+  return { db, inserts, updates };
+}
+
 describe('CofounderEngine candidate creation evidence', () => {
   it('writes audit-linked evidence when creating a candidate', async () => {
     const { db, inserts, updates } = createCandidateCreationDb();
@@ -384,6 +477,103 @@ describe('CofounderEngine candidate score evidence', () => {
 
     await expect(
       engine.scoreCandidate('ws-1', 'candidate-1', { actorUserId: 'user-1' }),
+    ).rejects.toThrow('evidence unavailable');
+
+    expect(inserts).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+});
+
+describe('CofounderEngine candidate note evidence', () => {
+  it('writes audit-linked evidence when adding a candidate note', async () => {
+    const { db, inserts, updates } = createCandidateNoteDb();
+    const engine = new CofounderEngine(db as never);
+
+    const result = await engine.addCandidateNote(
+      'ws-1',
+      'candidate-1',
+      'Strong technical complement.',
+      'note',
+      'user-1',
+      { actorUserId: 'user-1' },
+    );
+
+    expect(result).toMatchObject({
+      id: 'note-1',
+      candidateId: 'candidate-1',
+      evidenceItemId: 'evidence-candidate-note-1',
+    });
+    expect(inserts.map((insert) => insert.table)).toEqual([
+      cofounderCandidateNotes,
+      auditLog,
+      evidenceItems,
+    ]);
+    expect(updates.map((update) => update.table)).toEqual([auditLog]);
+
+    const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+      id: string;
+    };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      action: 'COFOUNDER_CANDIDATE_NOTE_ADDED',
+      actor: 'user:user-1',
+      target: 'candidate-1',
+      verdict: 'allow',
+      metadata: {
+        evidenceType: 'cofounder_candidate_note_added',
+        replayRef: 'cofounder-candidate:ws-1:candidate-1:note:note-1',
+        candidateId: 'candidate-1',
+        noteId: 'note-1',
+        noteType: 'note',
+        hasUserId: true,
+        contentLength: 28,
+        evidenceContract: 'cofounder_candidate_note_evidence_required',
+      },
+    });
+    expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+      workspaceId: 'ws-1',
+      auditEventId: auditInsert.id,
+      evidenceType: 'cofounder_candidate_note_added',
+      sourceType: 'cofounder_engine',
+      redactionState: 'redacted',
+      replayRef: 'cofounder-candidate:ws-1:candidate-1:note:note-1',
+      metadata: {
+        candidateId: 'candidate-1',
+        noteId: 'note-1',
+        evidenceContract: 'cofounder_candidate_note_evidence_required',
+      },
+    });
+    expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+      metadata: {
+        evidenceItemId: 'evidence-candidate-note-1',
+      },
+    });
+  });
+
+  it('rejects notes for candidates outside the workspace', async () => {
+    const { db, inserts, updates } = createCandidateNoteDb({
+      existingCandidate: { id: 'candidate-1', workspaceId: 'other-ws' },
+    });
+    const engine = new CofounderEngine(db as never);
+
+    await expect(
+      engine.addCandidateNote('ws-1', 'candidate-1', 'Nope', 'note', 'user-1', {
+        actorUserId: 'user-1',
+      }),
+    ).rejects.toThrow('Candidate not found');
+
+    expect(inserts).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+
+  it('rolls back note persistence when evidence persistence fails', async () => {
+    const { db, inserts, updates } = createCandidateNoteDb({ failEvidence: true });
+    const engine = new CofounderEngine(db as never);
+
+    await expect(
+      engine.addCandidateNote('ws-1', 'candidate-1', 'Nope', 'note', 'user-1', {
+        actorUserId: 'user-1',
+      }),
     ).rejects.toThrow('evidence unavailable');
 
     expect(inserts).toEqual([]);

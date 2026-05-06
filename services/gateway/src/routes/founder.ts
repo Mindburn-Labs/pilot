@@ -162,6 +162,8 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/candidates/:id/notes', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'add cofounder candidate note');
+    if (roleDenied) return roleDenied;
     if (!deps.cofounderEngine) return c.json({ error: 'Cofounder engine unavailable' }, 503);
 
     const raw = await c.req.json();
@@ -171,14 +173,22 @@ export function founderRoutes(deps: GatewayDeps) {
     }
 
     const { id } = c.req.param();
-    const note = await deps.cofounderEngine.addCandidateNote(
-      workspaceId,
-      id,
-      parsed.data.content,
-      parsed.data.noteType,
-      c.get('userId'),
-    );
-    return c.json(note, 201);
+    try {
+      const note = await deps.cofounderEngine.addCandidateNote(
+        workspaceId,
+        id,
+        parsed.data.content,
+        parsed.data.noteType,
+        c.get('userId'),
+        { actorUserId: c.get('userId') },
+      );
+      return c.json(note, 201);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Candidate not found') {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: 'Failed to add candidate note evidence' }, 500);
+    }
   });
 
   app.post('/candidates/:id/outreach', async (c) => {
@@ -214,20 +224,30 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/candidates/:id/conversations', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'add cofounder candidate conversation');
+    if (roleDenied) return roleDenied;
     if (!deps.cofounderEngine) return c.json({ error: 'Cofounder engine unavailable' }, 503);
 
     const body = (await c.req.json().catch(() => ({}))) as { content?: string };
     if (!body.content) return c.json({ error: 'content required' }, 400);
 
     const { id } = c.req.param();
-    const note = await deps.cofounderEngine.addCandidateNote(
-      workspaceId,
-      id,
-      body.content,
-      'conversation',
-      c.get('userId'),
-    );
-    return c.json(note, 201);
+    try {
+      const note = await deps.cofounderEngine.addCandidateNote(
+        workspaceId,
+        id,
+        body.content,
+        'conversation',
+        c.get('userId'),
+        { actorUserId: c.get('userId') },
+      );
+      return c.json(note, 201);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Candidate not found') {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: 'Failed to add candidate conversation evidence' }, 500);
+    }
   });
 
   app.put('/candidates/:id/status', async (c) => {

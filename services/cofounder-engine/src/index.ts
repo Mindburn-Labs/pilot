@@ -487,19 +487,84 @@ export class CofounderEngine {
     content: string,
     noteType = 'note',
     userId?: string,
+    auditContext: CofounderAuditContext = {},
   ) {
-    const [note] = await this.db
-      .insert(cofounderCandidateNotes)
-      .values({
-        workspaceId,
-        candidateId,
-        userId,
-        noteType,
-        content,
-      })
-      .returning();
+    const [candidate] = await this.db
+      .select()
+      .from(cofounderCandidates)
+      .where(eq(cofounderCandidates.id, candidateId))
+      .limit(1);
 
-    return note;
+    if (!candidate || candidate.workspaceId !== workspaceId) {
+      throw new Error('Candidate not found');
+    }
+
+    return this.db.transaction(async (tx) => {
+      const [note] = await tx
+        .insert(cofounderCandidateNotes)
+        .values({
+          workspaceId,
+          candidateId,
+          userId,
+          noteType,
+          content,
+        })
+        .returning();
+
+      if (!note) throw new Error('Failed to add cofounder candidate note');
+
+      const auditEventId = randomUUID();
+      const replayRef = `cofounder-candidate:${workspaceId}:${candidateId}:note:${note.id}`;
+      const auditMetadata = {
+        candidateId,
+        noteId: note.id,
+        noteType,
+        hasUserId: Boolean(userId),
+        contentLength: content.length,
+        evidenceContract: 'cofounder_candidate_note_evidence_required',
+      };
+
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'COFOUNDER_CANDIDATE_NOTE_ADDED',
+        actor: `user:${auditContext.actorUserId ?? userId ?? 'unknown'}`,
+        target: candidateId,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'cofounder_candidate_note_added',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: 'cofounder_candidate_note_added',
+        sourceType: 'cofounder_engine',
+        title: `Cofounder candidate note added: ${candidateId}`,
+        summary: `A ${noteType} note was added to cofounder candidate ${candidateId}.`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'cofounder_candidate_note_added',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { ...note, evidenceItemId };
+    });
   }
 
   async createOutreachDraft(
