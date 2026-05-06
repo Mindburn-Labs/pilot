@@ -1132,8 +1132,8 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
         .map((node) => node.nodeKey),
     );
 
-    const ready = [];
-    const blocked = [];
+    const ready: ScheduledStartupMissionNode[] = [];
+    const blocked: ScheduledStartupMissionNode[] = [];
     for (const node of nodeRows.filter((item) => item.status === 'pending')) {
       const waitingOn = edgeRows
         .filter((edge) => edge.toNodeKey === node.nodeKey)
@@ -1142,7 +1142,7 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
       const scheduledNode = {
         nodeId: node.id,
         nodeKey: node.nodeKey,
-        stage: node.stage,
+        stage: StartupLifecycleStageSchema.parse(node.stage),
         title: node.title,
         taskId: taskIdByNodeId.get(node.id),
         waitingOn,
@@ -1157,39 +1157,44 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
       }
     }
 
-    for (const node of ready) {
-      await _deps.db
-        .update(missionNodes)
-        .set({ status: 'ready', updatedAt: new Date() })
-        .where(and(eq(missionNodes.id, node.nodeId), eq(missionNodes.workspaceId, workspaceId)));
-    }
+    const evidenceItemId = await _deps.db.transaction(async (tx) => {
+      const db = tx as unknown as typeof _deps.db;
+      const scheduledAt = new Date();
+      for (const node of ready) {
+        await db
+          .update(missionNodes)
+          .set({ status: 'ready', updatedAt: scheduledAt })
+          .where(and(eq(missionNodes.id, node.nodeId), eq(missionNodes.workspaceId, workspaceId)));
+      }
 
-    await _deps.db
-      .update(missions)
-      .set({ status: 'scheduled_not_executing', updatedAt: new Date() })
-      .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+      await db
+        .update(missions)
+        .set({ status: 'scheduled_not_executing', updatedAt: scheduledAt })
+        .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
 
-    const evidenceItemId = await appendEvidenceItem(_deps.db, {
-      workspaceId,
-      ventureId: mission.ventureId ?? null,
-      missionId: mission.id,
-      evidenceType: 'startup_lifecycle_nodes_scheduled',
-      sourceType: 'gateway_startup_lifecycle',
-      title: `Startup lifecycle nodes scheduled: ${mission.title}`,
-      summary: `${ready.length} ready node(s), ${blocked.length} blocked node(s)`,
-      redactionState: 'redacted',
-      sensitivity: 'internal',
-      contentHash: hashJson({ ready, blocked }),
-      replayRef: `mission:${mission.id}:schedule`,
-      metadata: {
-        schedulerVersion: 'mission-scheduler.v1',
-        readyNodeKeys: ready.map((node) => node.nodeKey),
-        blockedNodeKeys: blocked.map((node) => node.nodeKey),
-        queuedTaskIds: ready
-          .map((node) => node.taskId)
-          .filter((taskId): taskId is string => Boolean(taskId)),
-        productionReady: false,
-      },
+      return appendEvidenceItem(db, {
+        workspaceId,
+        ventureId: mission.ventureId ?? null,
+        missionId: mission.id,
+        evidenceType: 'startup_lifecycle_nodes_scheduled',
+        sourceType: 'gateway_startup_lifecycle',
+        title: `Startup lifecycle nodes scheduled: ${mission.title}`,
+        summary: `${ready.length} ready node(s), ${blocked.length} blocked node(s)`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        contentHash: hashJson({ ready, blocked }),
+        replayRef: `mission:${mission.id}:schedule`,
+        observedAt: scheduledAt,
+        metadata: {
+          schedulerVersion: 'mission-scheduler.v1',
+          readyNodeKeys: ready.map((node) => node.nodeKey),
+          blockedNodeKeys: blocked.map((node) => node.nodeKey),
+          queuedTaskIds: ready
+            .map((node) => node.taskId)
+            .filter((taskId): taskId is string => Boolean(taskId)),
+          productionReady: false,
+        },
+      });
     });
 
     const response = ScheduledStartupMissionSchema.parse({

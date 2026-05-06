@@ -105,6 +105,60 @@ function captureFailedPersistTransaction(deps: ReturnType<typeof createMockDeps>
   return committedInserts;
 }
 
+function captureFailedScheduleTransaction(deps: ReturnType<typeof createMockDeps>) {
+  const committedUpdates: Array<{ table: string; values: unknown }> = [];
+  const originalInsert = deps.db.insert;
+  const originalUpdate = deps.db.update;
+
+  const tableName = (table: unknown) => {
+    if (table === missionNodes) return 'missionNodes';
+    if (table === missions) return 'missions';
+    return 'unknown';
+  };
+  const captureUpdate = (sink: Array<{ table: string; values: unknown }>) =>
+    vi.fn((table: unknown) => {
+      if (table === missionNodes || table === missions) {
+        return {
+          set: vi.fn((values: unknown) => ({
+            where: vi.fn(async () => {
+              sink.push({ table: tableName(table), values });
+              return [];
+            }),
+          })),
+        };
+      }
+      return originalUpdate(table);
+    }) as typeof deps.db.update;
+  const captureInsert = (failEvidence: boolean) =>
+    vi.fn((table: unknown) => {
+      if (table === evidenceItems) {
+        return {
+          values: vi.fn(() => {
+            if (failEvidence) {
+              throw new Error('schedule evidence unavailable');
+            }
+            return { returning: vi.fn(async () => [{ id: 'evidence-item-1' }]) };
+          }),
+        };
+      }
+      return originalInsert(table);
+    }) as typeof deps.db.insert;
+
+  deps.db.update = captureUpdate(committedUpdates);
+  deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+    const stagedUpdates: Array<{ table: string; values: unknown }> = [];
+    const result = await callback({
+      ...deps.db,
+      insert: captureInsert(true),
+      update: captureUpdate(stagedUpdates),
+    });
+    committedUpdates.push(...stagedUpdates);
+    return result;
+  }) as typeof deps.db.transaction;
+
+  return committedUpdates;
+}
+
 function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof createMockDeps>) {
   const insertedEvidenceItems: unknown[] = [];
   const insertedAuditEvents: unknown[] = [];
@@ -623,6 +677,43 @@ describe('startupLifecycleRoutes', () => {
     });
     expect(body.executionStarted).toBe(false);
     expect(body.blockers.join(' ')).toContain('does not dispatch autonomous execution');
+    expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
+  });
+
+  it('does not commit scheduled node or mission state when schedule evidence fails', async () => {
+    const deps = createMockDeps();
+    const committedUpdates = captureFailedScheduleTransaction(deps);
+    const missionId = '00000000-0000-4000-8000-000000000030';
+    const nodeId = '00000000-0000-4000-8000-000000000031';
+    const selectResults = [
+      [{ id: missionId, workspaceId, status: 'persisted_not_executing' }],
+      [
+        {
+          id: nodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'founder_onboarding',
+          stage: 'founder_onboarding',
+          title: 'Founder DNA and access charter',
+          status: 'pending',
+        },
+      ],
+      [],
+      [],
+    ];
+    let selectCall = 0;
+    const originalSelect = deps.db.select;
+    deps.db.select = vi.fn(() => {
+      deps.db._setResult(selectResults[selectCall] ?? []);
+      selectCall += 1;
+      return originalSelect();
+    }) as typeof deps.db.select;
+
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch('POST', `/missions/${missionId}/schedule`, { maxNodes: 1 }, wsHeader);
+
+    expect(res.status).toBe(500);
+    expect(committedUpdates).toEqual([]);
     expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
   });
 
