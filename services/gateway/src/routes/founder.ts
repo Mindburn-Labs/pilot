@@ -194,6 +194,8 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/candidates/:id/outreach', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'create cofounder outreach draft');
+    if (roleDenied) return roleDenied;
     if (!deps.cofounderEngine) return c.json({ error: 'Cofounder engine unavailable' }, 503);
 
     const raw = await c.req.json();
@@ -203,22 +205,45 @@ export function founderRoutes(deps: GatewayDeps) {
     }
 
     const { id } = c.req.param();
-    const draft = await deps.cofounderEngine.createOutreachDraft(workspaceId, id, parsed.data);
-    return c.json(draft, 201);
+    try {
+      const draft = await deps.cofounderEngine.createOutreachDraft(workspaceId, id, parsed.data, {
+        actorUserId: c.get('userId'),
+      });
+      return c.json(draft, 201);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Candidate not found') {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: 'Failed to create outreach draft evidence' }, 500);
+    }
   });
 
   app.post('/candidates/:id/follow-ups', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'create cofounder follow-up');
+    if (roleDenied) return roleDenied;
     if (!deps.cofounderEngine) return c.json({ error: 'Cofounder engine unavailable' }, 503);
 
     const { id } = c.req.param();
     const body = (await c.req.json()) as { dueAt?: string; note?: string };
-    const followUp = await deps.cofounderEngine.createFollowUp(workspaceId, id, {
-      dueAt: body.dueAt ? new Date(body.dueAt) : undefined,
-      note: body.note,
-    });
-    return c.json(followUp, 201);
+    try {
+      const followUp = await deps.cofounderEngine.createFollowUp(
+        workspaceId,
+        id,
+        {
+          dueAt: body.dueAt ? new Date(body.dueAt) : undefined,
+          note: body.note,
+        },
+        { actorUserId: c.get('userId') },
+      );
+      return c.json(followUp, 201);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Candidate not found') {
+        return c.json({ error: error.message }, 404);
+      }
+      return c.json({ error: 'Failed to create follow-up evidence' }, 500);
+    }
   });
 
   app.post('/candidates/:id/conversations', async (c) => {

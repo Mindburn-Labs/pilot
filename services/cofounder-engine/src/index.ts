@@ -571,37 +571,167 @@ export class CofounderEngine {
     workspaceId: string,
     candidateId: string,
     input: { channel?: string; subject?: string; content: string },
+    auditContext: CofounderAuditContext = {},
   ) {
-    const [draft] = await this.db
-      .insert(cofounderOutreachDrafts)
-      .values({
-        workspaceId,
-        candidateId,
-        channel: input.channel ?? 'email',
-        subject: input.subject,
-        content: input.content,
-      })
-      .returning();
+    const [candidate] = await this.db
+      .select()
+      .from(cofounderCandidates)
+      .where(eq(cofounderCandidates.id, candidateId))
+      .limit(1);
 
-    return draft;
+    if (!candidate || candidate.workspaceId !== workspaceId) {
+      throw new Error('Candidate not found');
+    }
+
+    return this.db.transaction(async (tx) => {
+      const channel = input.channel ?? 'email';
+      const [draft] = await tx
+        .insert(cofounderOutreachDrafts)
+        .values({
+          workspaceId,
+          candidateId,
+          channel,
+          subject: input.subject,
+          content: input.content,
+        })
+        .returning();
+
+      if (!draft) throw new Error('Failed to create cofounder outreach draft');
+
+      const auditEventId = randomUUID();
+      const replayRef = `cofounder-candidate:${workspaceId}:${candidateId}:outreach:${draft.id}`;
+      const auditMetadata = {
+        candidateId,
+        draftId: draft.id,
+        channel,
+        hasSubject: Boolean(input.subject),
+        contentLength: input.content.length,
+        evidenceContract: 'cofounder_outreach_draft_evidence_required',
+      };
+
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'COFOUNDER_OUTREACH_DRAFT_CREATED',
+        actor: `user:${auditContext.actorUserId ?? 'unknown'}`,
+        target: candidateId,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'cofounder_outreach_draft_created',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: 'cofounder_outreach_draft_created',
+        sourceType: 'cofounder_engine',
+        title: `Cofounder outreach draft created: ${candidateId}`,
+        summary: `A ${channel} outreach draft was created for cofounder candidate ${candidateId}.`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'cofounder_outreach_draft_created',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { ...draft, evidenceItemId };
+    });
   }
 
   async createFollowUp(
     workspaceId: string,
     candidateId: string,
     input: { dueAt?: Date; note?: string },
+    auditContext: CofounderAuditContext = {},
   ) {
-    const [followUp] = await this.db
-      .insert(cofounderFollowUps)
-      .values({
-        workspaceId,
-        candidateId,
-        dueAt: input.dueAt,
-        note: input.note,
-      })
-      .returning();
+    const [candidate] = await this.db
+      .select()
+      .from(cofounderCandidates)
+      .where(eq(cofounderCandidates.id, candidateId))
+      .limit(1);
 
-    return followUp;
+    if (!candidate || candidate.workspaceId !== workspaceId) {
+      throw new Error('Candidate not found');
+    }
+
+    return this.db.transaction(async (tx) => {
+      const [followUp] = await tx
+        .insert(cofounderFollowUps)
+        .values({
+          workspaceId,
+          candidateId,
+          dueAt: input.dueAt,
+          note: input.note,
+        })
+        .returning();
+
+      if (!followUp) throw new Error('Failed to create cofounder follow-up');
+
+      const auditEventId = randomUUID();
+      const replayRef = `cofounder-candidate:${workspaceId}:${candidateId}:follow-up:${followUp.id}`;
+      const auditMetadata = {
+        candidateId,
+        followUpId: followUp.id,
+        dueAt: input.dueAt?.toISOString() ?? null,
+        hasNote: Boolean(input.note),
+        evidenceContract: 'cofounder_follow_up_evidence_required',
+      };
+
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'COFOUNDER_FOLLOW_UP_CREATED',
+        actor: `user:${auditContext.actorUserId ?? 'unknown'}`,
+        target: candidateId,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'cofounder_follow_up_created',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: 'cofounder_follow_up_created',
+        sourceType: 'cofounder_engine',
+        title: `Cofounder follow-up created: ${candidateId}`,
+        summary: `A follow-up was created for cofounder candidate ${candidateId}.`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'cofounder_follow_up_created',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { ...followUp, evidenceItemId };
+    });
   }
 }
 

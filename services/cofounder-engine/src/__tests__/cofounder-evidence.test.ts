@@ -4,7 +4,9 @@ import {
   cofounderCandidates,
   cofounderCandidateNotes,
   cofounderCandidateSources,
+  cofounderFollowUps,
   cofounderMatchEvaluations,
+  cofounderOutreachDrafts,
   evidenceItems,
   founderProfiles,
   founderStrengths,
@@ -264,6 +266,173 @@ function createCandidateNoteDb(
             if (table === evidenceItems) {
               if (options.failEvidence) throw new Error('evidence unavailable');
               return [{ id: 'evidence-candidate-note-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+  };
+
+  return { db, inserts, updates };
+}
+
+function createCandidateOutreachDb(options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const candidate = {
+    id: 'candidate-1',
+    workspaceId: 'ws-1',
+    name: 'Candidate One',
+    status: 'reviewing',
+  };
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => (table === cofounderCandidates ? [candidate] : [])),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === cofounderOutreachDrafts) {
+              return [
+                {
+                  id: 'draft-1',
+                  ...value,
+                  status: 'draft',
+                  createdAt: new Date('2026-01-02'),
+                  updatedAt: new Date('2026-01-02'),
+                },
+              ];
+            }
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-outreach-draft-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+  };
+
+  return { db, inserts, updates };
+}
+
+function createCandidateFollowUpDb(options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const candidate = {
+    id: 'candidate-1',
+    workspaceId: 'ws-1',
+    name: 'Candidate One',
+    status: 'reviewing',
+  };
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => (table === cofounderCandidates ? [candidate] : [])),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === cofounderFollowUps) {
+              return [
+                {
+                  id: 'follow-up-1',
+                  ...value,
+                  status: 'pending',
+                  createdAt: new Date('2026-01-02'),
+                },
+              ];
+            }
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-follow-up-1' }];
             }
             return [];
           }),
@@ -574,6 +743,153 @@ describe('CofounderEngine candidate note evidence', () => {
       engine.addCandidateNote('ws-1', 'candidate-1', 'Nope', 'note', 'user-1', {
         actorUserId: 'user-1',
       }),
+    ).rejects.toThrow('evidence unavailable');
+
+    expect(inserts).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+});
+
+describe('CofounderEngine outreach and follow-up evidence', () => {
+  it('writes audit-linked evidence when creating an outreach draft', async () => {
+    const { db, inserts, updates } = createCandidateOutreachDb();
+    const engine = new CofounderEngine(db as never);
+
+    const result = await engine.createOutreachDraft(
+      'ws-1',
+      'candidate-1',
+      { channel: 'email', subject: 'Hello', content: 'Hello there' },
+      { actorUserId: 'user-1' },
+    );
+
+    expect(result).toMatchObject({
+      id: 'draft-1',
+      candidateId: 'candidate-1',
+      evidenceItemId: 'evidence-outreach-draft-1',
+    });
+    expect(inserts.map((insert) => insert.table)).toEqual([
+      cofounderOutreachDrafts,
+      auditLog,
+      evidenceItems,
+    ]);
+    expect(updates.map((update) => update.table)).toEqual([auditLog]);
+
+    const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+      id: string;
+    };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      action: 'COFOUNDER_OUTREACH_DRAFT_CREATED',
+      actor: 'user:user-1',
+      target: 'candidate-1',
+      verdict: 'allow',
+      metadata: {
+        evidenceType: 'cofounder_outreach_draft_created',
+        replayRef: 'cofounder-candidate:ws-1:candidate-1:outreach:draft-1',
+        candidateId: 'candidate-1',
+        draftId: 'draft-1',
+        channel: 'email',
+        hasSubject: true,
+        contentLength: 11,
+        evidenceContract: 'cofounder_outreach_draft_evidence_required',
+      },
+    });
+    expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+      workspaceId: 'ws-1',
+      auditEventId: auditInsert.id,
+      evidenceType: 'cofounder_outreach_draft_created',
+      sourceType: 'cofounder_engine',
+      redactionState: 'redacted',
+      replayRef: 'cofounder-candidate:ws-1:candidate-1:outreach:draft-1',
+      metadata: {
+        candidateId: 'candidate-1',
+        draftId: 'draft-1',
+        evidenceContract: 'cofounder_outreach_draft_evidence_required',
+      },
+    });
+  });
+
+  it('rolls back outreach draft persistence when evidence persistence fails', async () => {
+    const { db, inserts, updates } = createCandidateOutreachDb({ failEvidence: true });
+    const engine = new CofounderEngine(db as never);
+
+    await expect(
+      engine.createOutreachDraft(
+        'ws-1',
+        'candidate-1',
+        { content: 'Hello there' },
+        { actorUserId: 'user-1' },
+      ),
+    ).rejects.toThrow('evidence unavailable');
+
+    expect(inserts).toEqual([]);
+    expect(updates).toEqual([]);
+  });
+
+  it('writes audit-linked evidence when creating a follow-up', async () => {
+    const { db, inserts, updates } = createCandidateFollowUpDb();
+    const engine = new CofounderEngine(db as never);
+    const dueAt = new Date('2026-02-03T04:05:06.000Z');
+
+    const result = await engine.createFollowUp(
+      'ws-1',
+      'candidate-1',
+      { dueAt, note: 'Check in' },
+      { actorUserId: 'user-1' },
+    );
+
+    expect(result).toMatchObject({
+      id: 'follow-up-1',
+      candidateId: 'candidate-1',
+      evidenceItemId: 'evidence-follow-up-1',
+    });
+    expect(inserts.map((insert) => insert.table)).toEqual([
+      cofounderFollowUps,
+      auditLog,
+      evidenceItems,
+    ]);
+    expect(updates.map((update) => update.table)).toEqual([auditLog]);
+
+    const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+      id: string;
+    };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      action: 'COFOUNDER_FOLLOW_UP_CREATED',
+      actor: 'user:user-1',
+      target: 'candidate-1',
+      verdict: 'allow',
+      metadata: {
+        evidenceType: 'cofounder_follow_up_created',
+        replayRef: 'cofounder-candidate:ws-1:candidate-1:follow-up:follow-up-1',
+        candidateId: 'candidate-1',
+        followUpId: 'follow-up-1',
+        dueAt: '2026-02-03T04:05:06.000Z',
+        hasNote: true,
+        evidenceContract: 'cofounder_follow_up_evidence_required',
+      },
+    });
+    expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+      workspaceId: 'ws-1',
+      auditEventId: auditInsert.id,
+      evidenceType: 'cofounder_follow_up_created',
+      sourceType: 'cofounder_engine',
+      redactionState: 'redacted',
+      replayRef: 'cofounder-candidate:ws-1:candidate-1:follow-up:follow-up-1',
+      metadata: {
+        candidateId: 'candidate-1',
+        followUpId: 'follow-up-1',
+        evidenceContract: 'cofounder_follow_up_evidence_required',
+      },
+    });
+  });
+
+  it('rolls back follow-up persistence when evidence persistence fails', async () => {
+    const { db, inserts, updates } = createCandidateFollowUpDb({ failEvidence: true });
+    const engine = new CofounderEngine(db as never);
+
+    await expect(
+      engine.createFollowUp('ws-1', 'candidate-1', { note: 'Check in' }, { actorUserId: 'user-1' }),
     ).rejects.toThrow('evidence unavailable');
 
     expect(inserts).toEqual([]);
