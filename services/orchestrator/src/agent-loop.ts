@@ -915,8 +915,8 @@ export class AgentLoop {
    * written onto the task_runs row (helm_decision_id / helm_policy_version /
    * helm_reason_code) and a mirror row is inserted into evidence_packs so the
    * Governance admin surface can browse receipts without round-tripping to
-   * HELM. All persistence errors are swallowed — the loop never crashes
-   * because the audit layer degraded.
+   * HELM. Persistence errors fail closed because a returned action without a
+   * durable task_run anchor cannot be replayed or audited.
    */
   private async persistAction(
     taskId: string,
@@ -970,8 +970,12 @@ export class AgentLoop {
         taskRunId = row?.id;
       }
       if (taskRunId) this.lastTaskRunId = taskRunId;
-    } catch {
-      // Non-critical — don't crash the loop if persistence fails
+    } catch (err) {
+      captureException(err, {
+        tags: { source: 'persistAction', taskId },
+        extra: { tool: action.tool, taskRunId: taskRunId ?? null },
+      });
+      throw err;
     }
 
     if (gov && workspaceId && options.mirrorEvidence !== false) {
@@ -1108,8 +1112,12 @@ export class AgentLoop {
         })
         .returning();
       approvalId = record?.id;
-    } catch {
-      // Non-critical — don't crash the loop if persistence fails
+    } catch (err) {
+      captureException(err, {
+        tags: { source: 'createApprovalRecord', taskId: params.taskId },
+        extra: { tool: action.tool, workspaceId: params.workspaceId },
+      });
+      throw err;
     }
 
     // Fire push notification (non-blocking)

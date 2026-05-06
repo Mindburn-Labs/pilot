@@ -164,6 +164,64 @@ describe('AgentLoop', () => {
     expect(mockDb.insert).toHaveBeenCalled();
   });
 
+  it('fails closed when action task_run persistence fails', async () => {
+    const db = {
+      ...mockDb,
+      insert: vi.fn((table: unknown) => {
+        if (table === 'taskRuns') {
+          return {
+            values: vi.fn(() => ({
+              returning: vi.fn(async () => {
+                throw new Error('task_run persistence unavailable');
+              }),
+            })),
+          };
+        }
+        return mockDb.insert(table);
+      }),
+    } as any;
+    const loop = new AgentLoop(db, mockTrust);
+    loop.setLlm(mockLlm);
+    loop.setTools(mockTools);
+
+    mockLlm.complete.mockResolvedValueOnce('{"tool":"dangerous_action","input":{}}');
+    mockTrust.evaluate.mockReturnValue({ verdict: 'deny', reason: 'blocked by policy' });
+
+    await expect(loop.execute(baseParams())).rejects.toThrow('task_run persistence unavailable');
+    expect(mockTools.execute).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when approval record persistence fails', async () => {
+    const db = {
+      ...mockDb,
+      insert: vi.fn((table: unknown) => {
+        if (table === 'taskRuns') {
+          return {
+            values: vi.fn(() => ({
+              returning: vi.fn(async () => [{ id: 'task-run-1' }]),
+            })),
+          };
+        }
+        return {
+          values: vi.fn(() => ({
+            returning: vi.fn(async () => {
+              throw new Error('approval persistence unavailable');
+            }),
+          })),
+        };
+      }),
+    } as any;
+    const loop = new AgentLoop(db, mockTrust);
+    loop.setLlm(mockLlm);
+    loop.setTools(mockTools);
+
+    mockLlm.complete.mockResolvedValueOnce('{"tool":"deploy_production","input":{}}');
+    mockTrust.evaluate.mockReturnValue({ verdict: 'require_approval', reason: 'needs human' });
+
+    await expect(loop.execute(baseParams())).rejects.toThrow('approval persistence unavailable');
+    expect(mockTools.execute).not.toHaveBeenCalled();
+  });
+
   it('pre-persists a parent task_run anchor before executing a subagent tool', async () => {
     const rows: unknown[] = [];
     const db = {
