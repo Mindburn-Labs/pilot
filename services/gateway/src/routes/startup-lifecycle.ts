@@ -1052,32 +1052,42 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
       snapshot,
       rollbackPlan,
     });
-    const rollback = await applyConstrainedMissionRollback(_deps, workspaceId, mission, snapshot);
-    const rollbackEvidenceItemId = await appendEvidenceItem(_deps.db, {
-      workspaceId,
-      ventureId: mission.ventureId ?? null,
-      missionId: mission.id,
-      evidenceType: 'startup_lifecycle_mission_rollback_applied',
-      sourceType: 'gateway_startup_lifecycle',
-      title: `Startup lifecycle mission rollback: ${mission.title}`,
-      summary: `${rollback.rolledBackNodes.length} node(s) reopened without deleting history`,
-      redactionState: 'redacted',
-      sensitivity: 'internal',
-      contentHash: hashJson({
+    const { rollback, rollbackEvidenceItemId } = await _deps.db.transaction(async (tx) => {
+      const db = tx as unknown as typeof _deps.db;
+      const rollbackDeps = { ..._deps, db };
+      const appliedRollback = await applyConstrainedMissionRollback(
+        rollbackDeps,
+        workspaceId,
+        mission,
+        snapshot,
+      );
+      const evidenceItemId = await appendEvidenceItem(db, {
+        workspaceId,
+        ventureId: mission.ventureId ?? null,
         missionId: mission.id,
-        checkpointId: checkpoint.checkpointId,
-        reason: parsed.data.reason,
-        rolledBackNodeKeys: rollback.rolledBackNodes.map((node) => node.nodeKey),
-      }),
-      replayRef: `mission:${mission.id}:rollback:${checkpoint.checkpointId}`,
-      metadata: {
-        rollbackVersion: 'mission-rollback.v1',
-        checkpointId: checkpoint.checkpointId,
-        scope: parsed.data.scope,
-        rolledBackNodeKeys: rollback.rolledBackNodes.map((node) => node.nodeKey),
-        destructive: false,
-        productionReady: false,
-      },
+        evidenceType: 'startup_lifecycle_mission_rollback_applied',
+        sourceType: 'gateway_startup_lifecycle',
+        title: `Startup lifecycle mission rollback: ${mission.title}`,
+        summary: `${appliedRollback.rolledBackNodes.length} node(s) reopened without deleting history`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        contentHash: hashJson({
+          missionId: mission.id,
+          checkpointId: checkpoint.checkpointId,
+          reason: parsed.data.reason,
+          rolledBackNodeKeys: appliedRollback.rolledBackNodes.map((node) => node.nodeKey),
+        }),
+        replayRef: `mission:${mission.id}:rollback:${checkpoint.checkpointId}`,
+        metadata: {
+          rollbackVersion: 'mission-rollback.v1',
+          checkpointId: checkpoint.checkpointId,
+          scope: parsed.data.scope,
+          rolledBackNodeKeys: appliedRollback.rolledBackNodes.map((node) => node.nodeKey),
+          destructive: false,
+          productionReady: false,
+        },
+      });
+      return { rollback: appliedRollback, rollbackEvidenceItemId: evidenceItemId };
     });
 
     const response = RolledBackStartupMissionSchema.parse({
