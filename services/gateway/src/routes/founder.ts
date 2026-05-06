@@ -86,6 +86,8 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/candidates', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'create cofounder candidate');
+    if (roleDenied) return roleDenied;
     if (!deps.cofounderEngine) return c.json({ error: 'Cofounder engine unavailable' }, 503);
 
     const raw = await c.req.json();
@@ -94,7 +96,10 @@ export function founderRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Validation failed', details: parsed.error.flatten() }, 400);
     }
 
-    const candidate = await deps.cofounderEngine.createCandidate(workspaceId, parsed.data);
+    const candidate = await deps.cofounderEngine
+      .createCandidate(workspaceId, parsed.data, { actorUserId: c.get('userId') })
+      .catch(() => undefined);
+    if (!candidate) return c.json({ error: 'Failed to create candidate evidence' }, 500);
     return c.json(candidate, 201);
   });
 
