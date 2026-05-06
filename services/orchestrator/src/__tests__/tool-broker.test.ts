@@ -3,15 +3,18 @@ import { actions, auditLog, evidenceItems, toolExecutions } from '@pilot/db/sche
 import { ToolBroker } from '../tool-broker.js';
 import { ToolRegistry } from '../tools.js';
 
-function createBrokerDb(opts: { failEvidenceInsert?: boolean } = {}) {
+function createBrokerDb(
+  opts: { failEvidenceInsert?: boolean; failFallbackAuditInsert?: boolean } = {},
+) {
   const insertedActions: unknown[] = [];
   const insertedExecutions: unknown[] = [];
   const insertedEvidenceItems: unknown[] = [];
   const insertedAudit: unknown[] = [];
   const updates: Array<{ table: unknown; value: unknown; where?: unknown }> = [];
   const transactionInsertOrder: string[] = [];
+  let transactionCount = 0;
 
-  const captureInsert = (evidenceSink: unknown[], auditSink: unknown[]) =>
+  const captureInsert = (evidenceSink: unknown[], auditSink: unknown[], failAuditInsert: boolean) =>
     vi.fn((table: unknown) => ({
       values: vi.fn((value: unknown) => {
         if (table === evidenceItems) {
@@ -26,6 +29,7 @@ function createBrokerDb(opts: { failEvidenceInsert?: boolean } = {}) {
         }
         if (table === auditLog) {
           transactionInsertOrder.push('audit_log');
+          if (failAuditInsert) throw new Error('fallback audit sink unavailable');
           auditSink.push(value);
           return Promise.resolve([]);
         }
@@ -65,11 +69,16 @@ function createBrokerDb(opts: { failEvidenceInsert?: boolean } = {}) {
     })),
     update: captureUpdate(updates),
     transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      transactionCount += 1;
       const stagedEvidenceItems: unknown[] = [];
       const stagedAudit: unknown[] = [];
       const stagedUpdates: unknown[] = [];
       const tx = {
-        insert: captureInsert(stagedEvidenceItems, stagedAudit),
+        insert: captureInsert(
+          stagedEvidenceItems,
+          stagedAudit,
+          Boolean(opts.failFallbackAuditInsert && transactionCount > 1),
+        ),
         update: captureUpdate(stagedUpdates),
       };
       const result = await callback(tx);
@@ -100,9 +109,7 @@ function queryChunkColumnNames(value: unknown): string[] {
   }
   const record = value as { columnType?: unknown; name?: unknown; queryChunks?: unknown };
   const ownName =
-    typeof record.name === 'string' && typeof record.columnType === 'string'
-      ? [record.name]
-      : [];
+    typeof record.name === 'string' && typeof record.columnType === 'string' ? [record.name] : [];
   return [...ownName, ...queryChunkColumnNames(record.queryChunks)];
 }
 
@@ -244,9 +251,7 @@ describe('ToolBroker', () => {
       expect.arrayContaining(['workspace_id', 'id']),
     );
     expect(insertedAudit[0]).toMatchObject({
-      id: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
-      ),
+      id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u),
       workspaceId: '00000000-0000-4000-8000-000000000001',
       action: 'TOOL_EXECUTION',
       target: 'echo_tool',
@@ -343,9 +348,7 @@ describe('ToolBroker', () => {
       }),
     });
     expect(insertedAudit[0]).toMatchObject({
-      id: expect.stringMatching(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
-      ),
+      id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u),
       verdict: 'error',
       reason: JSON.stringify({ error: 'blocked by external service' }),
     });
@@ -427,8 +430,14 @@ describe('ToolBroker', () => {
   });
 
   it('does not mark low-risk tool completion when evidence persistence fails', async () => {
-    const { db, insertedActions, insertedExecutions, insertedEvidenceItems, insertedAudit, updates } =
-      createBrokerDb({ failEvidenceInsert: true });
+    const {
+      db,
+      insertedActions,
+      insertedExecutions,
+      insertedEvidenceItems,
+      insertedAudit,
+      updates,
+    } = createBrokerDb({ failEvidenceInsert: true });
     const registry = new ToolRegistry(db as never, undefined, { skipBuiltins: true });
     const execute = vi.fn(async () => ({ ok: true }));
     registry.register({
@@ -575,6 +584,51 @@ describe('ToolBroker', () => {
         policyVersion: 'founder-ops-v1',
       }),
     });
+  });
+
+  it('does not commit elevated failure state when fallback audit persistence fails', async () => {
+    const { db, insertedAudit, insertedEvidenceItems, updates } = createBrokerDb({
+      failEvidenceInsert: true,
+      failFallbackAuditInsert: true,
+    });
+    const registry = new ToolRegistry(db as never, undefined, { skipBuiltins: true });
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register({
+      name: 'operator.browser_read',
+      description: 'Read from a governed browser session',
+      manifest: {
+        key: 'operator.browser_read',
+        version: 'test:v1',
+        riskClass: 'medium',
+        effectLevel: 'E2',
+        requiredEvidence: ['browser_observation', 'helm_receipt'],
+        permissionRequirements: ['tool:operator.browser_read:execute'],
+        outputSensitivity: 'sensitive',
+      },
+      execute,
+    });
+    const broker = new ToolBroker(db as never);
+
+    await expect(
+      broker.execute(
+        registry,
+        'operator.browser_read',
+        {},
+        {
+          workspaceId: '00000000-0000-4000-8000-000000000001',
+          taskId: '00000000-0000-4000-8000-000000000002',
+          policyDecisionId: 'dec-1',
+          policyVersion: 'founder-ops-v1',
+        },
+      ),
+    ).rejects.toThrow(
+      'Tool Broker could not persist elevated operator.browser_read evidence-failure audit',
+    );
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(insertedEvidenceItems).toEqual([]);
+    expect(insertedAudit).toEqual([]);
+    expect(updates).toEqual([]);
   });
 
   it('fails closed before elevated tool execution without HELM policy metadata', async () => {
