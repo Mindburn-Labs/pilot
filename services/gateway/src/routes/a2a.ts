@@ -282,41 +282,44 @@ async function persistA2aTask(
     params.state === 'completed' || params.state === 'failed' || params.state === 'canceled'
       ? new Date()
       : null;
-  const [thread] = await deps.db
-    .insert(a2aThreads)
-    .values({
-      workspaceId: params.workspaceId,
-      externalTaskId: params.externalTaskId,
-      pilotTaskId: params.pilotTaskId || null,
-      status: params.state,
-      metadata: params.metadata,
-      completedAt,
-    })
-    .returning({ id: a2aThreads.id });
+  await deps.db.transaction(async (tx) => {
+    const db = tx as unknown as typeof deps.db;
+    const [thread] = await db
+      .insert(a2aThreads)
+      .values({
+        workspaceId: params.workspaceId,
+        externalTaskId: params.externalTaskId,
+        pilotTaskId: params.pilotTaskId || null,
+        status: params.state,
+        metadata: params.metadata,
+        completedAt,
+      })
+      .returning({ id: a2aThreads.id });
 
-  if (!thread?.id) {
-    throw new Error('A2A thread persistence failed');
-  }
+    if (!thread?.id) {
+      throw new Error('A2A thread persistence failed');
+    }
 
-  const messages = [
-    {
-      threadId: thread.id,
-      workspaceId: params.workspaceId,
-      role: params.userMessage.role,
-      parts: params.userMessage.parts,
-      sequence: 1,
-    },
-  ];
-  if (params.agentMessage) {
-    messages.push({
-      threadId: thread.id,
-      workspaceId: params.workspaceId,
-      role: params.agentMessage.role,
-      parts: params.agentMessage.parts,
-      sequence: 2,
-    });
-  }
-  await deps.db.insert(a2aMessages).values(messages);
+    const messages = [
+      {
+        threadId: thread.id,
+        workspaceId: params.workspaceId,
+        role: params.userMessage.role,
+        parts: params.userMessage.parts,
+        sequence: 1,
+      },
+    ];
+    if (params.agentMessage) {
+      messages.push({
+        threadId: thread.id,
+        workspaceId: params.workspaceId,
+        role: params.agentMessage.role,
+        parts: params.agentMessage.parts,
+        sequence: 2,
+      });
+    }
+    await db.insert(a2aMessages).values(messages);
+  });
 }
 
 async function loadA2aTask(
