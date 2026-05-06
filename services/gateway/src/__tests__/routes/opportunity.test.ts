@@ -508,14 +508,17 @@ describe('opportunityRoutes', () => {
         jobId: 'job-score-1',
         evidenceItemId: 'evidence-opportunity-score-1',
       });
-      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('opportunity.score', {
-        opportunityId: 'opp-1',
-      });
       expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
       expect(updates.map((update) => update.table)).toEqual([auditLog, opportunities, auditLog]);
       const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
         id: string;
       };
+      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('opportunity.score', {
+        opportunityId: 'opp-1',
+        auditEventId: auditInsert.id,
+        evidenceItemId: 'evidence-opportunity-score-1',
+        replayRef: `opportunity:${workspaceId}:opp-1:score-requested`,
+      });
       expect(auditInsert).toMatchObject({
         workspaceId,
         action: 'OPPORTUNITY_SCORE_REQUESTED',
@@ -618,7 +621,22 @@ describe('opportunityRoutes', () => {
       expect(deps.orchestrator.boss.send).toHaveBeenCalledTimes(2);
       expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
       expect(updates.map((update) => update.table)).toEqual([auditLog, auditLog]);
-      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(deps.orchestrator.boss.send).toHaveBeenNthCalledWith(1, 'opportunity.score', {
+        opportunityId: 'opp-1',
+        auditEventId: auditInsert.id,
+        evidenceItemId: 'evidence-opportunity-queue-1',
+        replayRef: `opportunity:${workspaceId}:batch-score:${auditInsert.id}`,
+      });
+      expect(deps.orchestrator.boss.send).toHaveBeenNthCalledWith(2, 'opportunity.score', {
+        opportunityId: 'opp-2',
+        auditEventId: auditInsert.id,
+        evidenceItemId: 'evidence-opportunity-queue-1',
+        replayRef: `opportunity:${workspaceId}:batch-score:${auditInsert.id}`,
+      });
+      expect(auditInsert).toMatchObject({
         workspaceId,
         action: 'OPPORTUNITY_BATCH_SCORE_REQUESTED',
         target: workspaceId,
@@ -687,12 +705,18 @@ describe('opportunityRoutes', () => {
         jobId: 'job-cluster-1',
         evidenceItemId: 'evidence-opportunity-queue-1',
       });
-      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('pipeline.cluster', {
-        workspaceId,
-      });
       expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
       expect(updates.map((update) => update.table)).toEqual([auditLog, auditLog]);
-      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('pipeline.cluster', {
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceItemId: 'evidence-opportunity-queue-1',
+        replayRef: `opportunity:${workspaceId}:cluster:${auditInsert.id}`,
+      });
+      expect(auditInsert).toMatchObject({
         workspaceId,
         action: 'OPPORTUNITY_CLUSTER_REBUILD_REQUESTED',
         target: workspaceId,
