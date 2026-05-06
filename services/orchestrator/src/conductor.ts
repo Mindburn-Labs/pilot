@@ -653,9 +653,9 @@ export class Conductor {
           completedAt: new Date(),
         })
         .where(eq(agentHandoffs.id, handoffId));
-    } catch {
-      // Handoff completion is observability; child execution result remains
-      // authoritative in task_runs/evidence_packs.
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to complete agent handoff ${handoffId}: ${detail}`);
     }
   }
 
