@@ -562,6 +562,22 @@ describe('Conductor.spawn', () => {
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
+  it('fails closed when durable handoff completion cannot be persisted', async () => {
+    const registry = new SubagentRegistry([makeDef({ name: 'scout_x' })]);
+    const db = makeMockDb({ failUpdateTable: 'agentHandoffs' });
+    const llm = makeLlm();
+    const tools = new ToolRegistry(db);
+    const conductor = new Conductor(db, registry, tools, makePolicy(), llm);
+
+    await expect(
+      conductor.spawn(baseCtx, {
+        name: 'scout_x',
+        task: 'scan market',
+      }),
+    ).rejects.toThrow('Failed to complete agent handoff');
+    expect(llm.complete).toHaveBeenCalled();
+  });
+
   it('does not commit a spawn evidence pack when spawn evidence item persistence fails', async () => {
     const registry = new SubagentRegistry([makeDef({ name: 'scout_x' })]);
     const { db, committedInserts } = makeTransactionalSpawnDb({ failEvidenceInsert: true });
