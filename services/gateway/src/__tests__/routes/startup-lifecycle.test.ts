@@ -337,6 +337,62 @@ function captureFailedSecondLifecycleActionEvidenceTransaction(
   };
 }
 
+function captureFailedNodeExecutionEvidenceTransaction(deps: ReturnType<typeof createMockDeps>) {
+  const committedEvidenceItems: unknown[] = [];
+  const committedStateUpdates: unknown[] = [];
+  const originalInsert = deps.db.insert;
+  const originalUpdate = deps.db.update;
+
+  const captureInsert = (evidenceSink: unknown[], failEvidence: boolean) =>
+    vi.fn((table: unknown) => {
+      if (table === evidenceItems) {
+        return {
+          values: vi.fn((value: unknown) => {
+            if (failEvidence) {
+              throw new Error('node execution evidence unavailable');
+            }
+            evidenceSink.push(value);
+            const id = `00000000-0000-4000-8000-00000000059${evidenceSink.length}`;
+            return { returning: vi.fn(async () => [{ id }]) };
+          }),
+        };
+      }
+      return originalInsert(table);
+    }) as typeof deps.db.insert;
+
+  const captureUpdate = (stateSink: unknown[]) =>
+    vi.fn((table: unknown) => {
+      if (table === missionNodes || table === tasks || table === missions) {
+        return {
+          set: vi.fn((value: unknown) => ({
+            where: vi.fn(async () => {
+              stateSink.push(value);
+              return [];
+            }),
+          })),
+        };
+      }
+      return originalUpdate(table);
+    }) as typeof deps.db.update;
+
+  deps.db.insert = captureInsert(committedEvidenceItems, false);
+  deps.db.update = captureUpdate(committedStateUpdates);
+  deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+    const stagedEvidenceItems: unknown[] = [];
+    const stagedStateUpdates: unknown[] = [];
+    const result = await callback({
+      ...deps.db,
+      insert: captureInsert(stagedEvidenceItems, true),
+      update: captureUpdate(stagedStateUpdates),
+    });
+    committedEvidenceItems.push(...stagedEvidenceItems);
+    committedStateUpdates.push(...stagedStateUpdates);
+    return result;
+  }) as typeof deps.db.transaction;
+
+  return { committedEvidenceItems, committedStateUpdates };
+}
+
 function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof createMockDeps>) {
   const insertedEvidenceItems: unknown[] = [];
   const insertedAuditEvents: unknown[] = [];
@@ -2727,6 +2783,78 @@ describe('startupLifecycleRoutes', () => {
     );
   });
 
+  it('does not commit node result state when execution evidence persistence fails', async () => {
+    const deps = createMockDeps();
+    const { committedEvidenceItems, committedStateUpdates } =
+      captureFailedNodeExecutionEvidenceTransaction(deps);
+    const missionId = '00000000-0000-4000-8000-000000000560';
+    const ventureId = '00000000-0000-4000-8000-000000000561';
+    const nodeId = '00000000-0000-4000-8000-000000000562';
+    const taskId = '00000000-0000-4000-8000-000000000563';
+    const selectResults = [
+      [
+        {
+          id: missionId,
+          workspaceId,
+          ventureId,
+          title: 'Launch EvidenceOS',
+          status: 'scheduled_not_executing',
+          startedAt: null,
+        },
+      ],
+      [
+        {
+          id: nodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'founder_onboarding',
+          stage: 'founder_onboarding',
+          title: 'Founder DNA and access charter',
+          objective: 'Draft founder DNA and access boundaries.',
+          status: 'ready',
+          requiredEvidence: ['founder goal intake'],
+          acceptanceCriteria: ['Founder DNA draft exists'],
+          helmPolicyClasses: ['access', 'audit'],
+        },
+      ],
+      [{ id: '00000000-0000-4000-8000-000000000564', workspaceId, missionId, nodeId, taskId }],
+      [
+        {
+          id: taskId,
+          workspaceId,
+          operatorId: null,
+          title: '[Lifecycle] Founder DNA and access charter',
+          description: 'Draft founder DNA and access boundaries.',
+          status: 'pending',
+        },
+      ],
+    ];
+    let selectCall = 0;
+    const originalSelect = deps.db.select;
+    deps.db.select = vi.fn(() => {
+      deps.db._setResult(selectResults[selectCall] ?? []);
+      selectCall += 1;
+      return originalSelect();
+    }) as typeof deps.db.select;
+    deps.orchestrator.runTask = vi.fn(async () => ({
+      status: 'blocked',
+      iterationsUsed: 1,
+      iterationBudget: 50,
+      actions: [],
+      tokensIn: 0,
+      tokensOut: 0,
+    })) as typeof deps.orchestrator.runTask;
+
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch('POST', `/missions/${missionId}/nodes/${nodeId}/execute`, {}, wsHeader);
+
+    expect(res.status).toBe(500);
+    expect(committedEvidenceItems).toEqual([]);
+    expect(committedStateUpdates.map((payload) => (payload as { status?: string }).status)).toEqual(
+      ['running', 'running', 'running'],
+    );
+  });
+
   it('rejects mission node execution when the task operator is outside the workspace', async () => {
     const deps = createMockDeps();
     const missionId = '00000000-0000-4000-8000-000000000130';
@@ -3204,5 +3332,71 @@ describe('startupLifecycleRoutes', () => {
       }),
     });
     expect(updates.filter((payload) => payload.status === 'failed')).toHaveLength(2);
+  });
+
+  it('does not commit node failure state when failure evidence persistence fails', async () => {
+    const deps = createMockDeps();
+    const { committedEvidenceItems, committedStateUpdates } =
+      captureFailedNodeExecutionEvidenceTransaction(deps);
+    const missionId = '00000000-0000-4000-8000-000000000570';
+    const nodeId = '00000000-0000-4000-8000-000000000571';
+    const taskId = '00000000-0000-4000-8000-000000000572';
+    const selectResults = [
+      [
+        {
+          id: missionId,
+          workspaceId,
+          ventureId: null,
+          title: 'Launch EvidenceOS',
+          status: 'scheduled_not_executing',
+          startedAt: null,
+        },
+      ],
+      [
+        {
+          id: nodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'founder_onboarding',
+          stage: 'founder_onboarding',
+          title: 'Founder DNA and access charter',
+          objective: 'Draft founder DNA and access boundaries.',
+          status: 'ready',
+          requiredEvidence: ['founder goal intake'],
+          acceptanceCriteria: ['Founder DNA draft exists'],
+          helmPolicyClasses: ['access', 'audit'],
+        },
+      ],
+      [{ id: '00000000-0000-4000-8000-000000000573', workspaceId, missionId, nodeId, taskId }],
+      [
+        {
+          id: taskId,
+          workspaceId,
+          operatorId: null,
+          title: '[Lifecycle] Founder DNA and access charter',
+          description: 'Draft founder DNA and access boundaries.',
+          status: 'pending',
+        },
+      ],
+    ];
+    let selectCall = 0;
+    const originalSelect = deps.db.select;
+    deps.db.select = vi.fn(() => {
+      deps.db._setResult(selectResults[selectCall] ?? []);
+      selectCall += 1;
+      return originalSelect();
+    }) as typeof deps.db.select;
+    deps.orchestrator.runTask = vi.fn(async () => {
+      throw new Error('HELM unavailable');
+    }) as typeof deps.orchestrator.runTask;
+
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch('POST', `/missions/${missionId}/nodes/${nodeId}/execute`, {}, wsHeader);
+
+    expect(res.status).toBe(500);
+    expect(committedEvidenceItems).toEqual([]);
+    expect(committedStateUpdates.map((payload) => (payload as { status?: string }).status)).toEqual(
+      ['running', 'running', 'running'],
+    );
   });
 });

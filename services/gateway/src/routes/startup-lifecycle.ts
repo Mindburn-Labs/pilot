@@ -1481,44 +1481,47 @@ async function executeReadyMissionNode(
     });
   } catch (err) {
     const failedAt = new Date();
-    await deps.db
-      .update(missionNodes)
-      .set({ status: 'failed', updatedAt: failedAt, completedAt: failedAt })
-      .where(and(eq(missionNodes.id, node.id), eq(missionNodes.workspaceId, workspaceId)));
-    await deps.db
-      .update(missions)
-      .set({ status: 'blocked', updatedAt: failedAt })
-      .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
-    await deps.db
-      .update(tasks)
-      .set({ status: 'failed', updatedAt: failedAt, completedAt: failedAt })
-      .where(and(eq(tasks.id, task.id), eq(tasks.workspaceId, workspaceId)));
-    const evidenceItemId = await appendEvidenceItem(deps.db, {
-      workspaceId,
-      ventureId: mission.ventureId ?? null,
-      missionId: mission.id,
-      taskId: task.id,
-      evidenceType: 'startup_lifecycle_node_failed',
-      sourceType: 'gateway_startup_lifecycle',
-      title: `Startup lifecycle node failed: ${node.title}`,
-      summary: err instanceof Error ? err.message : String(err),
-      redactionState: 'redacted',
-      sensitivity: 'internal',
-      contentHash: hashJson({
-        nodeId: node.id,
-        nodeKey: node.nodeKey,
+    const evidenceItemId = await deps.db.transaction(async (tx) => {
+      const db = tx as unknown as typeof deps.db;
+      await db
+        .update(missionNodes)
+        .set({ status: 'failed', updatedAt: failedAt, completedAt: failedAt })
+        .where(and(eq(missionNodes.id, node.id), eq(missionNodes.workspaceId, workspaceId)));
+      await db
+        .update(missions)
+        .set({ status: 'blocked', updatedAt: failedAt })
+        .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+      await db
+        .update(tasks)
+        .set({ status: 'failed', updatedAt: failedAt, completedAt: failedAt })
+        .where(and(eq(tasks.id, task.id), eq(tasks.workspaceId, workspaceId)));
+      return appendEvidenceItem(db, {
+        workspaceId,
+        ventureId: mission.ventureId ?? null,
+        missionId: mission.id,
         taskId: task.id,
-        error: err instanceof Error ? err.message : String(err),
-      }),
-      replayRef: `mission:${mission.id}:node:${node.id}:failure`,
-      metadata: {
-        executorVersion: 'mission-node-executor.v1',
-        nodeKey: node.nodeKey,
-        stage: node.stage,
-        nodeStatus: 'failed',
-        missionStatus: 'blocked',
-        productionReady: false,
-      },
+        evidenceType: 'startup_lifecycle_node_failed',
+        sourceType: 'gateway_startup_lifecycle',
+        title: `Startup lifecycle node failed: ${node.title}`,
+        summary: err instanceof Error ? err.message : String(err),
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        contentHash: hashJson({
+          nodeId: node.id,
+          nodeKey: node.nodeKey,
+          taskId: task.id,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+        replayRef: `mission:${mission.id}:node:${node.id}:failure`,
+        metadata: {
+          executorVersion: 'mission-node-executor.v1',
+          nodeKey: node.nodeKey,
+          stage: node.stage,
+          nodeStatus: 'failed',
+          missionStatus: 'blocked',
+          productionReady: false,
+        },
+      });
     });
     return {
       ok: false,
@@ -1533,73 +1536,81 @@ async function executeReadyMissionNode(
   }
 
   const nodeStatus = mapRunStatusToMissionNodeStatus(run.status);
-  await deps.db
-    .update(missionNodes)
-    .set({
-      status: nodeStatus,
-      updatedAt: new Date(),
-      completedAt: nodeStatus === 'completed' ? new Date() : null,
-    })
-    .where(and(eq(missionNodes.id, node.id), eq(missionNodes.workspaceId, workspaceId)));
-  await deps.db
-    .update(tasks)
-    .set({
-      status: mapRunStatusToTaskStatus(run.status),
-      updatedAt: new Date(),
-      completedAt: run.status === 'completed' ? new Date() : null,
-    })
-    .where(and(eq(tasks.id, task.id), eq(tasks.workspaceId, workspaceId)));
+  const completedAt = new Date();
+  const { advancement, evidenceItemId } = await deps.db.transaction(async (tx) => {
+    const db = tx as unknown as typeof deps.db;
+    const txDeps = { ...deps, db };
+    await db
+      .update(missionNodes)
+      .set({
+        status: nodeStatus,
+        updatedAt: completedAt,
+        completedAt: nodeStatus === 'completed' ? completedAt : null,
+      })
+      .where(and(eq(missionNodes.id, node.id), eq(missionNodes.workspaceId, workspaceId)));
+    await db
+      .update(tasks)
+      .set({
+        status: mapRunStatusToTaskStatus(run.status),
+        updatedAt: completedAt,
+        completedAt: run.status === 'completed' ? completedAt : null,
+      })
+      .where(and(eq(tasks.id, task.id), eq(tasks.workspaceId, workspaceId)));
 
-  const advancement =
-    nodeStatus === 'completed'
-      ? await advanceReadyMissionNodes(deps, workspaceId, mission.id)
-      : {
-          advancedReadyNodes: [],
-          missionStatus: mapRunStatusToMissionStatus(run.status),
-        };
-  await deps.db
-    .update(missions)
-    .set({
-      status: advancement.missionStatus,
-      updatedAt: new Date(),
-      completedAt: advancement.missionStatus === 'completed' ? new Date() : null,
-    })
-    .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+    const nextAdvancement =
+      nodeStatus === 'completed'
+        ? await advanceReadyMissionNodes(txDeps, workspaceId, mission.id)
+        : {
+            advancedReadyNodes: [],
+            missionStatus: mapRunStatusToMissionStatus(run.status),
+          };
+    await db
+      .update(missions)
+      .set({
+        status: nextAdvancement.missionStatus,
+        updatedAt: completedAt,
+        completedAt: nextAdvancement.missionStatus === 'completed' ? completedAt : null,
+      })
+      .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
 
-  const evidenceItemId = await appendEvidenceItem(deps.db, {
-    workspaceId,
-    ventureId: mission.ventureId ?? null,
-    missionId: mission.id,
-    taskId: task.id,
-    evidenceType: 'startup_lifecycle_node_executed',
-    sourceType: 'gateway_startup_lifecycle',
-    title: `Startup lifecycle node executed: ${node.title}`,
-    summary: `${node.nodeKey} finished with ${nodeStatus}`,
-    redactionState: 'redacted',
-    sensitivity: 'internal',
-    contentHash: hashJson({
-      nodeId: node.id,
-      nodeKey: node.nodeKey,
+    const persistedEvidenceItemId = await appendEvidenceItem(db, {
+      workspaceId,
+      ventureId: mission.ventureId ?? null,
+      missionId: mission.id,
       taskId: task.id,
-      runStatus: run.status,
-      iterationsUsed: run.iterationsUsed,
-      actionCount: run.actions.length,
-      advancedReadyNodes: advancement.advancedReadyNodes.map((advanced) => advanced.nodeKey),
-    }),
-    replayRef: `mission:${mission.id}:node:${node.id}:execute`,
-    metadata: {
-      executorVersion: 'mission-node-executor.v1',
-      nodeKey: node.nodeKey,
-      stage: node.stage,
-      runStatus: run.status,
-      nodeStatus,
-      missionStatus: advancement.missionStatus,
-      iterationsUsed: run.iterationsUsed,
-      iterationBudget: run.iterationBudget,
-      actionCount: run.actions.length,
-      advancedReadyNodeKeys: advancement.advancedReadyNodes.map((advanced) => advanced.nodeKey),
-      productionReady: false,
-    },
+      evidenceType: 'startup_lifecycle_node_executed',
+      sourceType: 'gateway_startup_lifecycle',
+      title: `Startup lifecycle node executed: ${node.title}`,
+      summary: `${node.nodeKey} finished with ${nodeStatus}`,
+      redactionState: 'redacted',
+      sensitivity: 'internal',
+      contentHash: hashJson({
+        nodeId: node.id,
+        nodeKey: node.nodeKey,
+        taskId: task.id,
+        runStatus: run.status,
+        iterationsUsed: run.iterationsUsed,
+        actionCount: run.actions.length,
+        advancedReadyNodes: nextAdvancement.advancedReadyNodes.map((advanced) => advanced.nodeKey),
+      }),
+      replayRef: `mission:${mission.id}:node:${node.id}:execute`,
+      metadata: {
+        executorVersion: 'mission-node-executor.v1',
+        nodeKey: node.nodeKey,
+        stage: node.stage,
+        runStatus: run.status,
+        nodeStatus,
+        missionStatus: nextAdvancement.missionStatus,
+        iterationsUsed: run.iterationsUsed,
+        iterationBudget: run.iterationBudget,
+        actionCount: run.actions.length,
+        advancedReadyNodeKeys: nextAdvancement.advancedReadyNodes.map(
+          (advanced) => advanced.nodeKey,
+        ),
+        productionReady: false,
+      },
+    });
+    return { advancement: nextAdvancement, evidenceItemId: persistedEvidenceItemId };
   });
 
   const response = ExecutedStartupMissionNodeSchema.parse({
