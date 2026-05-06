@@ -570,6 +570,80 @@ describe('founderRoutes', () => {
     });
   });
 
+  describe('POST /analyze', () => {
+    it('denies members from analyzing founder profiles', async () => {
+      const res = await fetch(
+        'POST',
+        '/analyze',
+        { rawText: 'I am a technical founder.' },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('passes actor context and returns founder intake evidence metadata', async () => {
+      const processIntake = vi.fn(async () => ({
+        profileId: 'fp-1',
+        name: 'Founder One',
+        background: 'Builder',
+        experience: 'Ten years',
+        interests: ['AI'],
+        strengths: [],
+        startupVector: 'AI tools',
+        evidenceItemId: 'evidence-founder-intake-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          founderIntel: { processIntake } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/analyze',
+        { rawText: 'I am a technical founder.' },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        profileId: 'fp-1',
+        evidenceItemId: 'evidence-founder-intake-1',
+      });
+      expect(processIntake).toHaveBeenCalledWith(
+        'ws-1',
+        'I am a technical founder.',
+        { actorUserId: 'user-1' },
+      );
+    });
+
+    it('fails closed when founder intake evidence fails', async () => {
+      const processIntake = vi.fn(async () => {
+        throw new Error('evidence unavailable');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          founderIntel: { processIntake } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/analyze',
+        { rawText: 'I am a technical founder.' },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to persist founder intake evidence');
+    });
+  });
+
   describe('POST /candidates', () => {
     it('denies members from creating cofounder candidates', async () => {
       const res = await fetch(

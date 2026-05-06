@@ -1,9 +1,12 @@
-import { eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
+import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
-import { founderProfiles, founderAssessments, founderStrengths } from '@pilot/db/schema';
+import { auditLog, founderProfiles, founderAssessments, founderStrengths } from '@pilot/db/schema';
 
 export interface FounderIntakeResult {
   profileId: string;
+  evidenceItemId: string;
   name: string;
   background: string;
   experience: string;
@@ -22,6 +25,10 @@ export interface LlmProvider {
   complete(prompt: string): Promise<string>;
 }
 
+interface FounderIntelAuditContext {
+  actorUserId?: string;
+}
+
 /**
  * FounderIntelService — Profile intake, strength inference, startup vector.
  *
@@ -38,67 +45,125 @@ export class FounderIntelService {
    * Process a free-text founder intake message.
    * Extracts structured profile, infers strengths, generates startup vector.
    */
-  async processIntake(workspaceId: string, rawText: string): Promise<FounderIntakeResult> {
+  async processIntake(
+    workspaceId: string,
+    rawText: string,
+    auditContext: FounderIntelAuditContext = {},
+  ): Promise<FounderIntakeResult> {
     // Step 1: Extract structured profile from free text
     const extracted = await this.extractProfile(rawText);
 
-    // Step 2: Upsert founder profile
-    const [profile] = await this.db
-      .insert(founderProfiles)
-      .values({
-        workspaceId,
-        name: extracted.name,
-        background: extracted.background,
-        experience: extracted.experience,
-        interests: extracted.interests,
-        startupVector: extracted.startupVector,
-      })
-      .onConflictDoUpdate({
-        target: founderProfiles.workspaceId,
-        set: {
+    return this.db.transaction(async (tx) => {
+      // Step 2: Upsert founder profile
+      const [profile] = await tx
+        .insert(founderProfiles)
+        .values({
+          workspaceId,
           name: extracted.name,
           background: extracted.background,
           experience: extracted.experience,
           interests: extracted.interests,
           startupVector: extracted.startupVector,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
+        })
+        .onConflictDoUpdate({
+          target: founderProfiles.workspaceId,
+          set: {
+            name: extracted.name,
+            background: extracted.background,
+            experience: extracted.experience,
+            interests: extracted.interests,
+            startupVector: extracted.startupVector,
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
 
-    if (!profile) throw new Error('Failed to upsert founder profile');
+      if (!profile) throw new Error('Failed to upsert founder profile');
 
-    // Step 3: Save assessment record (provenance)
-    await this.db.insert(founderAssessments).values({
-      founderId: profile.id,
-      assessmentType: 'intake',
-      responses: { rawText },
-      analysis: extracted.startupVector,
-    });
-
-    // Step 4: Upsert strength scores — delete existing, then insert fresh
-    await this.db
-      .delete(founderStrengths)
-      .where(eq(founderStrengths.founderId, profile.id));
-
-    for (const strength of extracted.strengths) {
-      await this.db.insert(founderStrengths).values({
+      // Step 3: Save assessment record (provenance)
+      await tx.insert(founderAssessments).values({
         founderId: profile.id,
-        dimension: strength.dimension,
-        score: strength.score,
-        evidence: strength.evidence,
+        assessmentType: 'intake',
+        responses: { rawText },
+        analysis: extracted.startupVector,
       });
-    }
 
-    return {
-      profileId: profile.id,
-      name: extracted.name,
-      background: extracted.background,
-      experience: extracted.experience,
-      interests: extracted.interests,
-      strengths: extracted.strengths,
-      startupVector: extracted.startupVector,
-    };
+      // Step 4: Upsert strength scores — delete existing, then insert fresh
+      await tx
+        .delete(founderStrengths)
+        .where(eq(founderStrengths.founderId, profile.id));
+
+      for (const strength of extracted.strengths) {
+        await tx.insert(founderStrengths).values({
+          founderId: profile.id,
+          dimension: strength.dimension,
+          score: strength.score,
+          evidence: strength.evidence,
+        });
+      }
+
+      const auditEventId = randomUUID();
+      const replayRef = `founder-intake:${workspaceId}:${profile.id}`;
+      const auditMetadata = {
+        profileId: profile.id,
+        assessmentType: 'intake',
+        rawTextLength: rawText.length,
+        interestCount: extracted.interests.length,
+        strengthCount: extracted.strengths.length,
+        startupVectorPresent: Boolean(extracted.startupVector),
+        evidenceContract: 'founder_intake_evidence_required',
+      };
+
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'FOUNDER_INTAKE_ANALYZED',
+        actor: `user:${auditContext.actorUserId ?? 'unknown'}`,
+        target: profile.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'founder_intake_analyzed',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: 'founder_intake_analyzed',
+        sourceType: 'founder_intel',
+        title: `Founder intake analyzed: ${profile.id}`,
+        summary: `Founder intake updated profile ${profile.id} and ${extracted.strengths.length} strength scores.`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'founder_intake_analyzed',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+      return {
+        profileId: profile.id,
+        evidenceItemId,
+        name: extracted.name,
+        background: extracted.background,
+        experience: extracted.experience,
+        interests: extracted.interests,
+        strengths: extracted.strengths,
+        startupVector: extracted.startupVector,
+      };
+    });
   }
 
   /**

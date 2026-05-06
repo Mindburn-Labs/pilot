@@ -1,4 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import {
+  auditLog,
+  evidenceItems,
+  founderAssessments,
+  founderProfiles,
+  founderStrengths,
+} from '@pilot/db/schema';
 import { FounderIntelService, type LlmProvider } from '../index.js';
 
 // ─── Mock Db Factory ───
@@ -15,8 +22,9 @@ function createThenableChain(resolveValue: unknown = []): Record<string, unknown
   return new Proxy({}, handler);
 }
 
-function createMockDb() {
-  const insertedValues: Array<Record<string, unknown>> = [];
+function createMockDb(options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+  const updates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
 
   const profileResult = {
     id: 'profile-001',
@@ -30,15 +38,33 @@ function createMockDb() {
     updatedAt: new Date(),
   };
 
-  const db = {
+  const selectMock = vi.fn().mockReturnValue(createThenableChain([]));
+  const deleteMock = vi.fn().mockReturnValue(createThenableChain());
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: Record<string, unknown> }>,
+    updateSink: Array<{ table: unknown; value: Record<string, unknown> }>,
+  ) => ({
     execute: vi.fn().mockResolvedValue([]),
 
-    select: vi.fn().mockReturnValue(createThenableChain([])),
+    select: selectMock,
 
-    insert: vi.fn().mockImplementation(() => {
+    insert: vi.fn().mockImplementation((table: unknown) => {
       const valuesProxy = (val: unknown): Record<string, unknown> => {
         if (val && typeof val === 'object') {
-          insertedValues.push(val as Record<string, unknown>);
+          insertSink.push({ table, value: val as Record<string, unknown> });
+        }
+        if (table === evidenceItems) {
+          return {
+            returning: vi.fn(async () => {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-founder-intake-1' }];
+            }),
+            then: (resolve: (v: unknown) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([{ id: 'evidence-founder-intake-1' }]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) =>
+              Promise.resolve([{ id: 'evidence-founder-intake-1' }]).catch(reject),
+          };
         }
         return createThenableChain([profileResult]);
       };
@@ -58,16 +84,38 @@ function createMockDb() {
       return new Proxy({}, handler);
     }),
 
-    update: vi.fn().mockReturnValue(createThenableChain()),
-    delete: vi.fn().mockReturnValue(createThenableChain()),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return createThenableChain();
+      }),
+    })),
+    delete: deleteMock,
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
 
     // Test accessors
-    _insertedValues: insertedValues,
+    get _insertedValues() {
+      return inserts.map((insert) => insert.value);
+    },
     get _insertedStrengths() {
-      return insertedValues.filter(
+      return inserts.map((insert) => insert.value).filter(
         (v) => 'dimension' in v,
       ) as Array<{ dimension: string; score: number; evidence: string }>;
     },
+    _inserts: inserts,
+    _updates: updates,
     _profileResult: profileResult,
   };
 
@@ -179,6 +227,81 @@ describe('FounderIntelService', () => {
 
       // delete() should have been called (to clear old strengths)
       expect(db.delete).toHaveBeenCalled();
+    });
+
+    it('writes audit-linked evidence for founder intake analysis', async () => {
+      const llm = createMockLlm(VALID_LLM_JSON);
+      const service = new FounderIntelService(db as never, llm);
+
+      const result = await service.processIntake('ws-001', 'I am Jane', {
+        actorUserId: 'user-1',
+      });
+
+      expect(result.evidenceItemId).toBe('evidence-founder-intake-1');
+      expect(db._inserts.map((insert) => insert.table)).toEqual([
+        founderProfiles,
+        founderAssessments,
+        founderStrengths,
+        founderStrengths,
+        founderStrengths,
+        founderStrengths,
+        founderStrengths,
+        auditLog,
+        evidenceItems,
+      ]);
+      expect(db._updates.map((update) => update.table)).toEqual([auditLog]);
+
+      const auditInsert = db._inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId: 'ws-001',
+        action: 'FOUNDER_INTAKE_ANALYZED',
+        actor: 'user:user-1',
+        target: 'profile-001',
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'founder_intake_analyzed',
+          replayRef: 'founder-intake:ws-001:profile-001',
+          profileId: 'profile-001',
+          assessmentType: 'intake',
+          rawTextLength: 9,
+          interestCount: 3,
+          strengthCount: 5,
+          startupVectorPresent: true,
+          evidenceContract: 'founder_intake_evidence_required',
+        },
+      });
+      expect(db._inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId: 'ws-001',
+        auditEventId: auditInsert.id,
+        evidenceType: 'founder_intake_analyzed',
+        sourceType: 'founder_intel',
+        redactionState: 'redacted',
+        replayRef: 'founder-intake:ws-001:profile-001',
+        metadata: {
+          profileId: 'profile-001',
+          evidenceContract: 'founder_intake_evidence_required',
+        },
+      });
+      expect(db._updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: {
+          evidenceItemId: 'evidence-founder-intake-1',
+        },
+      });
+    });
+
+    it('rolls back intake persistence when evidence persistence fails', async () => {
+      db = createMockDb({ failEvidence: true });
+      const llm = createMockLlm(VALID_LLM_JSON);
+      const service = new FounderIntelService(db as never, llm);
+
+      await expect(
+        service.processIntake('ws-001', 'I am Jane', { actorUserId: 'user-1' }),
+      ).rejects.toThrow('evidence unavailable');
+
+      expect(db._inserts).toEqual([]);
+      expect(db._updates).toEqual([]);
     });
   });
 
