@@ -57,7 +57,10 @@ function createConnectorsMock() {
   };
 }
 
-function captureEvidenceItemInserts(deps: ReturnType<typeof createMockDeps>) {
+function captureEvidenceItemInserts(
+  deps: ReturnType<typeof createMockDeps>,
+  options: { failEvidence?: boolean } = {},
+) {
   const insertedEvidenceItems: Array<Record<string, unknown>> = [];
   const originalInsert = deps.db.insert;
 
@@ -67,9 +70,10 @@ function captureEvidenceItemInserts(deps: ReturnType<typeof createMockDeps>) {
         values: vi.fn((value: unknown) => {
           insertedEvidenceItems.push(value as Record<string, unknown>);
           return {
-            returning: vi.fn(async () => [
-              { id: `evidence-item-${insertedEvidenceItems.length}` },
-            ]),
+            returning: vi.fn(async () => {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: `evidence-item-${insertedEvidenceItems.length}` }];
+            }),
           };
         }),
       };
@@ -453,15 +457,20 @@ describe('connectorRoutes', () => {
       );
       expect(body).toMatchObject({ queued: true, queue: 'pipeline.yc-private' });
       expect(body.evidenceItemId).toBe('evidence-item-1');
+      const auditValue = insertedValue(deps, auditLog);
       expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('pipeline.yc-private', {
         workspaceId: 'ws-1',
         grantId,
         action: 'validate',
         limit: 10,
+        auditEventId: auditValue['id'],
+        evidenceItemId: 'evidence-item-1',
+        replayRef: `connector:yc:session-validation:${grantId}`,
       });
       expect(connectors.markSessionValidated).toHaveBeenCalled();
       expect(evidence[0]).toMatchObject({
         workspaceId: 'ws-1',
+        auditEventId: auditValue['id'],
         evidenceType: 'connector_session_validation_queued',
         replayRef: `connector:yc:session-validation:${grantId}`,
         metadata: expect.objectContaining({
@@ -472,6 +481,37 @@ describe('connectorRoutes', () => {
           limit: 10,
         }),
       });
+      expect(updatedValue(deps, auditLog)['metadata']).toMatchObject({
+        evidenceItemId: 'evidence-item-1',
+      });
+    });
+
+    it('does not queue validation when evidence persistence fails', async () => {
+      const connectors = createConnectorsMock();
+      const grantId = '00000000-0000-4000-8000-000000000001';
+      connectors.getGrantByWorkspaceConnector.mockResolvedValue({
+        ...ownedGrant,
+        id: grantId,
+      });
+      connectors.getSessionRecord.mockResolvedValue({
+        id: '00000000-0000-4000-8000-000000000002',
+        grantId,
+        sessionType: 'browser_storage_state',
+      });
+      const deps = createMockDeps({ connectors: connectors as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/yc/session/validate',
+        { grantId, action: 'validate', limit: 10 },
+        { 'X-Workspace-Id': 'ws-1' },
+      );
+
+      expect(res.status).toBe(500);
+      expect(deps.orchestrator.boss.send).not.toHaveBeenCalled();
+      expect(connectors.markSessionValidated).not.toHaveBeenCalled();
     });
   });
 

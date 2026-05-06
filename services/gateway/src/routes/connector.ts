@@ -250,11 +250,37 @@ export function connectorRoutes(deps: GatewayDeps) {
     if (!record) return c.json({ error: 'No session stored for this grant' }, 404);
 
     const queue = name === 'yc' ? 'pipeline.yc-private' : `pipeline.${name}-session`;
+    const replayRef = `connector:${name}:session-validation:${parsed.data.grantId}`;
+    const proof = await appendConnectorEvidenceProof(deps, {
+      workspaceId,
+      connector,
+      evidenceType: 'connector_session_validation_queued',
+      title: `Connector session validation queued: ${connector.name}`,
+      summary: `Browser session validation was queued for ${name}`,
+      replayRef,
+      hashContent: {
+        connectorId: name,
+        grantId: parsed.data.grantId,
+        action: parsed.data.action,
+        limit: parsed.data.limit ?? null,
+        queue,
+      },
+      metadata: {
+        grantId: parsed.data.grantId,
+        action: parsed.data.action,
+        limit: parsed.data.limit ?? null,
+        queue,
+      },
+    });
+
     const jobId = await deps.orchestrator.boss.send(queue, {
       workspaceId,
       grantId: parsed.data.grantId,
       action: parsed.data.action,
       limit: parsed.data.limit,
+      auditEventId: proof.auditEventId,
+      evidenceItemId: proof.evidenceItemId,
+      replayRef,
     });
 
     if (parsed.data.action === 'validate') {
@@ -263,31 +289,28 @@ export function connectorRoutes(deps: GatewayDeps) {
       });
     }
 
-    const evidenceItemId = await appendConnectorEvidence(deps, {
-      workspaceId,
-      connector,
-      evidenceType: 'connector_session_validation_queued',
-      title: `Connector session validation queued: ${connector.name}`,
-      summary: `Browser session validation was queued for ${name}`,
-      replayRef: `connector:${name}:session-validation:${parsed.data.grantId}`,
-      hashContent: {
-        connectorId: name,
-        grantId: parsed.data.grantId,
-        action: parsed.data.action,
-        limit: parsed.data.limit ?? null,
-        queue,
-        jobId: jobId ?? null,
-      },
-      metadata: {
-        grantId: parsed.data.grantId,
-        action: parsed.data.action,
-        limit: parsed.data.limit ?? null,
-        queue,
-        jobId: jobId ?? null,
-      },
-    });
+    await deps.db
+      .update(auditLog)
+      .set({
+        metadata: {
+          evidenceType: 'connector_session_validation_queued',
+          replayRef,
+          evidenceItemId: proof.evidenceItemId,
+          connectorId: connector.id,
+          connectorName: connector.name,
+          authType: connector.authType,
+          requiresApproval: connector.requiresApproval,
+          productionReady: false,
+          grantId: parsed.data.grantId,
+          action: parsed.data.action,
+          limit: parsed.data.limit ?? null,
+          queue,
+          jobId: jobId ?? null,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, proof.auditEventId)));
 
-    return c.json({ queued: true, queue, jobId, evidenceItemId });
+    return c.json({ queued: true, queue, jobId, evidenceItemId: proof.evidenceItemId });
   });
 
   app.delete('/:name/session', async (c) => {
@@ -645,6 +668,22 @@ async function appendConnectorEvidence(
     metadata: Record<string, unknown>;
   },
 ) {
+  return (await appendConnectorEvidenceProof(deps, input)).evidenceItemId;
+}
+
+async function appendConnectorEvidenceProof(
+  deps: GatewayDeps,
+  input: {
+    workspaceId: string;
+    connector?: Connector | null;
+    evidenceType: string;
+    title: string;
+    summary: string;
+    replayRef: string;
+    hashContent: unknown;
+    metadata: Record<string, unknown>;
+  },
+): Promise<{ auditEventId: string; evidenceItemId: string }> {
   const auditEventId = randomUUID();
   const evidenceMetadata = {
     connectorId: input.connector?.id ?? null,
@@ -660,42 +699,46 @@ async function appendConnectorEvidence(
     ...evidenceMetadata,
   };
 
-  await deps.db.insert(auditLog).values({
-    id: auditEventId,
-    workspaceId: input.workspaceId,
-    action: input.evidenceType.toUpperCase(),
-    actor: `workspace:${input.workspaceId}`,
-    target: input.connector?.id ?? input.connector?.name ?? input.evidenceType,
-    verdict: 'recorded',
-    reason: input.summary,
-    metadata: auditMetadata,
+  const evidenceItemId = await deps.db.transaction(async (tx) => {
+    await tx.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId: input.workspaceId,
+      action: input.evidenceType.toUpperCase(),
+      actor: `workspace:${input.workspaceId}`,
+      target: input.connector?.id ?? input.connector?.name ?? input.evidenceType,
+      verdict: 'recorded',
+      reason: input.summary,
+      metadata: auditMetadata,
+    });
+
+    const createdEvidenceItemId = await appendEvidenceItem(tx, {
+      workspaceId: input.workspaceId,
+      auditEventId,
+      evidenceType: input.evidenceType,
+      sourceType: 'gateway_connector',
+      title: input.title,
+      summary: input.summary,
+      redactionState: 'redacted',
+      sensitivity: 'sensitive',
+      contentHash: hashJson(input.hashContent),
+      replayRef: input.replayRef,
+      metadata: evidenceMetadata,
+    });
+
+    await tx
+      .update(auditLog)
+      .set({
+        metadata: {
+          ...auditMetadata,
+          evidenceItemId: createdEvidenceItemId,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+    return createdEvidenceItemId;
   });
 
-  const evidenceItemId = await appendEvidenceItem(deps.db, {
-    workspaceId: input.workspaceId,
-    auditEventId,
-    evidenceType: input.evidenceType,
-    sourceType: 'gateway_connector',
-    title: input.title,
-    summary: input.summary,
-    redactionState: 'redacted',
-    sensitivity: 'sensitive',
-    contentHash: hashJson(input.hashContent),
-    replayRef: input.replayRef,
-    metadata: evidenceMetadata,
-  });
-
-  await deps.db
-    .update(auditLog)
-    .set({
-      metadata: {
-        ...auditMetadata,
-        evidenceItemId,
-      },
-    })
-    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
-
-  return evidenceItemId;
+  return { auditEventId, evidenceItemId };
 }
 
 function sortedKeys(value: Record<string, unknown> | undefined) {
