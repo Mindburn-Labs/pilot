@@ -68,6 +68,8 @@ function restoreEnv(name: keyof typeof originalEnv) {
 }
 
 function freshMockDb() {
+  const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
   const db: any = {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
@@ -79,18 +81,26 @@ function freshMockDb() {
         })),
       })),
     })),
-    insert: vi.fn(() => ({
-      values: vi.fn(() => ({
-        then: (r: any) => r([]),
-        catch: vi.fn(),
-      })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        inserts.push({ table, value });
+        return {
+          then: (r: any) => r([]),
+          catch: vi.fn(),
+        };
+      }),
     })),
-    update: vi.fn(() => ({
-      set: vi.fn(() => ({
-        where: vi.fn(() => Promise.resolve()),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => ({
+        where: vi.fn(() => {
+          updates.push({ table, value });
+          return Promise.resolve();
+        }),
       })),
     })),
     transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(db)),
+    _inserts: inserts,
+    _updates: updates,
   };
   return db;
 }
@@ -593,6 +603,9 @@ describe('registerJobHandlers', () => {
             replayPath: '/tmp/raw-captures/private.html',
             batch: 'W24',
             limit: 3,
+            auditEventId: 'request-audit-1',
+            evidenceItemId: 'request-evidence-1',
+            replayRef: 'yc-ingestion:ws-1:public:request-1',
           },
         },
       ]);
@@ -607,10 +620,22 @@ describe('registerJobHandlers', () => {
         '--workspace-id',
         'ws-1',
       ]);
+      expect(mockDb._inserts).toHaveLength(1);
+      expect(mockDb._inserts[0]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          workspaceId: 'ws-1',
+          action: 'PIPELINE_JOB_SUCCEEDED',
+          actor: 'job:pipeline.yc-scrape',
+          target: 'job-1',
+          verdict: 'allow',
+        },
+      });
       expect(appendEvidenceItem).toHaveBeenCalledWith(
         mockDb,
         expect.objectContaining({
           workspaceId: 'ws-1',
+          auditEventId: mockDb._inserts[0].value.id,
           evidenceType: 'pipeline_job_succeeded',
           sourceType: 'pipeline_worker',
           redactionState: 'redacted',
@@ -623,9 +648,21 @@ describe('registerJobHandlers', () => {
         pipeline: 'pipeline.yc-scrape',
         jobId: 'job-1',
         status: 'pipeline_job_succeeded',
+        requestAuditEventId: 'request-audit-1',
+        requestEvidenceItemId: 'request-evidence-1',
+        requestReplayRef: 'yc-ingestion:ws-1:public:request-1',
         credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
       });
       expect(JSON.stringify(metadata)).not.toContain('/tmp/raw-captures/private.html');
+      expect(mockDb._updates[0]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          metadata: expect.objectContaining({
+            evidenceItemId: 'evidence-item-1',
+            replayRef: 'pipeline:pipeline.yc-scrape:job-1:pipeline_job_succeeded',
+          }),
+        },
+      });
     });
 
     it('indexes failed workspace pipeline jobs before rethrowing', async () => {
@@ -645,15 +682,29 @@ describe('registerJobHandlers', () => {
               grantId: 'grant-secret-id',
               action: 'sync',
               limit: 2,
+              auditEventId: 'request-audit-2',
+              evidenceItemId: 'request-evidence-2',
+              replayRef: 'yc-ingestion:ws-2:private:request-2',
             },
           },
         ]),
       ).rejects.toThrow('network denied');
 
+      expect(mockDb._inserts[0]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          workspaceId: 'ws-2',
+          action: 'PIPELINE_JOB_FAILED',
+          actor: 'job:pipeline.yc-private',
+          target: 'job-2',
+          verdict: 'error',
+        },
+      });
       expect(appendEvidenceItem).toHaveBeenCalledWith(
         mockDb,
         expect.objectContaining({
           workspaceId: 'ws-2',
+          auditEventId: mockDb._inserts[0].value.id,
           evidenceType: 'pipeline_job_failed',
           sourceType: 'pipeline_worker',
           redactionState: 'redacted',
@@ -666,6 +717,9 @@ describe('registerJobHandlers', () => {
         pipeline: 'pipeline.yc-private',
         jobId: 'job-2',
         status: 'pipeline_job_failed',
+        requestAuditEventId: 'request-audit-2',
+        requestEvidenceItemId: 'request-evidence-2',
+        requestReplayRef: 'yc-ingestion:ws-2:private:request-2',
         error: {
           name: 'Error',
           redactedPreview: 'network denied for grant-[redacted] token=[redacted]',
@@ -709,6 +763,15 @@ describe('registerJobHandlers', () => {
         'ws-2',
       ]);
       expect(appendEvidenceItem).toHaveBeenCalledTimes(2);
+      expect(mockDb._inserts).toHaveLength(2);
+      expect(mockDb._inserts.map((insert: any) => insert.value.workspaceId)).toEqual([
+        'ws-1',
+        'ws-2',
+      ]);
+      expect(mockDb._inserts.map((insert: any) => insert.value.action)).toEqual([
+        'PIPELINE_JOB_SUCCEEDED',
+        'PIPELINE_JOB_SUCCEEDED',
+      ]);
       expect(vi.mocked(appendEvidenceItem).mock.calls.map((call) => call[1].workspaceId)).toEqual([
         'ws-1',
         'ws-2',
@@ -734,6 +797,7 @@ describe('registerJobHandlers', () => {
 
       expect(pipelineRunner).toHaveBeenCalledWith('pipeline.ingest-knowledge', []);
       expect(appendEvidenceItem).not.toHaveBeenCalled();
+      expect(mockDb._inserts).toEqual([]);
     });
   });
 });

@@ -1,5 +1,5 @@
 import PgBoss from 'pg-boss';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, isNull, lt } from 'drizzle-orm';
 import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
@@ -61,6 +61,13 @@ interface PipelineRunResult {
   stdoutPreview: string;
   stderrPreview: string | null;
 }
+
+type PipelineJobData = {
+  workspaceId?: string;
+  auditEventId?: string;
+  evidenceItemId?: string;
+  replayRef?: string;
+};
 
 /**
  * Register background job handlers on a pg-boss instance.
@@ -367,7 +374,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
 
   async function runPipelineWithEvidence(
     name: keyof typeof PIPELINE_ALLOWLIST,
-    job: PgBoss.Job<{ workspaceId?: string }>,
+    job: PgBoss.Job<PipelineJobData>,
     extraArgs: string[] = [],
   ): Promise<PipelineRunResult> {
     const workspaceId = job.data?.workspaceId;
@@ -396,7 +403,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
 
   async function runPublicPipelineForAllWorkspaces(
     name: 'pipeline.yc-scrape' | 'pipeline.startup-school',
-    job: PgBoss.Job<{ workspaceId?: string }>,
+    job: PgBoss.Job<PipelineJobData>,
     baseArgs: string[] = [],
   ): Promise<void> {
     const rows = await deps.db.select({ id: workspaces.id }).from(workspaces);
@@ -420,7 +427,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
 
   async function appendPipelineEvidence(input: {
     name: keyof typeof PIPELINE_ALLOWLIST;
-    job: PgBoss.Job<{ workspaceId?: string }>;
+    job: PgBoss.Job<PipelineJobData>;
     workspaceId?: string;
     status: 'pipeline_job_succeeded' | 'pipeline_job_failed';
     result?: PipelineRunResult;
@@ -435,12 +442,18 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
       return;
     }
 
+    const workspaceId = input.workspaceId;
     const args = input.result?.args ?? input.fallbackArgs ?? [];
     const sanitizedArgs = sanitizePipelineArgs(args);
+    const auditEventId = randomUUID();
+    const replayRef = `pipeline:${input.name}:${input.job.id ?? hashJson(args).slice(0, 16)}:${input.status}`;
     const metadata = {
       pipeline: input.name,
       jobId: input.job.id ?? null,
       status: input.status,
+      requestAuditEventId: input.job.data?.auditEventId ?? null,
+      requestEvidenceItemId: input.job.data?.evidenceItemId ?? null,
+      requestReplayRef: input.job.data?.replayRef ?? null,
       scriptPath: input.result?.scriptPath ?? PIPELINE_ALLOWLIST[input.name],
       args: sanitizedArgs,
       stdoutPreview: input.result?.stdoutPreview ?? null,
@@ -449,23 +462,56 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
       credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
     };
 
-    await appendEvidenceItem(deps.db, {
-      workspaceId: input.workspaceId,
-      evidenceType: input.status,
-      sourceType: 'pipeline_worker',
-      title:
-        input.status === 'pipeline_job_succeeded'
-          ? `${input.name} completed`
-          : `${input.name} failed`,
-      summary:
-        input.status === 'pipeline_job_succeeded'
-          ? 'Workspace-scoped background ingestion pipeline completed.'
-          : 'Workspace-scoped background ingestion pipeline failed before completion.',
-      redactionState: 'redacted',
-      sensitivity: input.name === 'pipeline.yc-private' ? 'sensitive' : 'internal',
-      contentHash: hashJson(metadata),
-      replayRef: `pipeline:${input.name}:${input.job.id ?? hashJson(args).slice(0, 16)}:${input.status}`,
-      metadata,
+    await deps.db.transaction(async (tx) => {
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action:
+          input.status === 'pipeline_job_succeeded'
+            ? 'PIPELINE_JOB_SUCCEEDED'
+            : 'PIPELINE_JOB_FAILED',
+        actor: `job:${input.name}`,
+        target: input.job.id ?? input.name,
+        verdict: input.status === 'pipeline_job_succeeded' ? 'allow' : 'error',
+        metadata: {
+          evidenceType: input.status,
+          replayRef,
+          evidenceItemId: null,
+          ...metadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: input.status,
+        sourceType: 'pipeline_worker',
+        title:
+          input.status === 'pipeline_job_succeeded'
+            ? `${input.name} completed`
+            : `${input.name} failed`,
+        summary:
+          input.status === 'pipeline_job_succeeded'
+            ? 'Workspace-scoped background ingestion pipeline completed.'
+            : 'Workspace-scoped background ingestion pipeline failed before completion.',
+        redactionState: 'redacted',
+        sensitivity: input.name === 'pipeline.yc-private' ? 'sensitive' : 'internal',
+        contentHash: hashJson(metadata),
+        replayRef,
+        metadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: input.status,
+            replayRef,
+            evidenceItemId,
+            ...metadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
     });
   }
 
@@ -477,6 +523,9 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
         batch?: string;
         limit?: number;
         workspaceId?: string;
+        auditEventId?: string;
+        evidenceItemId?: string;
+        replayRef?: string;
       }>[],
     ) => {
       for (const job of jobs) {
@@ -502,7 +551,16 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
 
   boss.work(
     'pipeline.startup-school',
-    async (jobs: PgBoss.Job<{ replayPath?: string; limit?: number; workspaceId?: string }>[]) => {
+    async (
+      jobs: PgBoss.Job<{
+        replayPath?: string;
+        limit?: number;
+        workspaceId?: string;
+        auditEventId?: string;
+        evidenceItemId?: string;
+        replayRef?: string;
+      }>[],
+    ) => {
       for (const job of jobs) {
         try {
           const args = [
@@ -542,6 +600,9 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
         action?: 'validate' | 'sync';
         limit?: number;
         workspaceId?: string;
+        auditEventId?: string;
+        evidenceItemId?: string;
+        replayRef?: string;
       }>[],
     ) => {
       for (const job of jobs) {
