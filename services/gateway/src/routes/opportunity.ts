@@ -1,6 +1,9 @@
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { appendEvidenceItem } from '@pilot/db';
 import {
+  auditLog,
   opportunities,
   opportunityClusters,
   opportunityClusterMembers,
@@ -10,7 +13,7 @@ import {
 import { CreateOpportunityInput } from '@pilot/shared/schemas';
 import { getCapabilityRecord } from '@pilot/shared/capabilities';
 import { type GatewayDeps } from '../index.js';
-import { getWorkspaceId, workspaceIdMismatch } from '../lib/workspace.js';
+import { getWorkspaceId, requireWorkspaceRole, workspaceIdMismatch } from '../lib/workspace.js';
 
 export function opportunityRoutes(deps: GatewayDeps) {
   const app = new Hono();
@@ -61,6 +64,8 @@ export function opportunityRoutes(deps: GatewayDeps) {
   app.post('/', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'create opportunities');
+    if (roleDenied) return roleDenied;
     const raw = await c.req.json();
     if (workspaceIdMismatch(c, raw.workspaceId)) {
       return c.json({ error: 'workspaceId does not match authenticated workspace' }, 403);
@@ -75,19 +80,80 @@ export function opportunityRoutes(deps: GatewayDeps) {
     }
 
     const body = parsed.data;
-    const [opp] = await deps.db
-      .insert(opportunities)
-      .values({
-        source: body.source,
-        sourceUrl: body.sourceUrl,
-        title: body.title,
-        description: body.description,
-        workspaceId: body.workspaceId,
-        status: 'discovered',
-      })
-      .returning();
+    const created = await deps.db
+      .transaction(async (tx) => {
+        const [opp] = await tx
+          .insert(opportunities)
+          .values({
+            source: body.source,
+            sourceUrl: body.sourceUrl,
+            title: body.title,
+            description: body.description,
+            workspaceId: body.workspaceId,
+            status: 'discovered',
+          })
+          .returning();
 
-    return c.json(opp, 201);
+        if (!opp) throw new Error('failed to create opportunity');
+
+        const auditEventId = randomUUID();
+        const replayRef = `opportunity:${workspaceId}:${opp.id}:created`;
+        const auditMetadata = {
+          opportunityId: opp.id,
+          source: body.source,
+          sourceUrlPresent: Boolean(body.sourceUrl),
+          title: body.title,
+          descriptionLength: body.description.length,
+          status: 'discovered',
+          evidenceContract: 'opportunity_create_evidence_required',
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'OPPORTUNITY_CREATED',
+          actor: `user:${c.get('userId') ?? 'unknown'}`,
+          target: opp.id,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'opportunity_created',
+            replayRef,
+            ...auditMetadata,
+          },
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'opportunity_created',
+          sourceType: 'gateway_opportunity_route',
+          title: `Opportunity created: ${body.title}`,
+          summary:
+            'Workspace opportunity record was created; description is not stored in evidence metadata.',
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          replayRef,
+          metadata: auditMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'opportunity_created',
+              replayRef,
+              evidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return { opp, evidenceItemId };
+      })
+      .catch(() => null);
+
+    if (!created) return c.json({ error: 'Failed to persist opportunity evidence' }, 500);
+    return c.json({ ...created.opp, evidenceItemId: created.evidenceItemId }, 201);
   });
 
   // ─── Batch score — enqueue scoring for all unscored opportunities ───

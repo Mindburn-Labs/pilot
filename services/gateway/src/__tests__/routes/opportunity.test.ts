@@ -1,6 +1,86 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { auditLog, evidenceItems, opportunities } from '@pilot/db/schema';
 import { opportunityRoutes } from '../../routes/opportunity.js';
 import { testApp, expectJson, mockOpportunity, createMockDeps } from '../helpers.js';
+
+function createOpportunityCreateDb(workspaceId: string, options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => []),
+          orderBy: vi.fn(() => ({ limit: vi.fn(async () => []) })),
+        })),
+        orderBy: vi.fn(() => ({ limit: vi.fn(async () => []) })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === opportunities) {
+              return [
+                mockOpportunity({
+                  id: 'opp-1',
+                  workspaceId,
+                  source: value['source'],
+                  sourceUrl: value['sourceUrl'],
+                  title: value['title'],
+                  description: value['description'],
+                  status: value['status'],
+                }),
+              ];
+            }
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-opportunity-create-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates };
+}
 
 describe('opportunityRoutes', () => {
   let deps: ReturnType<typeof createMockDeps>;
@@ -119,17 +199,109 @@ describe('opportunityRoutes', () => {
       expect(json.error).toBe('workspaceId does not match authenticated workspace');
     });
 
-    it('creates opportunity and returns 201', async () => {
-      const created = mockOpportunity({ source: 'scraper', title: 'New Opp' });
-
-      deps.db.insert = vi.fn(() => ({
-        values: vi.fn(() => ({
-          returning: vi.fn(async () => [created]),
-          then: (r: any) => r([created]),
-        })),
-      })) as any;
-
+    it('denies members from creating opportunities', async () => {
       const res = await fetch(
+        'POST',
+        '/',
+        {
+          source: 'scraper',
+          title: 'New Opp',
+          description: 'A scraped opportunity',
+        },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+      expect(deps.db.insert).not.toHaveBeenCalled();
+    });
+
+    it('writes audit-linked evidence when creating an opportunity', async () => {
+      const { db, inserts, updates } = createOpportunityCreateDb(workspaceId);
+      const scoped = testApp(opportunityRoutes, createMockDeps({ db: db as never }));
+
+      const res = await scoped.fetch(
+        'POST',
+        '/',
+        {
+          source: 'scraper',
+          title: 'New Opp',
+          description: 'A scraped opportunity',
+          sourceUrl: 'https://example.com/opportunities/1',
+        },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json.id).toBe('opp-1');
+      expect(json.source).toBe('scraper');
+      expect(json.evidenceItemId).toBe('evidence-opportunity-create-1');
+      expect(inserts.map((insert) => insert.table)).toEqual([
+        opportunities,
+        auditLog,
+        evidenceItems,
+      ]);
+      expect(inserts.find((insert) => insert.table === opportunities)?.value).toMatchObject({
+        workspaceId,
+        source: 'scraper',
+        sourceUrl: 'https://example.com/opportunities/1',
+        title: 'New Opp',
+        description: 'A scraped opportunity',
+        status: 'discovered',
+      });
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId,
+        action: 'OPPORTUNITY_CREATED',
+        actor: 'user:user-1',
+        target: 'opp-1',
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'opportunity_created',
+          replayRef: `opportunity:${workspaceId}:opp-1:created`,
+          opportunityId: 'opp-1',
+          source: 'scraper',
+          sourceUrlPresent: true,
+          title: 'New Opp',
+          descriptionLength: 21,
+          status: 'discovered',
+          evidenceContract: 'opportunity_create_evidence_required',
+        },
+      });
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value as {
+        metadata: Record<string, unknown>;
+      };
+      expect(evidenceInsert).toMatchObject({
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceType: 'opportunity_created',
+        sourceType: 'gateway_opportunity_route',
+        redactionState: 'redacted',
+        replayRef: `opportunity:${workspaceId}:opp-1:created`,
+      });
+      expect(evidenceInsert.metadata).not.toHaveProperty('description');
+      expect(evidenceInsert.metadata).toMatchObject({
+        opportunityId: 'opp-1',
+        descriptionLength: 21,
+        evidenceContract: 'opportunity_create_evidence_required',
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: {
+          evidenceItemId: 'evidence-opportunity-create-1',
+        },
+      });
+    });
+
+    it('fails closed without committing opportunity rows when evidence persistence fails', async () => {
+      const { db, inserts, updates } = createOpportunityCreateDb(workspaceId, {
+        failEvidence: true,
+      });
+      const scoped = testApp(opportunityRoutes, createMockDeps({ db: db as never }));
+
+      const res = await scoped.fetch(
         'POST',
         '/',
         {
@@ -139,10 +311,11 @@ describe('opportunityRoutes', () => {
         },
         wsHeader,
       );
-      const json = await expectJson<Record<string, unknown>>(res, 201);
+      const json = await expectJson<{ error: string }>(res, 500);
 
-      expect(json.id).toBe('opp-1');
-      expect(json.source).toBe('scraper');
+      expect(json.error).toContain('Failed to persist opportunity evidence');
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
     });
   });
 });
