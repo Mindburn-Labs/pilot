@@ -997,48 +997,51 @@ export class AgentLoop {
     const { gov, workspaceId, taskRunId, govAction, govResource, frame } = params;
     try {
       const { evidencePacks } = await import('@pilot/db/schema');
-      const [pack] = await this.db
-        .insert(evidencePacks)
-        .values({
-          workspaceId,
-          decisionId: gov.decisionId,
-          taskRunId,
-          verdict: gov.verdict,
-          reasonCode: gov.reason ?? null,
-          policyVersion: gov.policyVersion,
-          decisionHash: gov.decisionHash ?? null,
-          action: govAction,
-          resource: govResource,
-          principal: gov.principal,
-          signedBlob: gov.signedBlob ?? null,
-          // Phase 12 — anchor child's receipt to parent's SUBAGENT_SPAWN pack.
-          parentEvidencePackId: frame?.parentEvidencePackId ?? null,
-        })
-        .returning({ id: evidencePacks.id });
-      if (pack?.id) {
-        await appendEvidenceItem(this.db, {
-          workspaceId,
-          taskRunId,
-          evidencePackId: pack.id,
-          evidenceType: govAction === 'LLM_INFERENCE' ? 'llm_inference_receipt' : 'tool_receipt',
-          sourceType: 'agent_loop',
-          title: `${govAction} ${gov.verdict}`,
-          summary: gov.reason ?? `${govAction} on ${govResource}`,
-          redactionState: 'redacted',
-          sensitivity: 'internal',
-          contentHash: gov.decisionHash ?? null,
-          replayRef: `helm:${gov.decisionId}`,
-          metadata: {
+      const pack = await this.db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(evidencePacks)
+          .values({
+            workspaceId,
             decisionId: gov.decisionId,
+            taskRunId,
             verdict: gov.verdict,
+            reasonCode: gov.reason ?? null,
             policyVersion: gov.policyVersion,
+            decisionHash: gov.decisionHash ?? null,
             action: govAction,
             resource: govResource,
             principal: gov.principal,
+            signedBlob: gov.signedBlob ?? null,
+            // Phase 12 — anchor child's receipt to parent's SUBAGENT_SPAWN pack.
             parentEvidencePackId: frame?.parentEvidencePackId ?? null,
-          },
-        });
-      }
+          })
+          .returning({ id: evidencePacks.id });
+        if (row?.id) {
+          await appendEvidenceItem(tx, {
+            workspaceId,
+            taskRunId,
+            evidencePackId: row.id,
+            evidenceType: govAction === 'LLM_INFERENCE' ? 'llm_inference_receipt' : 'tool_receipt',
+            sourceType: 'agent_loop',
+            title: `${govAction} ${gov.verdict}`,
+            summary: gov.reason ?? `${govAction} on ${govResource}`,
+            redactionState: 'redacted',
+            sensitivity: 'internal',
+            contentHash: gov.decisionHash ?? null,
+            replayRef: `helm:${gov.decisionId}`,
+            metadata: {
+              decisionId: gov.decisionId,
+              verdict: gov.verdict,
+              policyVersion: gov.policyVersion,
+              action: govAction,
+              resource: govResource,
+              principal: gov.principal,
+              parentEvidencePackId: frame?.parentEvidencePackId ?? null,
+            },
+          });
+        }
+        return row;
+      });
       // v1.2.1 — L1 structural integrity check. Non-fatal; warnings logged.
       try {
         const result = validateL1({
