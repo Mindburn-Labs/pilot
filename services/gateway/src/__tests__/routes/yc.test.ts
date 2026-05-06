@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { auditLog, evidenceItems } from '@pilot/db/schema';
 import { ycRoutes } from '../../routes/yc.js';
 import { createMockDeps, expectJson, testApp } from '../helpers.js';
 
@@ -21,6 +22,73 @@ vi.mock('@pilot/yc-intel', () => ({
 beforeEach(() => {
   Object.values(mockYc).forEach((fn) => fn.mockClear());
 });
+
+function createYcIngestionDb(options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: Record<string, unknown> }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => []),
+        })),
+        orderBy: vi.fn(() => ({
+          limit: vi.fn(async () => []),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-yc-ingestion-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => ({
+        where: vi.fn(async () => {
+          updateSink.push({ table, value });
+          return [];
+        }),
+      })),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates };
+}
 
 describe('ycRoutes', () => {
   // ─── GET /companies ───
@@ -122,7 +190,11 @@ describe('ycRoutes', () => {
 
   describe('POST /ingestion/public', () => {
     it('queues public ingestion jobs', async () => {
-      const deps = createMockDeps();
+      const { db, inserts, updates } = createYcIngestionDb();
+      const deps = createMockDeps({
+        db: db as any,
+        orchestrator: { boss: { send: vi.fn(async () => 'job-1') } } as any,
+      });
       const { fetch } = testApp(ycRoutes, deps);
 
       const res = await fetch(
@@ -131,17 +203,82 @@ describe('ycRoutes', () => {
         { source: 'all', limit: 25 },
         { 'X-Workspace-Id': 'ws-1' },
       );
-      const json = await expectJson<{ queued: boolean; jobs: Array<{ queue: string }> }>(res, 202);
+      const json = await expectJson<{
+        queued: boolean;
+        evidenceItemId: string;
+        jobs: Array<{ queue: string }>;
+      }>(res, 202);
 
       expect(json.queued).toBe(true);
+      expect(json.evidenceItemId).toBe('evidence-yc-ingestion-1');
       expect(json.jobs.map((job) => job.queue)).toEqual(['pipeline.yc-scrape', 'pipeline.startup-school']);
+      expect(inserts.map(({ table }) => table)).toEqual([auditLog, evidenceItems]);
+      expect(updates.map(({ table }) => table)).toEqual([auditLog, auditLog]);
+      expect(inserts[0].value).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'YC_PUBLIC_INGESTION_REQUESTED',
+        actor: 'user:user-1',
+        verdict: 'allow',
+      });
+      expect(inserts[1].value).toMatchObject({
+        workspaceId: 'ws-1',
+        auditEventId: inserts[0].value['id'],
+        evidenceType: 'yc_public_ingestion_requested',
+        sourceType: 'gateway_yc_route',
+        redactionState: 'redacted',
+      });
+      expect(deps.orchestrator.boss?.send).toHaveBeenCalledWith('pipeline.yc-scrape', {
+        workspaceId: 'ws-1',
+        batch: undefined,
+        limit: 25,
+        auditEventId: inserts[0].value['id'],
+        evidenceItemId: 'evidence-yc-ingestion-1',
+        replayRef: expect.stringContaining('yc-ingestion:ws-1:public:'),
+      });
+    });
+
+    it('denies public ingestion for workspace members', async () => {
+      const deps = createMockDeps();
+      const { fetch } = testApp(ycRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/ingestion/public',
+        { source: 'companies' },
+        { 'X-Workspace-Id': 'ws-1', 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json).toMatchObject({ error: 'insufficient workspace role', requiredRole: 'partner' });
+      expect(deps.orchestrator.boss?.send).not.toHaveBeenCalled();
+    });
+
+    it('does not queue public ingestion when evidence persistence fails', async () => {
+      const { db, inserts, updates } = createYcIngestionDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as any });
+      const { fetch } = testApp(ycRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/ingestion/public',
+        { source: 'companies', limit: 10 },
+        { 'X-Workspace-Id': 'ws-1' },
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('Failed to persist YC public ingestion evidence');
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
+      expect(deps.orchestrator.boss?.send).not.toHaveBeenCalled();
     });
   });
 
   describe('POST /ingestion/private', () => {
     it('queues private yc sync job', async () => {
       const grantId = '00000000-0000-4000-8000-000000000001';
+      const { db, inserts } = createYcIngestionDb();
       const deps = createMockDeps({
+        db: db as any,
         connectors: {
           getGrantByWorkspaceConnector: vi.fn(async () => ({ id: grantId, workspaceId: 'ws-1' })),
         } as any,
@@ -162,7 +299,32 @@ describe('ycRoutes', () => {
         grantId,
         action: 'sync',
         limit: 5,
+        auditEventId: inserts[0].value['id'],
+        evidenceItemId: 'evidence-yc-ingestion-1',
+        replayRef: expect.stringContaining('yc-ingestion:ws-1:private:'),
       });
+    });
+
+    it('requires owner role for private yc sync jobs', async () => {
+      const grantId = '00000000-0000-4000-8000-000000000001';
+      const deps = createMockDeps({
+        connectors: {
+          getGrantByWorkspaceConnector: vi.fn(async () => ({ id: grantId, workspaceId: 'ws-1' })),
+        } as any,
+      });
+      const { fetch } = testApp(ycRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/ingestion/private',
+        { grantId, action: 'sync', limit: 5 },
+        { 'X-Workspace-Id': 'ws-1', 'X-Workspace-Role': 'partner' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json).toMatchObject({ error: 'insufficient workspace role', requiredRole: 'owner' });
+      expect(deps.connectors?.getGrantByWorkspaceConnector).not.toHaveBeenCalled();
+      expect(deps.orchestrator.boss?.send).not.toHaveBeenCalled();
     });
   });
 
@@ -173,7 +335,8 @@ describe('ycRoutes', () => {
         id: ingestionRecordId,
         rawStoragePath: '/tmp/yc-companies.json',
       });
-      const deps = createMockDeps();
+      const { db, inserts } = createYcIngestionDb();
+      const deps = createMockDeps({ db: db as any });
       const { fetch } = testApp(ycRoutes, deps);
 
       const res = await fetch(
@@ -188,7 +351,34 @@ describe('ycRoutes', () => {
       expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('pipeline.yc-scrape', {
         workspaceId: 'ws-1',
         replayPath: '/tmp/yc-companies.json',
+        auditEventId: inserts[0].value['id'],
+        evidenceItemId: 'evidence-yc-ingestion-1',
+        replayRef: expect.stringContaining('yc-ingestion:ws-1:replay:'),
       });
+    });
+
+    it('does not queue replay when evidence persistence fails', async () => {
+      const ingestionRecordId = '00000000-0000-4000-8000-000000000002';
+      mockYc.getIngestionRecord.mockResolvedValueOnce({
+        id: ingestionRecordId,
+        rawStoragePath: '/tmp/yc-companies.json',
+      });
+      const { db, inserts, updates } = createYcIngestionDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as any });
+      const { fetch } = testApp(ycRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/ingestion/replay',
+        { source: 'companies', ingestionRecordId },
+        { 'X-Workspace-Id': 'ws-1' },
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('Failed to persist YC replay evidence');
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
+      expect(deps.orchestrator.boss?.send).not.toHaveBeenCalled();
     });
   });
 });
