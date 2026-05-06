@@ -877,6 +877,154 @@ describe('founderRoutes', () => {
     });
   });
 
+  describe('POST /candidates/:id/outreach', () => {
+    it('denies members from creating cofounder outreach drafts', async () => {
+      const res = await fetch(
+        'POST',
+        '/candidates/cand-1/outreach',
+        { content: 'Hello there' },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('passes actor context and returns outreach evidence metadata', async () => {
+      const createOutreachDraft = vi.fn(async () => ({
+        id: 'draft-1',
+        workspaceId: 'ws-1',
+        candidateId: 'cand-1',
+        channel: 'email',
+        content: 'Hello there',
+        evidenceItemId: 'evidence-outreach-draft-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { createOutreachDraft } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/outreach',
+        { channel: 'email', subject: 'Hello', content: 'Hello there' },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        id: 'draft-1',
+        evidenceItemId: 'evidence-outreach-draft-1',
+      });
+      expect(createOutreachDraft).toHaveBeenCalledWith(
+        'ws-1',
+        'cand-1',
+        { channel: 'email', subject: 'Hello', content: 'Hello there' },
+        { actorUserId: 'user-1' },
+      );
+    });
+
+    it('fails closed when outreach evidence fails', async () => {
+      const createOutreachDraft = vi.fn(async () => {
+        throw new Error('evidence unavailable');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { createOutreachDraft } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/outreach',
+        { content: 'Hello there' },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to create outreach draft evidence');
+    });
+  });
+
+  describe('POST /candidates/:id/follow-ups', () => {
+    it('denies members from creating cofounder follow-ups', async () => {
+      const res = await fetch(
+        'POST',
+        '/candidates/cand-1/follow-ups',
+        { note: 'Check in' },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('passes actor context and returns follow-up evidence metadata', async () => {
+      const createFollowUp = vi.fn(async () => ({
+        id: 'follow-up-1',
+        workspaceId: 'ws-1',
+        candidateId: 'cand-1',
+        note: 'Check in',
+        evidenceItemId: 'evidence-follow-up-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { createFollowUp } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/follow-ups',
+        { dueAt: '2026-02-03T04:05:06.000Z', note: 'Check in' },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        id: 'follow-up-1',
+        evidenceItemId: 'evidence-follow-up-1',
+      });
+      expect(createFollowUp).toHaveBeenCalledWith(
+        'ws-1',
+        'cand-1',
+        {
+          dueAt: new Date('2026-02-03T04:05:06.000Z'),
+          note: 'Check in',
+        },
+        { actorUserId: 'user-1' },
+      );
+    });
+
+    it('returns 404 when the candidate is not in the workspace', async () => {
+      const createFollowUp = vi.fn(async () => {
+        throw new Error('Candidate not found');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { createFollowUp } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/follow-ups',
+        { note: 'Check in' },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 404);
+
+      expect(json.error).toBe('Candidate not found');
+    });
+  });
+
   describe('PUT /candidates/:id/status', () => {
     it('denies members from mutating candidate status', async () => {
       const res = await fetch(
