@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { auditLog, evidenceItems, tasks } from '@pilot/db/schema';
+import { auditLog, evidenceItems, taskRuns, tasks } from '@pilot/db/schema';
 import { taskRoutes } from '../../routes/task.js';
 import { createMockDeps, testApp, expectJson, mockTask } from '../helpers.js';
 
@@ -86,6 +86,10 @@ function createTaskStatusDb(options: { failEvidence?: boolean; existingTask?: un
   };
 
   return { db, inserts, updates };
+}
+
+function orderByColumnName(value: unknown): string | undefined {
+  return (value as { queryChunks?: Array<{ name?: string }> })?.queryChunks?.[1]?.name;
 }
 
 describe('taskRoutes', () => {
@@ -440,6 +444,62 @@ describe('taskRoutes', () => {
       const res = await fetch('GET', '/task-1/runs', undefined, wsHeader);
       const json = await expectJson<unknown[]>(res, 200);
       expect(json).toEqual([]);
+    });
+
+    it('orders run history deterministically when timestamps tie', async () => {
+      const orderByCalls: unknown[][] = [];
+      const runs = [
+        {
+          id: 'run-2',
+          taskId: 'task-1',
+          status: 'completed',
+          runSequence: 2,
+          startedAt: new Date('2026-05-05T09:00:00Z'),
+        },
+        {
+          id: 'run-1',
+          taskId: 'task-1',
+          status: 'completed',
+          runSequence: 1,
+          startedAt: new Date('2026-05-05T09:00:00Z'),
+        },
+      ];
+      const deps = createMockDeps();
+      deps.db.select = vi.fn(() => ({
+        from: vi.fn((table: unknown) => {
+          if (table === tasks) {
+            return {
+              where: vi.fn(() => ({
+                limit: vi.fn(async () => [mockTask({ id: 'task-1', workspaceId: VALID_UUID })]),
+              })),
+            };
+          }
+          if (table === taskRuns) {
+            return {
+              where: vi.fn(() => ({
+                orderBy: vi.fn((...columns: unknown[]) => {
+                  orderByCalls.push(columns);
+                  return Promise.resolve(runs);
+                }),
+              })),
+            };
+          }
+          throw new Error('unexpected table');
+        }),
+      })) as any;
+
+      const { fetch } = testApp(taskRoutes, deps);
+      const res = await fetch('GET', '/task-1/runs', undefined, wsHeader);
+      const json = await expectJson<unknown[]>(res, 200);
+
+      expect(json).toEqual(
+        runs.map((run) => ({ ...run, startedAt: run.startedAt.toISOString() })),
+      );
+      expect(orderByCalls).toHaveLength(1);
+      expect(orderByCalls[0]).toHaveLength(3);
+      expect(orderByColumnName(orderByCalls[0]?.[0])).toBe('started_at');
+      expect(orderByColumnName(orderByCalls[0]?.[1])).toBe('run_sequence');
+      expect(orderByColumnName(orderByCalls[0]?.[2])).toBe('id');
     });
 
     it('returns 404 before reading runs when task is outside the bound workspace', async () => {

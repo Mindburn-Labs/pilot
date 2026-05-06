@@ -275,7 +275,7 @@ export function taskRoutes(deps: GatewayDeps) {
       .select()
       .from(taskRuns)
       .where(eq(taskRuns.taskId, id))
-      .orderBy(desc(taskRuns.startedAt));
+      .orderBy(desc(taskRuns.startedAt), desc(taskRuns.runSequence), desc(taskRuns.id));
     return c.json(runs);
   });
 
