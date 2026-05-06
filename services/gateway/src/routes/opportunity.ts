@@ -240,7 +240,12 @@ export function opportunityRoutes(deps: GatewayDeps) {
     let enqueued = 0;
     const jobIds: unknown[] = [];
     for (const { id } of unscored) {
-      const jobId = await boss.send('opportunity.score', { opportunityId: id });
+      const jobId = await boss.send('opportunity.score', {
+        opportunityId: id,
+        auditEventId,
+        evidenceItemId,
+        replayRef,
+      });
       jobIds.push(jobId ?? null);
       enqueued++;
     }
@@ -331,7 +336,12 @@ export function opportunityRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Failed to persist opportunity cluster evidence' }, 500);
     }
 
-    const jobId = await boss.send('pipeline.cluster', { workspaceId });
+    const jobId = await boss.send('pipeline.cluster', {
+      workspaceId,
+      auditEventId,
+      evidenceItemId,
+      replayRef,
+    });
     await deps.db
       .update(auditLog)
       .set({
@@ -491,7 +501,12 @@ export function opportunityRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Failed to persist opportunity scoring evidence' }, 500);
     }
 
-    const jobId = await boss.send('opportunity.score', { opportunityId: id });
+    const jobId = await boss.send('opportunity.score', {
+      opportunityId: id,
+      auditEventId,
+      evidenceItemId,
+      replayRef,
+    });
     const updated = await deps.db
       .transaction(async (tx) => {
         await tx

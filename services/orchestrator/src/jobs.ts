@@ -69,6 +69,13 @@ type PipelineJobData = {
   replayRef?: string;
 };
 
+type OpportunityScoreJobData = {
+  opportunityId: string;
+  auditEventId?: string;
+  evidenceItemId?: string;
+  replayRef?: string;
+};
+
 /**
  * Register background job handlers on a pg-boss instance.
  */
@@ -79,7 +86,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   // Uses heuristic scoring only when no LLM is configured. Once a governed
   // model provider is configured, model/HELM failures propagate so production
   // cannot persist a fake autonomous score.
-  boss.work('opportunity.score', async (jobs: PgBoss.Job<{ opportunityId: string }>[]) => {
+  boss.work('opportunity.score', async (jobs: PgBoss.Job<OpportunityScoreJobData>[]) => {
     for (const job of jobs) {
       const { opportunityId } = job.data;
       log.info({ opportunityId }, 'Scoring opportunity');
@@ -174,6 +181,10 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
             db: tx,
             opportunity: opp,
             result,
+            jobId: job.id,
+            requestAuditEventId: job.data.auditEventId,
+            requestEvidenceItemId: job.data.evidenceItemId,
+            requestReplayRef: job.data.replayRef,
           });
         });
 
@@ -197,13 +208,22 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     db: OpportunityScorePersistenceDb;
     opportunity: typeof opportunities.$inferSelect;
     result: ScoringResult;
+    jobId?: string;
+    requestAuditEventId?: string;
+    requestEvidenceItemId?: string;
+    requestReplayRef?: string;
   }): Promise<void> {
     const workspaceId = input.opportunity.workspaceId;
     if (!workspaceId) return;
 
     const helmDocumentVersionPins = opportunityScoreDocumentPins(input.result);
+    const auditEventId = randomUUID();
     const metadata = {
       opportunityId: input.opportunity.id,
+      jobId: input.jobId ?? null,
+      requestAuditEventId: input.requestAuditEventId ?? null,
+      requestEvidenceItemId: input.requestEvidenceItemId ?? null,
+      requestReplayRef: input.requestReplayRef ?? null,
       method: input.result.method,
       promptVersion: input.result.promptVersion,
       overall: input.result.overall,
@@ -219,16 +239,21 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     };
 
     await input.db.insert(auditLog).values({
+      id: auditEventId,
       workspaceId,
       action: 'OPPORTUNITY_SCORE_RECORDED',
       actor: 'job:opportunity.score',
       target: input.opportunity.id,
       verdict: 'allow',
-      metadata,
+      metadata: {
+        ...metadata,
+        evidenceItemId: null,
+      },
     });
 
-    await appendEvidenceItem(input.db, {
+    const evidenceItemId = await appendEvidenceItem(input.db, {
       workspaceId,
+      auditEventId,
       evidenceType: 'opportunity_score',
       sourceType: 'opportunity_score_worker',
       title: `Opportunity scored: ${input.opportunity.title}`,
@@ -241,6 +266,16 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
         : `opportunity-score:${input.opportunity.id}:${hashJson(metadata).slice(0, 16)}`,
       metadata,
     });
+
+    await input.db
+      .update(auditLog)
+      .set({
+        metadata: {
+          ...metadata,
+          evidenceItemId,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
   }
 
   // ─── Knowledge Recompilation ───

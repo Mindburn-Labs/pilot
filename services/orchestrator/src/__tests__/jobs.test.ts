@@ -287,7 +287,17 @@ describe('registerJobHandlers', () => {
       registerJobHandlers(mockBoss, { db: mockDb, llm: mockLlm });
       const handler = handlers.get('opportunity.score')!;
 
-      await handler([{ data: { opportunityId: 'opp-1' } }]);
+      await handler([
+        {
+          id: 'job-score-1',
+          data: {
+            opportunityId: 'opp-1',
+            auditEventId: 'request-audit-1',
+            evidenceItemId: 'request-evidence-1',
+            replayRef: 'opportunity:ws-1:opp-1:score-requested',
+          },
+        },
+      ]);
 
       expect(insertValues).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -302,16 +312,48 @@ describe('registerJobHandlers', () => {
           modelUsage: { tokensIn: 100, tokensOut: 50, model: 'test' },
         }),
       );
+      const auditInsert = insertValues.mock.calls
+        .map((call) => call[0])
+        .find((value) => value?.action === 'OPPORTUNITY_SCORE_RECORDED');
+      expect(auditInsert).toMatchObject({
+        id: expect.any(String),
+        workspaceId: 'ws-1',
+        action: 'OPPORTUNITY_SCORE_RECORDED',
+        actor: 'job:opportunity.score',
+        target: 'opp-1',
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          jobId: 'job-score-1',
+          requestAuditEventId: 'request-audit-1',
+          requestEvidenceItemId: 'request-evidence-1',
+          requestReplayRef: 'opportunity:ws-1:opp-1:score-requested',
+          evidenceItemId: null,
+        }),
+      });
       expect(mockDb.insert).toHaveBeenCalledWith('auditLog');
       expect(appendEvidenceItem).toHaveBeenCalledWith(
         mockDb,
         expect.objectContaining({
           workspaceId: 'ws-1',
+          auditEventId: auditInsert.id,
           evidenceType: 'opportunity_score',
           sourceType: 'opportunity_score_worker',
           replayRef: 'helm:dec-score',
+          metadata: expect.objectContaining({
+            requestAuditEventId: 'request-audit-1',
+            requestEvidenceItemId: 'request-evidence-1',
+            requestReplayRef: 'opportunity:ws-1:opp-1:score-requested',
+          }),
         }),
       );
+      expect(mockDb._updates.at(-1)).toMatchObject({
+        table: 'auditLog',
+        value: {
+          metadata: expect.objectContaining({
+            evidenceItemId: 'evidence-item-1',
+          }),
+        },
+      });
     });
 
     it('does not persist heuristic scores when a configured LLM fails', async () => {
