@@ -253,29 +253,121 @@ export function opportunityRoutes(deps: GatewayDeps) {
     const capability = getCapabilityRecord('opportunity_scoring');
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'queue opportunity scoring');
+    if (roleDenied) return roleDenied;
+    const boss = deps.orchestrator.boss;
+    if (!boss) {
+      return c.json({ error: 'Background job system unavailable', capability }, 503);
+    }
 
     const { id } = c.req.param();
     const [opp] = await deps.db
       .select()
       .from(opportunities)
-      .where(eq(opportunities.id, id))
+      .where(and(eq(opportunities.id, id), eq(opportunities.workspaceId, workspaceId)))
       .limit(1);
 
-    if (!opp || opp.workspaceId !== workspaceId) {
+    if (!opp) {
       return c.json({ error: 'Opportunity not found' }, 404);
     }
 
-    await deps.db
-      .update(opportunities)
-      .set({ status: 'scoring' })
-      .where(and(eq(opportunities.id, id), eq(opportunities.workspaceId, workspaceId)));
+    const auditEventId = randomUUID();
+    const replayRef = `opportunity:${workspaceId}:${id}:score-requested`;
+    const auditMetadata = {
+      opportunityId: id,
+      previousStatus: opp.status ?? null,
+      requestedStatus: 'scoring',
+      capabilityKey: capability?.key ?? 'opportunity_scoring',
+      capabilityState: capability?.state ?? 'blocked',
+      evidenceContract: 'opportunity_score_request_evidence_required',
+    };
 
-    if (!deps.orchestrator.boss) {
-      return c.json({ error: 'Background job system unavailable', capability }, 503);
+    const evidenceItemId = await deps.db
+      .transaction(async (tx) => {
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'OPPORTUNITY_SCORE_REQUESTED',
+          actor: `user:${c.get('userId') ?? 'unknown'}`,
+          target: id,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'opportunity_score_requested',
+            replayRef,
+            queued: false,
+            ...auditMetadata,
+          },
+        });
+
+        const createdEvidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'opportunity_score_requested',
+          sourceType: 'gateway_opportunity_route',
+          title: `Opportunity score requested: ${opp.title}`,
+          summary: 'Workspace opportunity scoring was requested through the gateway API.',
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          replayRef,
+          metadata: auditMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'opportunity_score_requested',
+              replayRef,
+              queued: false,
+              evidenceItemId: createdEvidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return createdEvidenceItemId;
+      })
+      .catch(() => null);
+
+    if (!evidenceItemId) {
+      return c.json({ error: 'Failed to persist opportunity scoring evidence' }, 500);
     }
 
-    await deps.orchestrator.boss.send('opportunity.score', { opportunityId: id });
-    return c.json({ queued: true, opportunityId: id, status: 'scoring', capability }, 202);
+    const jobId = await boss.send('opportunity.score', { opportunityId: id });
+    const updated = await deps.db
+      .transaction(async (tx) => {
+        await tx
+          .update(opportunities)
+          .set({ status: 'scoring' })
+          .where(and(eq(opportunities.id, id), eq(opportunities.workspaceId, workspaceId)));
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'opportunity_score_requested',
+              replayRef,
+              queued: true,
+              jobId: jobId ?? null,
+              status: 'scoring',
+              evidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return true;
+      })
+      .catch(() => false);
+
+    if (!updated) {
+      return c.json({ error: 'Failed to persist opportunity scoring queue state' }, 500);
+    }
+
+    return c.json(
+      { queued: true, opportunityId: id, status: 'scoring', jobId, evidenceItemId, capability },
+      202,
+    );
   });
 
   return app;
