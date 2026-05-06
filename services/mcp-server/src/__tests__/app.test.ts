@@ -11,17 +11,25 @@ import { createMcpApp } from '../app.js';
 const BEARER = 'test-token-1234567890abcdef';
 const dbStub = {} as unknown as Db;
 
-function createArtifactMcpDb() {
+function createArtifactMcpDb(options: { failEvidenceInsert?: boolean } = {}) {
   const insertedArtifacts: unknown[] = [];
   const insertedArtifactVersions: unknown[] = [];
   const insertedEvidenceItems: unknown[] = [];
   const insertedAudit: unknown[] = [];
   const updatedAudit: unknown[] = [];
-  const db = {
+  const transactionInsertOrder: string[] = [];
+
+  const createDbFacade = (
+    artifactSink: unknown[],
+    artifactVersionSink: unknown[],
+    evidenceSink: unknown[],
+    auditSink: unknown[],
+    auditUpdateSink: unknown[],
+  ) => ({
     insert: vi.fn((table: unknown) => ({
       values: vi.fn((value: unknown) => {
         if (table === artifacts) {
-          insertedArtifacts.push(value);
+          artifactSink.push(value);
           return {
             returning: vi.fn(async () => [
               {
@@ -33,21 +41,27 @@ function createArtifactMcpDb() {
           };
         }
         if (table === artifactVersions) {
-          insertedArtifactVersions.push(value);
+          transactionInsertOrder.push('artifact_versions');
+          artifactVersionSink.push(value);
           return {};
         }
         if (table === auditLog) {
-          insertedAudit.push(value);
+          transactionInsertOrder.push('audit_log');
+          auditSink.push(value);
           return {};
         }
         if (table === evidenceItems) {
-          insertedEvidenceItems.push(value);
+          transactionInsertOrder.push('evidence_items');
+          evidenceSink.push(value);
           return {
-            returning: vi.fn(async () => [
-              {
-                id: '00000000-0000-4000-8000-000000000031',
-              },
-            ]),
+            returning: vi.fn(async () => {
+              if (options.failEvidenceInsert) throw new Error('evidence ledger unavailable');
+              return [
+                {
+                  id: '00000000-0000-4000-8000-000000000031',
+                },
+              ];
+            }),
           };
         }
         return { returning: vi.fn(async () => []) };
@@ -55,10 +69,42 @@ function createArtifactMcpDb() {
     })),
     update: vi.fn((table: unknown) => ({
       set: vi.fn((value: unknown) => {
-        if (table === auditLog) updatedAudit.push(value);
+        if (table === auditLog) auditUpdateSink.push(value);
         return { where: vi.fn(async () => []) };
       }),
     })),
+  });
+
+  const db = {
+    ...createDbFacade(
+      insertedArtifacts,
+      insertedArtifactVersions,
+      insertedEvidenceItems,
+      insertedAudit,
+      updatedAudit,
+    ),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedArtifacts: unknown[] = [];
+      const stagedArtifactVersions: unknown[] = [];
+      const stagedEvidenceItems: unknown[] = [];
+      const stagedAudit: unknown[] = [];
+      const stagedAuditUpdates: unknown[] = [];
+      const result = await callback(
+        createDbFacade(
+          stagedArtifacts,
+          stagedArtifactVersions,
+          stagedEvidenceItems,
+          stagedAudit,
+          stagedAuditUpdates,
+        ),
+      );
+      insertedArtifacts.push(...stagedArtifacts);
+      insertedArtifactVersions.push(...stagedArtifactVersions);
+      insertedEvidenceItems.push(...stagedEvidenceItems);
+      insertedAudit.push(...stagedAudit);
+      updatedAudit.push(...stagedAuditUpdates);
+      return result;
+    }),
   };
   return {
     db: db as unknown as Db,
@@ -67,6 +113,7 @@ function createArtifactMcpDb() {
     insertedEvidenceItems,
     insertedAudit,
     updatedAudit,
+    transactionInsertOrder,
   };
 }
 
@@ -185,6 +232,7 @@ describe('createMcpApp', () => {
       insertedEvidenceItems,
       insertedAudit,
       updatedAudit,
+      transactionInsertOrder,
     } = createArtifactMcpDb();
     const appWithDb = createMcpApp({ db, bearerToken: BEARER });
 
@@ -268,6 +316,9 @@ describe('createMcpApp', () => {
         evidenceItemId: '00000000-0000-4000-8000-000000000031',
       }),
     });
+    expect(transactionInsertOrder.indexOf('audit_log')).toBeLessThan(
+      transactionInsertOrder.indexOf('evidence_items'),
+    );
     expect(payload).toEqual({
       id: '00000000-0000-4000-8000-000000000030',
       name: 'launch-email.txt',
@@ -275,6 +326,53 @@ describe('createMcpApp', () => {
       version: 1,
       evidenceItemId: '00000000-0000-4000-8000-000000000031',
     });
+  });
+
+  it('tools/call create_artifact does not commit artifact state when evidence persistence fails', async () => {
+    const {
+      db,
+      insertedArtifacts,
+      insertedArtifactVersions,
+      insertedEvidenceItems,
+      insertedAudit,
+      updatedAudit,
+    } = createArtifactMcpDb({ failEvidenceInsert: true });
+    const appWithDb = createMcpApp({ db, bearerToken: BEARER });
+
+    const res = await appWithDb.fetch(
+      post(
+        {
+          jsonrpc: '2.0',
+          id: 11,
+          method: 'tools/call',
+          params: {
+            name: 'create_artifact',
+            arguments: {
+              workspaceId: '00000000-0000-4000-8000-000000000001',
+              type: 'copy',
+              name: 'launch-email.txt',
+              description: 'Launch email draft',
+              content: 'Pilot is live.',
+            },
+          },
+        },
+        { authorization: `Bearer ${BEARER}` },
+      ),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      error: { code: number; message: string };
+    };
+    expect(body.error).toEqual({
+      code: -32603,
+      message: 'evidence ledger unavailable',
+    });
+    expect(insertedArtifacts).toEqual([]);
+    expect(insertedArtifactVersions).toEqual([]);
+    expect(insertedEvidenceItems).toEqual([]);
+    expect(insertedAudit).toEqual([]);
+    expect(updatedAudit).toEqual([]);
   });
 
   it('malformed JSON returns -32700', async () => {

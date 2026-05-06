@@ -221,78 +221,80 @@ export const PILOT_MCP_TOOLS: ExposedTool[] = [
       const content = typeof args['content'] === 'string' ? args['content'] : '';
       const { artifacts, artifactVersions } = await import('@pilot/db/schema');
       const storagePath = `inline://${name}`;
-      const [row] = await db
-        .insert(artifacts)
-        .values({
-          workspaceId,
-          type: atype,
-          name,
-          description,
+      return await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(artifacts)
+          .values({
+            workspaceId,
+            type: atype,
+            name,
+            description,
+            storagePath,
+            mimeType: 'text/plain',
+            sizeBytes: content.length,
+            metadata: content ? { content } : {},
+          })
+          .returning();
+        if (!row) return err('insert failed');
+        await tx.insert(artifactVersions).values({
+          artifactId: row.id,
+          version: 1,
           storagePath,
+          sizeBytes: content.length,
+          changelog: 'Initial version',
+        });
+        const auditEventId = randomUUID();
+        const replayRef = `artifact:${row.id}:1`;
+        const evidenceMetadata = {
+          artifactType: atype,
+          version: 1,
           mimeType: 'text/plain',
           sizeBytes: content.length,
-          metadata: content ? { content } : {},
-        })
-        .returning();
-      if (!row) return err('insert failed');
-      await db.insert(artifactVersions).values({
-        artifactId: row.id,
-        version: 1,
-        storagePath,
-        sizeBytes: content.length,
-        changelog: 'Initial version',
+          storageMode: 'inline_artifact_metadata',
+          tool: 'create_artifact',
+        };
+        const auditMetadata = {
+          evidenceType: 'artifact_created',
+          replayRef,
+          artifactId: row.id,
+          ...evidenceMetadata,
+        };
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'ARTIFACT_CREATED',
+          actor: `workspace:${workspaceId}`,
+          target: row.id,
+          verdict: 'created',
+          reason: description || `Created ${atype} artifact`,
+          metadata: auditMetadata,
+        });
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          artifactId: row.id,
+          evidenceType: 'artifact_created',
+          sourceType: 'mcp_server',
+          title: `Artifact created: ${row.name}`,
+          summary: description || `Created ${atype} artifact`,
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          contentHash: content ? hashText(content) : null,
+          storageRef: storagePath,
+          replayRef,
+          metadata: evidenceMetadata,
+        });
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              ...auditMetadata,
+              evidenceItemId,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+        return text({ id: row.id, name: row.name, type: row.type, version: 1, evidenceItemId });
       });
-      const auditEventId = randomUUID();
-      const replayRef = `artifact:${row.id}:1`;
-      const evidenceMetadata = {
-        artifactType: atype,
-        version: 1,
-        mimeType: 'text/plain',
-        sizeBytes: content.length,
-        storageMode: 'inline_artifact_metadata',
-        tool: 'create_artifact',
-      };
-      const auditMetadata = {
-        evidenceType: 'artifact_created',
-        replayRef,
-        artifactId: row.id,
-        ...evidenceMetadata,
-      };
-      await db.insert(auditLog).values({
-        id: auditEventId,
-        workspaceId,
-        action: 'ARTIFACT_CREATED',
-        actor: `workspace:${workspaceId}`,
-        target: row.id,
-        verdict: 'created',
-        reason: description || `Created ${atype} artifact`,
-        metadata: auditMetadata,
-      });
-      const evidenceItemId = await appendEvidenceItem(db, {
-        workspaceId,
-        auditEventId,
-        artifactId: row.id,
-        evidenceType: 'artifact_created',
-        sourceType: 'mcp_server',
-        title: `Artifact created: ${row.name}`,
-        summary: description || `Created ${atype} artifact`,
-        redactionState: 'redacted',
-        sensitivity: 'internal',
-        contentHash: content ? hashText(content) : null,
-        storageRef: storagePath,
-        replayRef,
-        metadata: evidenceMetadata,
-      });
-      await db
-        .update(auditLog)
-        .set({
-          metadata: {
-            ...auditMetadata,
-            evidenceItemId,
-          },
-        })
-        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
-      return text({ id: row.id, name: row.name, type: row.type, version: 1, evidenceItemId });
     },
   },
 ];
