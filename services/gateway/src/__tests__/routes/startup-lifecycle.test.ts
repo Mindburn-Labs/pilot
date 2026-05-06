@@ -1,5 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
-import { auditLog, evidenceItems, missionRuntimeCheckpoints } from '@pilot/db/schema';
+import {
+  auditLog,
+  evidenceItems,
+  goals,
+  missionEdges,
+  missionNodes,
+  missionRuntimeCheckpoints,
+  missionTasks,
+  missions,
+  tasks,
+  ventures,
+} from '@pilot/db/schema';
 import { startupLifecycleRoutes } from '../../routes/startup-lifecycle.js';
 import { createMockDeps, expectJson, testApp } from '../helpers.js';
 
@@ -22,6 +33,76 @@ function captureEvidenceItemInserts(deps: ReturnType<typeof createMockDeps>) {
     return originalInsert(table);
   }) as typeof deps.db.insert;
   return insertedEvidenceItems;
+}
+
+function captureFailedPersistTransaction(deps: ReturnType<typeof createMockDeps>) {
+  const committedInserts: Array<{ table: string; values: unknown }> = [];
+  const originalInsert = deps.db.insert;
+  let idCounter = 300;
+
+  const tableName = (table: unknown) => {
+    if (table === ventures) return 'ventures';
+    if (table === goals) return 'goals';
+    if (table === missions) return 'missions';
+    if (table === missionNodes) return 'missionNodes';
+    if (table === missionEdges) return 'missionEdges';
+    if (table === tasks) return 'tasks';
+    if (table === missionTasks) return 'missionTasks';
+    if (table === evidenceItems) return 'evidenceItems';
+    return 'unknown';
+  };
+  const nextId = () => `00000000-0000-4000-8000-${String(idCounter++).padStart(12, '0')}`;
+  const rowFor = (values: unknown) => {
+    const value = Array.isArray(values) ? values[0] : values;
+    return {
+      ...(typeof value === 'object' && value !== null ? value : {}),
+      id:
+        typeof value === 'object' && value !== null && 'id' in value && typeof value.id === 'string'
+          ? value.id
+          : nextId(),
+    };
+  };
+  const captureInsert = (sink: Array<{ table: string; values: unknown }>, failEvidence: boolean) =>
+    vi.fn((table: unknown) => {
+      if (
+        table === ventures ||
+        table === goals ||
+        table === missions ||
+        table === missionNodes ||
+        table === missionEdges ||
+        table === tasks ||
+        table === missionTasks ||
+        table === evidenceItems
+      ) {
+        return {
+          values: vi.fn((values: unknown) => {
+            if (failEvidence && table === evidenceItems) {
+              throw new Error('evidence unavailable');
+            }
+            sink.push({ table: tableName(table), values });
+            return {
+              returning: vi.fn(async () => [rowFor(values)]),
+              then: (resolve: (value: unknown[]) => void) => resolve([]),
+              catch: vi.fn(),
+            };
+          }),
+        };
+      }
+      return originalInsert(table);
+    }) as typeof deps.db.insert;
+
+  deps.db.insert = captureInsert(committedInserts, false);
+  deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+    const stagedInserts: Array<{ table: string; values: unknown }> = [];
+    const result = await callback({
+      ...deps.db,
+      insert: captureInsert(stagedInserts, true),
+    });
+    committedInserts.push(...stagedInserts);
+    return result;
+  }) as typeof deps.db.transaction;
+
+  return committedInserts;
 }
 
 function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof createMockDeps>) {
@@ -405,6 +486,28 @@ describe('startupLifecycleRoutes', () => {
     expect(body.mission.blockers.join(' ')).not.toContain('not persisted');
   });
 
+  it('does not commit persisted mission graph rows when persist evidence fails', async () => {
+    const deps = createMockDeps();
+    const committedInserts = captureFailedPersistTransaction(deps);
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch(
+      'POST',
+      '/persist',
+      {
+        ventureName: 'RollbackOS',
+        founderGoal:
+          'Build a governed startup lifecycle runtime with transaction-safe evidence records.',
+        ventureContext: 'Founder has source control and deployment access.',
+        constraints: ['No external action without durable evidence'],
+        autonomyMode: 'review',
+      },
+      wsHeader,
+    );
+
+    expect(res.status).toBe(500);
+    expect(committedInserts).toEqual([]);
+  });
+
   it('schedules ready mission nodes without dispatching autonomous execution', async () => {
     const deps = createMockDeps();
     const insertedEvidenceItems = captureEvidenceItemInserts(deps);
@@ -530,8 +633,7 @@ describe('startupLifecycleRoutes', () => {
       insertedAuditEvents,
       updatedAuditEvents,
       insertedMissionRuntimeCheckpoints,
-    } =
-      captureEvidenceAndMissionCheckpointInserts(deps);
+    } = captureEvidenceAndMissionCheckpointInserts(deps);
     const missionId = '00000000-0000-4000-8000-000000000070';
     const ventureId = '00000000-0000-4000-8000-000000000071';
     const founderNodeId = '00000000-0000-4000-8000-000000000072';
@@ -783,8 +885,7 @@ describe('startupLifecycleRoutes', () => {
       insertedAuditEvents,
       updatedAuditEvents,
       insertedMissionRuntimeCheckpoints,
-    } =
-      captureFailedMissionCheckpointTransaction(deps);
+    } = captureFailedMissionCheckpointTransaction(deps);
     const missionId = '00000000-0000-4000-8000-000000000270';
     const nodeId = '00000000-0000-4000-8000-000000000271';
     const selectResults = [
@@ -1166,8 +1267,7 @@ describe('startupLifecycleRoutes', () => {
       insertedAuditEvents,
       updatedAuditEvents,
       insertedMissionRuntimeCheckpoints,
-    } =
-      captureEvidenceAndMissionCheckpointInserts(deps);
+    } = captureEvidenceAndMissionCheckpointInserts(deps);
     const missionId = '00000000-0000-4000-8000-000000000140';
     const ventureId = '00000000-0000-4000-8000-000000000141';
     const failedNodeId = '00000000-0000-4000-8000-000000000142';
@@ -1812,8 +1912,7 @@ describe('startupLifecycleRoutes', () => {
       insertedAuditEvents,
       updatedAuditEvents,
       insertedMissionRuntimeCheckpoints,
-    } =
-      captureFailedMissionCheckpointTransaction(deps);
+    } = captureFailedMissionCheckpointTransaction(deps);
     const selectResults = [
       [
         {
