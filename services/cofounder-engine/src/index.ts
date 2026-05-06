@@ -341,7 +341,11 @@ export class CofounderEngine {
   /**
    * Score a real-world co-founder candidate against the workspace founder.
    */
-  async scoreCandidate(workspaceId: string, candidateId: string) {
+  async scoreCandidate(
+    workspaceId: string,
+    candidateId: string,
+    auditContext: CofounderAuditContext = {},
+  ) {
     const [candidate] = await this.db
       .select()
       .from(cofounderCandidates)
@@ -386,32 +390,95 @@ export class CofounderEngine {
       }
     }
 
-    const [evaluation] = await this.db
-      .insert(cofounderMatchEvaluations)
-      .values({
-        workspaceId,
-        founderId: founder?.id,
+    return this.db.transaction(async (tx) => {
+      const [evaluation] = await tx
+        .insert(cofounderMatchEvaluations)
+        .values({
+          workspaceId,
+          founderId: founder?.id,
+          candidateId,
+          overallScore: resolved.overallScore,
+          complementScore: resolved.complementScore,
+          executionScore: resolved.executionScore,
+          ycFitScore: resolved.ycFitScore,
+          riskScore: resolved.riskScore,
+          reasoning: resolved.reasoning,
+          scoringMethod: resolved.scoringMethod,
+        })
+        .returning();
+
+      if (!evaluation) throw new Error('Failed to score cofounder candidate');
+
+      const nextStatus = candidate.status === 'new' ? 'reviewing' : candidate.status;
+      await tx
+        .update(cofounderCandidates)
+        .set({
+          fitSummary: resolved.reasoning,
+          status: nextStatus,
+          updatedAt: new Date(),
+        })
+        .where(and(eq(cofounderCandidates.workspaceId, workspaceId), eq(cofounderCandidates.id, candidateId)));
+
+      const auditEventId = randomUUID();
+      const replayRef = `cofounder-candidate:${workspaceId}:${candidateId}:score:${evaluation.id}`;
+      const auditMetadata = {
         candidateId,
-        overallScore: resolved.overallScore,
-        complementScore: resolved.complementScore,
-        executionScore: resolved.executionScore,
-        ycFitScore: resolved.ycFitScore,
-        riskScore: resolved.riskScore,
-        reasoning: resolved.reasoning,
+        evaluationId: evaluation.id,
+        founderId: founder?.id ?? null,
         scoringMethod: resolved.scoringMethod,
-      })
-      .returning();
+        previousStatus: candidate.status,
+        nextStatus,
+        scores: {
+          overallScore: resolved.overallScore,
+          complementScore: resolved.complementScore,
+          executionScore: resolved.executionScore,
+          ycFitScore: resolved.ycFitScore,
+          riskScore: resolved.riskScore,
+        },
+        evidenceContract: 'cofounder_candidate_score_evidence_required',
+      };
 
-    await this.db
-      .update(cofounderCandidates)
-      .set({
-        fitSummary: resolved.reasoning,
-        status: candidate.status === 'new' ? 'reviewing' : candidate.status,
-        updatedAt: new Date(),
-      })
-      .where(eq(cofounderCandidates.id, candidateId));
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'COFOUNDER_CANDIDATE_SCORED',
+        actor: `user:${auditContext.actorUserId ?? 'unknown'}`,
+        target: candidateId,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'cofounder_candidate_scored',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
 
-    return evaluation;
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: 'cofounder_candidate_scored',
+        sourceType: 'cofounder_engine',
+        title: `Cofounder candidate scored: ${candidateId}`,
+        summary: `Cofounder candidate ${candidateId} was scored with ${resolved.scoringMethod} evaluation ${evaluation.id}.`,
+        redactionState: 'none',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'cofounder_candidate_scored',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { ...evaluation, evidenceItemId };
+    });
   }
 
   async addCandidateNote(

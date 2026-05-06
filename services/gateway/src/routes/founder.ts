@@ -138,16 +138,23 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/candidates/:id/score', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'score cofounder candidate');
+    if (roleDenied) return roleDenied;
     if (!deps.cofounderEngine) return c.json({ error: 'Cofounder engine unavailable' }, 503);
 
     const { id } = c.req.param();
     try {
-      const evaluation = await deps.cofounderEngine.scoreCandidate(workspaceId, id);
+      const evaluation = await deps.cofounderEngine.scoreCandidate(workspaceId, id, {
+        actorUserId: c.get('userId'),
+      });
       return c.json(evaluation, 201);
     } catch (error) {
+      if (error instanceof Error && error.message === 'Candidate not found') {
+        return c.json({ error: error.message }, 404);
+      }
       return c.json(
-        { error: error instanceof Error ? error.message : 'Failed to score candidate' },
-        404,
+        { error: 'Failed to score candidate evidence' },
+        500,
       );
     }
   });
