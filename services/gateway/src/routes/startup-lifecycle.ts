@@ -706,48 +706,53 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
     const replayRef = `mission:${mission.id}:recovery-plan:${recoveryPlanId.split(':')[1]}`;
     const plannedAt = new Date();
 
-    const evidenceItemId = await appendEvidenceItem(_deps.db, {
-      workspaceId,
-      ventureId: mission.ventureId ?? null,
-      missionId: mission.id,
-      evidenceType: 'startup_lifecycle_recovery_plan',
-      sourceType: 'gateway_startup_lifecycle',
-      title: `Startup lifecycle recovery plan: ${mission.title}`,
-      summary: parsed.data.reason ?? `Recovery plan for mission status ${mission.status}`,
-      redactionState: 'redacted',
-      sensitivity: 'internal',
-      contentHash,
-      replayRef,
-      observedAt: plannedAt,
-      metadata: {
-        recoveryPlanVersion: 'mission-recovery-plan.v1',
-        recoveryPlanId,
-        checkpointId,
-        checkpointReplayRef,
-        missionStatus: mission.status,
-        recoveryExecuted: false,
-        plan,
-        snapshot: planSnapshot,
-        productionReady: false,
-      },
-    });
-
-    await _deps.db
-      .update(missions)
-      .set({
+    const evidenceItemId = await _deps.db.transaction(async (tx) => {
+      const db = tx as unknown as typeof _deps.db;
+      const persistedEvidenceItemId = await appendEvidenceItem(db, {
+        workspaceId,
+        ventureId: mission.ventureId ?? null,
+        missionId: mission.id,
+        evidenceType: 'startup_lifecycle_recovery_plan',
+        sourceType: 'gateway_startup_lifecycle',
+        title: `Startup lifecycle recovery plan: ${mission.title}`,
+        summary: parsed.data.reason ?? `Recovery plan for mission status ${mission.status}`,
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        contentHash,
+        replayRef,
+        observedAt: plannedAt,
         metadata: {
-          ...missionMetadata,
-          lastRecoveryPlan: {
-            recoveryPlanId,
-            evidenceItemId,
-            replayRef,
-            contentHash,
-            plannedAt: plannedAt.toISOString(),
-          },
+          recoveryPlanVersion: 'mission-recovery-plan.v1',
+          recoveryPlanId,
+          checkpointId,
+          checkpointReplayRef,
+          missionStatus: mission.status,
+          recoveryExecuted: false,
+          plan,
+          snapshot: planSnapshot,
+          productionReady: false,
         },
-        updatedAt: plannedAt,
-      })
-      .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+      });
+
+      await db
+        .update(missions)
+        .set({
+          metadata: {
+            ...missionMetadata,
+            lastRecoveryPlan: {
+              recoveryPlanId,
+              evidenceItemId: persistedEvidenceItemId,
+              replayRef,
+              contentHash,
+              plannedAt: plannedAt.toISOString(),
+            },
+          },
+          updatedAt: plannedAt,
+        })
+        .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+
+      return persistedEvidenceItemId;
+    });
 
     const response = PlannedStartupMissionRecoverySchema.parse({
       workspaceId,
