@@ -1,8 +1,6 @@
 import { serve } from '@hono/node-server';
 import PgBoss from 'pg-boss';
-import { appendEvidenceItem } from '@pilot/db';
-import { createDb, runMigrations, type Db } from '@pilot/db/client';
-import { evidencePacks } from '@pilot/db/schema';
+import { createDb, runMigrations } from '@pilot/db/client';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Orchestrator } from '@pilot/orchestrator';
@@ -16,12 +14,13 @@ import { createTenantLlmResolver } from '@pilot/shared/llm/tenant-resolver';
 import { createEmbeddingProvider } from '@pilot/shared/embeddings';
 import { createLogger } from '@pilot/shared/logger';
 import { TenantSecretStore } from '@pilot/db/tenant-secret-store';
-import { HelmClient, HelmLlmProvider, type HelmReceipt } from '@pilot/helm-client';
+import { HelmClient, HelmLlmProvider } from '@pilot/helm-client';
 import type { RefreshNotifier } from '@pilot/connectors';
 import { SubagentRegistry } from '@pilot/shared/subagents';
 import { SkillRegistry } from '@pilot/shared/skills';
 import { McpServerRegistry } from '@pilot/shared/mcp';
 import { createGateway } from './index.js';
+import { persistHelmReceipt } from './helm-receipts.js';
 import { configureRateLimit } from './middleware/rate-limit.js';
 import { EventBus } from './events/bus.js';
 import { createEmailProvider } from './services/email-provider.js';
@@ -44,62 +43,6 @@ function requireProductionSecret(name: string) {
     log.fatal({ name }, `${name} must be set to a non-placeholder production secret`);
     process.exit(1);
   }
-}
-
-async function persistHelmReceipt(db: Db, receipt: HelmReceipt) {
-  const workspaceId = extractWorkspaceIdFromPrincipal(receipt.principal);
-  if (!workspaceId) {
-    throw new Error(
-      `Cannot persist HELM receipt without workspace principal: ${receipt.principal}`,
-    );
-  }
-  const [pack] = await db
-    .insert(evidencePacks)
-    .values({
-      workspaceId,
-      decisionId: receipt.decisionId,
-      verdict: receipt.verdict,
-      reasonCode: receipt.reason ?? null,
-      policyVersion: receipt.policyVersion,
-      decisionHash: receipt.decisionHash ?? null,
-      action: receipt.action,
-      resource: receipt.resource,
-      principal: receipt.principal,
-      signedBlob: receipt.signedBlob ?? null,
-      receivedAt: receipt.receivedAt,
-    })
-    .returning({ id: evidencePacks.id });
-
-  if (!pack?.id) {
-    throw new Error(`Cannot index HELM receipt evidence: ${receipt.decisionId}`);
-  }
-
-  await appendEvidenceItem(db, {
-    workspaceId,
-    evidencePackId: pack.id,
-    evidenceType: 'helm_receipt',
-    sourceType: 'helm_client',
-    title: `HELM ${receipt.action} ${receipt.verdict}`,
-    summary: receipt.reason ?? `${receipt.action} on ${receipt.resource}`,
-    redactionState: 'redacted',
-    sensitivity: 'internal',
-    contentHash: receipt.decisionHash ?? null,
-    replayRef: `helm:${receipt.decisionId}`,
-    observedAt: receipt.receivedAt,
-    metadata: {
-      decisionId: receipt.decisionId,
-      verdict: receipt.verdict,
-      policyVersion: receipt.policyVersion,
-      action: receipt.action,
-      resource: receipt.resource,
-      principal: receipt.principal,
-      receiptId: receipt.receiptId ?? null,
-    },
-  });
-}
-
-function extractWorkspaceIdFromPrincipal(principal: string): string | null {
-  return /^workspace:([^/]+)/u.exec(principal)?.[1] ?? null;
 }
 
 async function main() {
