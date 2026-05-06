@@ -1134,89 +1134,91 @@ export class ToolRegistry {
         const { artifacts, artifactVersions } = await import('@pilot/db/schema');
         // V1: store content inline as storage path (real storage client in Phase C)
         const storagePath = `inline://${name}`;
-        const [artifact] = await this.db
-          .insert(artifacts)
-          .values({
-            workspaceId,
-            type,
-            name,
-            description,
+        return await this.db.transaction(async (tx) => {
+          const [artifact] = await tx
+            .insert(artifacts)
+            .values({
+              workspaceId,
+              type,
+              name,
+              description,
+              storagePath,
+              mimeType: 'text/plain',
+              sizeBytes: content?.length ?? 0,
+              metadata: content ? { content } : {},
+            })
+            .returning();
+          if (!artifact) return { error: 'Failed to create artifact' };
+          // Create initial version
+          await tx.insert(artifactVersions).values({
+            artifactId: artifact.id,
+            version: 1,
             storagePath,
+            sizeBytes: content?.length ?? 0,
+            changelog: 'Initial version',
+          });
+          const auditEventId = randomUUID();
+          const replayRef = `artifact:${artifact.id}:1`;
+          const evidenceMetadata = {
+            artifactType: type,
+            version: 1,
             mimeType: 'text/plain',
             sizeBytes: content?.length ?? 0,
-            metadata: content ? { content } : {},
-          })
-          .returning();
-        if (!artifact) return { error: 'Failed to create artifact' };
-        // Create initial version
-        await this.db.insert(artifactVersions).values({
-          artifactId: artifact.id,
-          version: 1,
-          storagePath,
-          sizeBytes: content?.length ?? 0,
-          changelog: 'Initial version',
+            storageMode: 'inline_artifact_metadata',
+            tool: 'create_artifact',
+          };
+          const auditMetadata = {
+            evidenceType: 'artifact_created',
+            replayRef,
+            artifactId: artifact.id,
+            taskId: taskId ?? null,
+            actionId: actionId ?? null,
+            ...evidenceMetadata,
+          };
+          await tx.insert(auditLog).values({
+            id: auditEventId,
+            workspaceId,
+            action: 'ARTIFACT_CREATED',
+            actor: `workspace:${workspaceId}`,
+            target: artifact.id,
+            verdict: 'created',
+            reason: description ?? `Created ${type} artifact`,
+            metadata: auditMetadata,
+          });
+          const evidenceItemId = await appendEvidenceItem(tx, {
+            workspaceId,
+            taskId: taskId ?? null,
+            actionId: actionId ?? null,
+            auditEventId,
+            artifactId: artifact.id,
+            evidenceType: 'artifact_created',
+            sourceType: 'tool_registry',
+            title: `Artifact created: ${artifact.name}`,
+            summary: description ?? `Created ${type} artifact`,
+            redactionState: 'redacted',
+            sensitivity: 'internal',
+            contentHash: content ? hashText(content) : null,
+            storageRef: storagePath,
+            replayRef,
+            metadata: evidenceMetadata,
+          });
+          await tx
+            .update(auditLog)
+            .set({
+              metadata: {
+                ...auditMetadata,
+                evidenceItemId,
+              },
+            })
+            .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+          return {
+            id: artifact.id,
+            name: artifact.name,
+            type: artifact.type,
+            version: 1,
+            evidenceItemId,
+          };
         });
-        const auditEventId = randomUUID();
-        const replayRef = `artifact:${artifact.id}:1`;
-        const evidenceMetadata = {
-          artifactType: type,
-          version: 1,
-          mimeType: 'text/plain',
-          sizeBytes: content?.length ?? 0,
-          storageMode: 'inline_artifact_metadata',
-          tool: 'create_artifact',
-        };
-        const auditMetadata = {
-          evidenceType: 'artifact_created',
-          replayRef,
-          artifactId: artifact.id,
-          taskId: taskId ?? null,
-          actionId: actionId ?? null,
-          ...evidenceMetadata,
-        };
-        await this.db.insert(auditLog).values({
-          id: auditEventId,
-          workspaceId,
-          action: 'ARTIFACT_CREATED',
-          actor: `workspace:${workspaceId}`,
-          target: artifact.id,
-          verdict: 'created',
-          reason: description ?? `Created ${type} artifact`,
-          metadata: auditMetadata,
-        });
-        const evidenceItemId = await appendEvidenceItem(this.db, {
-          workspaceId,
-          taskId: taskId ?? null,
-          actionId: actionId ?? null,
-          auditEventId,
-          artifactId: artifact.id,
-          evidenceType: 'artifact_created',
-          sourceType: 'tool_registry',
-          title: `Artifact created: ${artifact.name}`,
-          summary: description ?? `Created ${type} artifact`,
-          redactionState: 'redacted',
-          sensitivity: 'internal',
-          contentHash: content ? hashText(content) : null,
-          storageRef: storagePath,
-          replayRef,
-          metadata: evidenceMetadata,
-        });
-        await this.db
-          .update(auditLog)
-          .set({
-            metadata: {
-              ...auditMetadata,
-              evidenceItemId,
-            },
-          })
-          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
-        return {
-          id: artifact.id,
-          name: artifact.name,
-          type: artifact.type,
-          version: 1,
-          evidenceItemId,
-        };
       },
     });
 
