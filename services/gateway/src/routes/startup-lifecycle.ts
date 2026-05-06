@@ -876,6 +876,7 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
     const skippedNodes: AppliedStartupMissionRecovery['skippedNodes'] = [];
     const appliedAt = new Date();
 
+    const recoverableNodes: Array<{ node: typeof missionNodes.$inferSelect; taskId?: string }> = [];
     for (const nodeKey of targetNodeKeys) {
       const node = nodeByKey.get(nodeKey);
       if (!node) {
@@ -896,21 +897,7 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
       }
 
       const taskId = taskIdByNodeId.get(node.id);
-      await _deps.db
-        .update(missionNodes)
-        .set({
-          status: 'ready',
-          startedAt: null,
-          completedAt: null,
-          updatedAt: appliedAt,
-        })
-        .where(and(eq(missionNodes.id, node.id), eq(missionNodes.workspaceId, workspaceId)));
-      if (taskId) {
-        await _deps.db
-          .update(tasks)
-          .set({ status: 'pending', completedAt: null, updatedAt: appliedAt })
-          .where(and(eq(tasks.id, taskId), eq(tasks.workspaceId, workspaceId)));
-      }
+      recoverableNodes.push({ node, ...(taskId ? { taskId } : {}) });
       recoveredNodes.push({
         nodeId: node.id,
         nodeKey,
@@ -933,55 +920,78 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
     const contentHash = hashJson(recoveryApplyPayload);
     const recoveryApplyId = `mission-recovery-apply:${contentHash.slice('sha256:'.length, 23)}`;
     const replayRef = `mission:${mission.id}:recovery-apply:${recoveryApplyId.split(':')[1]}`;
-    const evidenceItemId = await appendEvidenceItem(_deps.db, {
-      workspaceId,
-      ventureId: mission.ventureId ?? null,
-      missionId: mission.id,
-      evidenceType: 'startup_lifecycle_recovery_applied',
-      sourceType: 'gateway_startup_lifecycle',
-      title: `Startup lifecycle recovery applied: ${mission.title}`,
-      summary:
-        recoveredNodes.length > 0
-          ? `${recoveredNodes.length} failed node(s) reset to ready`
-          : 'No mission nodes were eligible for recovery apply',
-      redactionState: 'redacted',
-      sensitivity: 'internal',
-      contentHash,
-      replayRef,
-      observedAt: appliedAt,
-      metadata: {
-        recoveryApplyVersion: 'mission-recovery-apply.v1',
-        recoveryApplyId,
-        recoveryPlanReplayRef: recoveryEvidence.replayRef,
-        recoveryPlanEvidenceItemId: recoveryEvidence.id,
-        runtimeCheckpointId: runtimeCheckpoint.checkpointId,
-        runtimeCheckpointEvidenceItemIds: runtimeCheckpoint.evidenceItemIds,
-        recoveredNodeKeys: recoveredNodes.map((node) => node.nodeKey),
-        skippedNodes,
-        executionStarted: false,
-        productionReady: false,
-      },
-    });
-
-    await _deps.db
-      .update(missions)
-      .set({
-        status: missionStatus,
+    const evidenceItemId = await _deps.db.transaction(async (tx) => {
+      const db = tx as unknown as typeof _deps.db;
+      const persistedEvidenceItemId = await appendEvidenceItem(db, {
+        workspaceId,
+        ventureId: mission.ventureId ?? null,
+        missionId: mission.id,
+        evidenceType: 'startup_lifecycle_recovery_applied',
+        sourceType: 'gateway_startup_lifecycle',
+        title: `Startup lifecycle recovery applied: ${mission.title}`,
+        summary:
+          recoveredNodes.length > 0
+            ? `${recoveredNodes.length} failed node(s) reset to ready`
+            : 'No mission nodes were eligible for recovery apply',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        contentHash,
+        replayRef,
+        observedAt: appliedAt,
         metadata: {
-          ...missionMetadata,
-          lastRecoveryApply: {
-            recoveryApplyId,
-            evidenceItemId,
-            replayRef,
-            contentHash,
-            appliedAt: appliedAt.toISOString(),
-            runtimeCheckpointId: runtimeCheckpoint.checkpointId,
-            recoveredNodeKeys: recoveredNodes.map((node) => node.nodeKey),
-          },
+          recoveryApplyVersion: 'mission-recovery-apply.v1',
+          recoveryApplyId,
+          recoveryPlanReplayRef: recoveryEvidence.replayRef,
+          recoveryPlanEvidenceItemId: recoveryEvidence.id,
+          runtimeCheckpointId: runtimeCheckpoint.checkpointId,
+          runtimeCheckpointEvidenceItemIds: runtimeCheckpoint.evidenceItemIds,
+          recoveredNodeKeys: recoveredNodes.map((node) => node.nodeKey),
+          skippedNodes,
+          executionStarted: false,
+          productionReady: false,
         },
-        updatedAt: appliedAt,
-      })
-      .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+      });
+
+      for (const { node, taskId } of recoverableNodes) {
+        await db
+          .update(missionNodes)
+          .set({
+            status: 'ready',
+            startedAt: null,
+            completedAt: null,
+            updatedAt: appliedAt,
+          })
+          .where(and(eq(missionNodes.id, node.id), eq(missionNodes.workspaceId, workspaceId)));
+        if (taskId) {
+          await db
+            .update(tasks)
+            .set({ status: 'pending', completedAt: null, updatedAt: appliedAt })
+            .where(and(eq(tasks.id, taskId), eq(tasks.workspaceId, workspaceId)));
+        }
+      }
+
+      await db
+        .update(missions)
+        .set({
+          status: missionStatus,
+          metadata: {
+            ...missionMetadata,
+            lastRecoveryApply: {
+              recoveryApplyId,
+              evidenceItemId: persistedEvidenceItemId,
+              replayRef,
+              contentHash,
+              appliedAt: appliedAt.toISOString(),
+              runtimeCheckpointId: runtimeCheckpoint.checkpointId,
+              recoveredNodeKeys: recoveredNodes.map((node) => node.nodeKey),
+            },
+          },
+          updatedAt: appliedAt,
+        })
+        .where(and(eq(missions.id, mission.id), eq(missions.workspaceId, workspaceId)));
+
+      return persistedEvidenceItemId;
+    });
 
     const response = AppliedStartupMissionRecoverySchema.parse({
       workspaceId,

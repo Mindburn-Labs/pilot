@@ -215,6 +215,126 @@ function captureFailedRecoveryPlanTransaction(deps: ReturnType<typeof createMock
   return { committedEvidenceItems, committedMissionUpdates };
 }
 
+function captureFailedRecoveryApplyTransaction(deps: ReturnType<typeof createMockDeps>) {
+  const insertedEvidenceItems: unknown[] = [];
+  const insertedAuditEvents: unknown[] = [];
+  const updatedAuditEvents: unknown[] = [];
+  const insertedMissionRuntimeCheckpoints: unknown[] = [];
+  const committedStateUpdates: unknown[] = [];
+  const originalInsert = deps.db.insert;
+  const originalUpdate = deps.db.update;
+  let transactionCount = 0;
+
+  const captureInsert = (
+    evidenceSink: unknown[],
+    checkpointSink: unknown[],
+    auditSink: unknown[],
+    failRecoveryApplyEvidence: boolean,
+  ) =>
+    vi.fn((table: unknown) => {
+      if (table === auditLog) {
+        return {
+          values: vi.fn((value: unknown) => {
+            auditSink.push(value);
+            return { returning: vi.fn(async () => []) };
+          }),
+        };
+      }
+      if (table === evidenceItems) {
+        return {
+          values: vi.fn((value: unknown) => {
+            if (failRecoveryApplyEvidence) {
+              throw new Error('recovery apply evidence unavailable');
+            }
+            evidenceSink.push(value);
+            const id = `00000000-0000-4000-8000-00000000049${evidenceSink.length}`;
+            return { returning: vi.fn(async () => [{ id }]) };
+          }),
+        };
+      }
+      if (table === missionRuntimeCheckpoints) {
+        return {
+          values: vi.fn((value: unknown) => {
+            checkpointSink.push(value);
+            const id =
+              typeof value === 'object' &&
+              value !== null &&
+              'id' in value &&
+              typeof value.id === 'string'
+                ? value.id
+                : '00000000-0000-4000-8000-000000000491';
+            return { returning: vi.fn(async () => [{ id }]) };
+          }),
+        };
+      }
+      return originalInsert(table);
+    }) as typeof deps.db.insert;
+
+  const captureUpdate = (auditSink: unknown[], stateSink: unknown[]) =>
+    vi.fn((table: unknown) => {
+      if (table === auditLog) {
+        return {
+          set: vi.fn((value: unknown) => {
+            auditSink.push(value);
+            return { where: vi.fn(async () => []) };
+          }),
+        };
+      }
+      if (table === missionNodes || table === tasks || table === missions) {
+        return {
+          set: vi.fn((value: unknown) => ({
+            where: vi.fn(async () => {
+              stateSink.push(value);
+              return [];
+            }),
+          })),
+        };
+      }
+      return originalUpdate(table);
+    }) as typeof deps.db.update;
+
+  deps.db.insert = captureInsert(
+    insertedEvidenceItems,
+    insertedMissionRuntimeCheckpoints,
+    insertedAuditEvents,
+    false,
+  );
+  deps.db.update = captureUpdate(updatedAuditEvents, committedStateUpdates);
+  deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+    transactionCount += 1;
+    const stagedEvidenceItems: unknown[] = [];
+    const stagedAuditEvents: unknown[] = [];
+    const stagedAuditUpdates: unknown[] = [];
+    const stagedMissionRuntimeCheckpoints: unknown[] = [];
+    const stagedStateUpdates: unknown[] = [];
+    const tx = {
+      ...deps.db,
+      insert: captureInsert(
+        stagedEvidenceItems,
+        stagedMissionRuntimeCheckpoints,
+        stagedAuditEvents,
+        transactionCount === 2,
+      ),
+      update: captureUpdate(stagedAuditUpdates, stagedStateUpdates),
+    };
+    const result = await callback(tx);
+    insertedEvidenceItems.push(...stagedEvidenceItems);
+    insertedAuditEvents.push(...stagedAuditEvents);
+    updatedAuditEvents.push(...stagedAuditUpdates);
+    insertedMissionRuntimeCheckpoints.push(...stagedMissionRuntimeCheckpoints);
+    committedStateUpdates.push(...stagedStateUpdates);
+    return result;
+  }) as typeof deps.db.transaction;
+
+  return {
+    insertedEvidenceItems,
+    insertedAuditEvents,
+    updatedAuditEvents,
+    insertedMissionRuntimeCheckpoints,
+    committedStateUpdates,
+  };
+}
+
 function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof createMockDeps>) {
   const insertedEvidenceItems: unknown[] = [];
   const insertedAuditEvents: unknown[] = [];
@@ -222,6 +342,7 @@ function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof crea
   const insertedMissionRuntimeCheckpoints: unknown[] = [];
   const originalInsert = deps.db.insert;
   const originalUpdate = deps.db.update;
+  let evidenceIdCounter = 190;
 
   const captureInsert = (
     evidenceSink: unknown[],
@@ -242,7 +363,8 @@ function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof crea
         return {
           values: vi.fn((value: unknown) => {
             evidenceSink.push(value);
-            const id = `00000000-0000-4000-8000-00000000019${evidenceSink.length}`;
+            evidenceIdCounter += 1;
+            const id = `00000000-0000-4000-8000-${String(evidenceIdCounter).padStart(12, '0')}`;
             return { returning: vi.fn(async () => [{ id }]) };
           }),
         };
@@ -272,7 +394,7 @@ function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof crea
       return originalInsert(table);
     }) as typeof deps.db.insert;
 
-  const captureUpdate = (auditSink: unknown[]) =>
+  const captureUpdate = (auditSink: unknown[], fallbackUpdate: typeof deps.db.update) =>
     vi.fn((table: unknown) => {
       if (table === auditLog) {
         return {
@@ -282,7 +404,7 @@ function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof crea
           }),
         };
       }
-      return originalUpdate(table);
+      return fallbackUpdate(table);
     }) as typeof deps.db.update;
 
   deps.db.insert = captureInsert(
@@ -290,12 +412,13 @@ function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof crea
     insertedMissionRuntimeCheckpoints,
     insertedAuditEvents,
   );
-  deps.db.update = captureUpdate(updatedAuditEvents);
+  deps.db.update = captureUpdate(updatedAuditEvents, originalUpdate);
   deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
     const stagedEvidenceItems: unknown[] = [];
     const stagedAuditEvents: unknown[] = [];
     const stagedAuditUpdates: unknown[] = [];
     const stagedMissionRuntimeCheckpoints: unknown[] = [];
+    const fallbackUpdate = deps.db.update;
     const tx = {
       ...deps.db,
       insert: captureInsert(
@@ -303,7 +426,7 @@ function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof crea
         stagedMissionRuntimeCheckpoints,
         stagedAuditEvents,
       ),
-      update: captureUpdate(stagedAuditUpdates),
+      update: captureUpdate(stagedAuditUpdates, fallbackUpdate),
     };
     const result = await callback(tx);
     insertedEvidenceItems.push(...stagedEvidenceItems);
@@ -1751,6 +1874,142 @@ describe('startupLifecycleRoutes', () => {
         }),
       ]),
     );
+    expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
+  });
+
+  it('does not commit recovery apply state when recovery evidence persistence fails', async () => {
+    const deps = createMockDeps();
+    const { insertedEvidenceItems, insertedMissionRuntimeCheckpoints, committedStateUpdates } =
+      captureFailedRecoveryApplyTransaction(deps);
+    const missionId = '00000000-0000-4000-8000-000000000470';
+    const ventureId = '00000000-0000-4000-8000-000000000471';
+    const failedNodeId = '00000000-0000-4000-8000-000000000472';
+    const blockedNodeId = '00000000-0000-4000-8000-000000000473';
+    const taskId = '00000000-0000-4000-8000-000000000474';
+    const recoveryPlanReplayRef = `mission:${missionId}:recovery-plan:failed-evidence`;
+    const selectResults = [
+      [
+        {
+          id: missionId,
+          workspaceId,
+          ventureId,
+          title: 'Launch EvidenceOS',
+          status: 'blocked',
+          productionReady: false,
+          metadata: {
+            lastRecoveryPlan: {
+              recoveryPlanId: 'mission-recovery-plan:failed-evidence',
+              evidenceItemId: '00000000-0000-4000-8000-000000000475',
+              replayRef: recoveryPlanReplayRef,
+            },
+          },
+        },
+      ],
+      [
+        {
+          id: '00000000-0000-4000-8000-000000000475',
+          workspaceId,
+          missionId,
+          replayRef: recoveryPlanReplayRef,
+          evidenceType: 'startup_lifecycle_recovery_plan',
+          metadata: {
+            plan: {
+              failedNodeKeys: ['ideation'],
+              blockedNodeKeys: ['launch_engine'],
+            },
+          },
+        },
+      ],
+      [
+        {
+          id: failedNodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'ideation',
+          stage: 'ideation',
+          title: 'Venture hypothesis generation',
+          status: 'failed',
+          sortOrder: 1,
+        },
+        {
+          id: blockedNodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'launch_engine',
+          stage: 'infrastructure_deployment',
+          title: 'Launch readiness',
+          status: 'blocked',
+          sortOrder: 2,
+        },
+      ],
+      [],
+      [
+        {
+          id: '00000000-0000-4000-8000-000000000476',
+          workspaceId,
+          missionId,
+          nodeId: failedNodeId,
+          taskId,
+          role: 'startup_lifecycle_node',
+        },
+      ],
+      [],
+      [
+        {
+          id: failedNodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'ideation',
+          stage: 'ideation',
+          title: 'Venture hypothesis generation',
+          status: 'failed',
+          sortOrder: 1,
+        },
+        {
+          id: blockedNodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'launch_engine',
+          stage: 'infrastructure_deployment',
+          title: 'Launch readiness',
+          status: 'blocked',
+          sortOrder: 2,
+        },
+      ],
+      [
+        {
+          id: '00000000-0000-4000-8000-000000000476',
+          workspaceId,
+          missionId,
+          nodeId: failedNodeId,
+          taskId,
+          role: 'startup_lifecycle_node',
+        },
+      ],
+    ];
+    let selectCall = 0;
+    const originalSelect = deps.db.select;
+    deps.db.select = vi.fn(() => {
+      deps.db._setResult(selectResults[selectCall] ?? []);
+      selectCall += 1;
+      return originalSelect();
+    }) as typeof deps.db.select;
+
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch(
+      'POST',
+      `/missions/${missionId}/recover`,
+      { reason: 'force recovery apply evidence failure' },
+      wsHeader,
+    );
+
+    expect(res.status).toBe(500);
+    expect(insertedMissionRuntimeCheckpoints).toHaveLength(1);
+    expect(insertedEvidenceItems).toHaveLength(1);
+    expect(insertedEvidenceItems[0]).toMatchObject({
+      evidenceType: 'startup_lifecycle_mission_checkpoint',
+    });
+    expect(committedStateUpdates).toEqual([]);
     expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
   });
 
