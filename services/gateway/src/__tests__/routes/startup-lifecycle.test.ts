@@ -215,7 +215,9 @@ function captureFailedRecoveryPlanTransaction(deps: ReturnType<typeof createMock
   return { committedEvidenceItems, committedMissionUpdates };
 }
 
-function captureFailedRecoveryApplyTransaction(deps: ReturnType<typeof createMockDeps>) {
+function captureFailedSecondLifecycleActionEvidenceTransaction(
+  deps: ReturnType<typeof createMockDeps>,
+) {
   const insertedEvidenceItems: unknown[] = [];
   const insertedAuditEvents: unknown[] = [];
   const updatedAuditEvents: unknown[] = [];
@@ -229,7 +231,7 @@ function captureFailedRecoveryApplyTransaction(deps: ReturnType<typeof createMoc
     evidenceSink: unknown[],
     checkpointSink: unknown[],
     auditSink: unknown[],
-    failRecoveryApplyEvidence: boolean,
+    failSecondActionEvidence: boolean,
   ) =>
     vi.fn((table: unknown) => {
       if (table === auditLog) {
@@ -243,8 +245,8 @@ function captureFailedRecoveryApplyTransaction(deps: ReturnType<typeof createMoc
       if (table === evidenceItems) {
         return {
           values: vi.fn((value: unknown) => {
-            if (failRecoveryApplyEvidence) {
-              throw new Error('recovery apply evidence unavailable');
+            if (failSecondActionEvidence) {
+              throw new Error('lifecycle action evidence unavailable');
             }
             evidenceSink.push(value);
             const id = `00000000-0000-4000-8000-00000000049${evidenceSink.length}`;
@@ -1880,7 +1882,7 @@ describe('startupLifecycleRoutes', () => {
   it('does not commit recovery apply state when recovery evidence persistence fails', async () => {
     const deps = createMockDeps();
     const { insertedEvidenceItems, insertedMissionRuntimeCheckpoints, committedStateUpdates } =
-      captureFailedRecoveryApplyTransaction(deps);
+      captureFailedSecondLifecycleActionEvidenceTransaction(deps);
     const missionId = '00000000-0000-4000-8000-000000000470';
     const ventureId = '00000000-0000-4000-8000-000000000471';
     const failedNodeId = '00000000-0000-4000-8000-000000000472';
@@ -2307,6 +2309,100 @@ describe('startupLifecycleRoutes', () => {
         expect.objectContaining({ status: 'scheduled_not_executing' }),
       ]),
     );
+    expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
+  });
+
+  it('does not commit rollback state when rollback evidence persistence fails', async () => {
+    const deps = createMockDeps();
+    const { insertedEvidenceItems, insertedMissionRuntimeCheckpoints, committedStateUpdates } =
+      captureFailedSecondLifecycleActionEvidenceTransaction(deps);
+    const missionId = '00000000-0000-4000-8000-000000000510';
+    const failedNodeId = '00000000-0000-4000-8000-000000000511';
+    const blockedNodeId = '00000000-0000-4000-8000-000000000512';
+    const failedTaskId = '00000000-0000-4000-8000-000000000513';
+    const blockedTaskId = '00000000-0000-4000-8000-000000000514';
+    const selectResults = [
+      [
+        {
+          id: missionId,
+          workspaceId,
+          ventureId: null,
+          title: 'Launch EvidenceOS',
+          status: 'blocked',
+        },
+      ],
+      [
+        {
+          id: failedNodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'ideation',
+          stage: 'ideation',
+          title: 'Venture hypothesis generation',
+          status: 'failed',
+          sortOrder: 0,
+        },
+        {
+          id: blockedNodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'market_research',
+          stage: 'market_research',
+          title: 'Market and competitor map',
+          status: 'blocked',
+          sortOrder: 1,
+        },
+      ],
+      [
+        {
+          id: '00000000-0000-4000-8000-000000000515',
+          workspaceId,
+          missionId,
+          fromNodeKey: 'ideation',
+          toNodeKey: 'market_research',
+        },
+      ],
+      [
+        {
+          id: '00000000-0000-4000-8000-000000000516',
+          workspaceId,
+          missionId,
+          nodeId: failedNodeId,
+          taskId: failedTaskId,
+        },
+        {
+          id: '00000000-0000-4000-8000-000000000517',
+          workspaceId,
+          missionId,
+          nodeId: blockedNodeId,
+          taskId: blockedTaskId,
+        },
+      ],
+      [],
+    ];
+    let selectCall = 0;
+    const originalSelect = deps.db.select;
+    deps.db.select = vi.fn(() => {
+      deps.db._setResult(selectResults[selectCall] ?? []);
+      selectCall += 1;
+      return originalSelect();
+    }) as typeof deps.db.select;
+
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch(
+      'POST',
+      `/missions/${missionId}/rollback`,
+      { reason: 'force rollback evidence failure' },
+      wsHeader,
+    );
+
+    expect(res.status).toBe(500);
+    expect(insertedMissionRuntimeCheckpoints).toHaveLength(1);
+    expect(insertedEvidenceItems).toHaveLength(1);
+    expect(insertedEvidenceItems[0]).toMatchObject({
+      evidenceType: 'startup_lifecycle_mission_checkpoint',
+    });
+    expect(committedStateUpdates).toEqual([]);
     expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
   });
 
