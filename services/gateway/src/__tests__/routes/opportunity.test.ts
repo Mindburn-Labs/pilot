@@ -158,6 +158,76 @@ function createOpportunityScoreDb(
   return { db, inserts, updates };
 }
 
+function createOpportunityQueueDb(
+  workspaceId: string,
+  options: {
+    failEvidence?: boolean;
+    unscored?: Array<{ id: string }>;
+  } = {},
+) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const unscored = options.unscored ?? [{ id: 'opp-1' }, { id: 'opp-2' }];
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(async () => unscored),
+        orderBy: vi.fn(() => ({ limit: vi.fn(async () => []) })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('evidence unavailable');
+              return [{ id: 'evidence-opportunity-queue-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => ({
+        where: vi.fn(async () => {
+          updateSink.push({ table, value });
+          return [];
+        }),
+      })),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates };
+}
+
 describe('opportunityRoutes', () => {
   let deps: ReturnType<typeof createMockDeps>;
   let fetch: ReturnType<typeof testApp>['fetch'];
@@ -507,6 +577,165 @@ describe('opportunityRoutes', () => {
       const json = await expectJson<{ error: string }>(res, 500);
 
       expect(json.error).toContain('Failed to persist opportunity scoring evidence');
+      expect(deps.orchestrator.boss.send).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
+    });
+  });
+
+  describe('POST /batch-score', () => {
+    it('denies members from queueing batch opportunity scoring', async () => {
+      const res = await fetch('POST', '/batch-score', undefined, {
+        ...wsHeader,
+        'X-Workspace-Role': 'member',
+      });
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+      expect(deps.orchestrator.boss?.send).not.toHaveBeenCalled();
+    });
+
+    it('writes audit-linked evidence before queueing batch scoring jobs', async () => {
+      const { db, inserts, updates } = createOpportunityQueueDb(workspaceId);
+      const deps = createMockDeps({ db: db as never });
+      deps.orchestrator.boss = {
+        send: vi.fn(async (_queue: string, payload: { opportunityId: string }) => {
+          return `job-${payload.opportunityId}`;
+        }),
+      } as never;
+      const scoped = testApp(opportunityRoutes, deps);
+
+      const res = await scoped.fetch('POST', '/batch-score', undefined, wsHeader);
+      const json = await expectJson<Record<string, unknown>>(res, 202);
+
+      expect(json).toMatchObject({
+        enqueued: 2,
+        total: 2,
+        jobIds: ['job-opp-1', 'job-opp-2'],
+        evidenceItemId: 'evidence-opportunity-queue-1',
+      });
+      expect(deps.orchestrator.boss.send).toHaveBeenCalledTimes(2);
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      expect(updates.map((update) => update.table)).toEqual([auditLog, auditLog]);
+      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+        workspaceId,
+        action: 'OPPORTUNITY_BATCH_SCORE_REQUESTED',
+        target: workspaceId,
+        metadata: {
+          evidenceType: 'opportunity_batch_score_requested',
+          queued: false,
+          opportunityCount: 2,
+          opportunityIdsPreview: ['opp-1', 'opp-2'],
+          evidenceContract: 'opportunity_batch_score_request_evidence_required',
+        },
+      });
+      expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId,
+        evidenceType: 'opportunity_batch_score_requested',
+        sourceType: 'gateway_opportunity_route',
+        redactionState: 'redacted',
+        metadata: {
+          opportunityCount: 2,
+          opportunityIdsPreview: ['opp-1', 'opp-2'],
+        },
+      });
+      expect(updates.at(-1)?.value).toMatchObject({
+        metadata: {
+          queued: true,
+          enqueued: 2,
+          jobIds: ['job-opp-1', 'job-opp-2'],
+          evidenceItemId: 'evidence-opportunity-queue-1',
+        },
+      });
+    });
+
+    it('fails closed without queueing batch scoring when evidence persistence fails', async () => {
+      const { db, inserts, updates } = createOpportunityQueueDb(workspaceId, {
+        failEvidence: true,
+      });
+      const deps = createMockDeps({ db: db as never });
+      deps.orchestrator.boss = {
+        send: vi.fn(async () => 'job-1'),
+      } as never;
+      const scoped = testApp(opportunityRoutes, deps);
+
+      const res = await scoped.fetch('POST', '/batch-score', undefined, wsHeader);
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to persist opportunity batch scoring evidence');
+      expect(deps.orchestrator.boss.send).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
+    });
+  });
+
+  describe('POST /cluster', () => {
+    it('writes audit-linked evidence before queueing cluster rebuild', async () => {
+      const { db, inserts, updates } = createOpportunityQueueDb(workspaceId);
+      const deps = createMockDeps({ db: db as never });
+      deps.orchestrator.boss = {
+        send: vi.fn(async () => 'job-cluster-1'),
+      } as never;
+      const scoped = testApp(opportunityRoutes, deps);
+
+      const res = await scoped.fetch('POST', '/cluster', undefined, wsHeader);
+      const json = await expectJson<Record<string, unknown>>(res, 202);
+
+      expect(json).toMatchObject({
+        queued: true,
+        jobId: 'job-cluster-1',
+        evidenceItemId: 'evidence-opportunity-queue-1',
+      });
+      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('pipeline.cluster', {
+        workspaceId,
+      });
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      expect(updates.map((update) => update.table)).toEqual([auditLog, auditLog]);
+      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+        workspaceId,
+        action: 'OPPORTUNITY_CLUSTER_REBUILD_REQUESTED',
+        target: workspaceId,
+        metadata: {
+          evidenceType: 'opportunity_cluster_rebuild_requested',
+          queued: false,
+          queue: 'pipeline.cluster',
+          evidenceContract: 'opportunity_cluster_request_evidence_required',
+        },
+      });
+      expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId,
+        evidenceType: 'opportunity_cluster_rebuild_requested',
+        sourceType: 'gateway_opportunity_route',
+        redactionState: 'redacted',
+        metadata: {
+          queue: 'pipeline.cluster',
+          evidenceContract: 'opportunity_cluster_request_evidence_required',
+        },
+      });
+      expect(updates.at(-1)?.value).toMatchObject({
+        metadata: {
+          queued: true,
+          jobId: 'job-cluster-1',
+          evidenceItemId: 'evidence-opportunity-queue-1',
+        },
+      });
+    });
+
+    it('fails closed without queueing cluster rebuild when evidence persistence fails', async () => {
+      const { db, inserts, updates } = createOpportunityQueueDb(workspaceId, {
+        failEvidence: true,
+      });
+      const deps = createMockDeps({ db: db as never });
+      deps.orchestrator.boss = {
+        send: vi.fn(async () => 'job-cluster-1'),
+      } as never;
+      const scoped = testApp(opportunityRoutes, deps);
+
+      const res = await scoped.fetch('POST', '/cluster', undefined, wsHeader);
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to persist opportunity cluster evidence');
       expect(deps.orchestrator.boss.send).not.toHaveBeenCalled();
       expect(inserts).toEqual([]);
       expect(updates).toEqual([]);

@@ -161,7 +161,10 @@ export function opportunityRoutes(deps: GatewayDeps) {
     const capability = getCapabilityRecord('opportunity_scoring');
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
-    if (!deps.orchestrator.boss) {
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'queue opportunity batch scoring');
+    if (roleDenied) return roleDenied;
+    const boss = deps.orchestrator.boss;
+    if (!boss) {
       return c.json({ error: 'Background job system unavailable', capability }, 503);
     }
 
@@ -172,23 +175,178 @@ export function opportunityRoutes(deps: GatewayDeps) {
         and(eq(opportunities.workspaceId, workspaceId), eq(opportunities.status, 'discovered')),
       );
 
+    const auditEventId = randomUUID();
+    const opportunityIds = unscored.map(({ id }) => id);
+    const replayRef = `opportunity:${workspaceId}:batch-score:${auditEventId}`;
+    const auditMetadata = {
+      opportunityCount: opportunityIds.length,
+      opportunityIdsPreview: opportunityIds.slice(0, 50),
+      capabilityKey: capability?.key ?? 'opportunity_scoring',
+      capabilityState: capability?.state ?? 'blocked',
+      evidenceContract: 'opportunity_batch_score_request_evidence_required',
+    };
+
+    const evidenceItemId = await deps.db
+      .transaction(async (tx) => {
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'OPPORTUNITY_BATCH_SCORE_REQUESTED',
+          actor: `user:${c.get('userId') ?? 'unknown'}`,
+          target: workspaceId,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'opportunity_batch_score_requested',
+            replayRef,
+            queued: false,
+            ...auditMetadata,
+          },
+        });
+
+        const createdEvidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'opportunity_batch_score_requested',
+          sourceType: 'gateway_opportunity_route',
+          title: 'Opportunity batch scoring requested',
+          summary: `Batch scoring requested for ${opportunityIds.length} discovered opportunities.`,
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          replayRef,
+          metadata: auditMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'opportunity_batch_score_requested',
+              replayRef,
+              queued: false,
+              evidenceItemId: createdEvidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return createdEvidenceItemId;
+      })
+      .catch(() => null);
+
+    if (!evidenceItemId) {
+      return c.json({ error: 'Failed to persist opportunity batch scoring evidence' }, 500);
+    }
+
     let enqueued = 0;
+    const jobIds: unknown[] = [];
     for (const { id } of unscored) {
-      await deps.orchestrator.boss.send('opportunity.score', { opportunityId: id });
+      const jobId = await boss.send('opportunity.score', { opportunityId: id });
+      jobIds.push(jobId ?? null);
       enqueued++;
     }
 
-    return c.json({ enqueued, total: unscored.length, capability }, 202);
+    await deps.db
+      .update(auditLog)
+      .set({
+        metadata: {
+          evidenceType: 'opportunity_batch_score_requested',
+          replayRef,
+          queued: true,
+          enqueued,
+          jobIds,
+          evidenceItemId,
+          ...auditMetadata,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+    return c.json({ enqueued, total: unscored.length, jobIds, evidenceItemId, capability }, 202);
   });
 
   // ─── Trigger cluster rebuild for the workspace ───
   app.post('/cluster', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
-    if (!deps.orchestrator.boss) return c.json({ error: 'Background job system unavailable' }, 503);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'queue opportunity cluster rebuild');
+    if (roleDenied) return roleDenied;
+    const boss = deps.orchestrator.boss;
+    if (!boss) return c.json({ error: 'Background job system unavailable' }, 503);
 
-    const jobId = await deps.orchestrator.boss.send('pipeline.cluster', { workspaceId });
-    return c.json({ queued: true, jobId }, 202);
+    const auditEventId = randomUUID();
+    const replayRef = `opportunity:${workspaceId}:cluster:${auditEventId}`;
+    const auditMetadata = {
+      workspaceId,
+      queue: 'pipeline.cluster',
+      evidenceContract: 'opportunity_cluster_request_evidence_required',
+    };
+
+    const evidenceItemId = await deps.db
+      .transaction(async (tx) => {
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'OPPORTUNITY_CLUSTER_REBUILD_REQUESTED',
+          actor: `user:${c.get('userId') ?? 'unknown'}`,
+          target: workspaceId,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'opportunity_cluster_rebuild_requested',
+            replayRef,
+            queued: false,
+            ...auditMetadata,
+          },
+        });
+
+        const createdEvidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'opportunity_cluster_rebuild_requested',
+          sourceType: 'gateway_opportunity_route',
+          title: 'Opportunity cluster rebuild requested',
+          summary: 'Workspace opportunity cluster rebuild was requested through the gateway API.',
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          replayRef,
+          metadata: auditMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'opportunity_cluster_rebuild_requested',
+              replayRef,
+              queued: false,
+              evidenceItemId: createdEvidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return createdEvidenceItemId;
+      })
+      .catch(() => null);
+
+    if (!evidenceItemId) {
+      return c.json({ error: 'Failed to persist opportunity cluster evidence' }, 500);
+    }
+
+    const jobId = await boss.send('pipeline.cluster', { workspaceId });
+    await deps.db
+      .update(auditLog)
+      .set({
+        metadata: {
+          evidenceType: 'opportunity_cluster_rebuild_requested',
+          replayRef,
+          queued: true,
+          jobId: jobId ?? null,
+          evidenceItemId,
+          ...auditMetadata,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+    return c.json({ queued: true, jobId, evidenceItemId }, 202);
   });
 
   // ─── List clusters for the workspace ───
