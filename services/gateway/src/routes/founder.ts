@@ -37,6 +37,8 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/profile', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'mutate founder profile');
+    if (roleDenied) return roleDenied;
 
     const raw = await c.req.json();
     const parsed = CreateFounderProfileInput.safeParse(raw);
@@ -44,8 +46,14 @@ export function founderRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Validation failed', details: parsed.error.flatten() }, 400);
     }
 
-    const profile = await upsertFounderProfile(deps, workspaceId, parsed.data);
-    return c.json(profile, 201);
+    const result = await upsertFounderProfile(
+      deps,
+      workspaceId,
+      parsed.data,
+      c.get('userId'),
+    ).catch(() => undefined);
+    if (!result) return c.json({ error: 'Failed to upsert founder profile evidence' }, 500);
+    return c.json({ ...result.profile, evidenceItemId: result.evidenceItemId }, 201);
   });
 
   app.post('/analyze', async (c) => {
@@ -345,6 +353,8 @@ export function founderRoutes(deps: GatewayDeps) {
     if (c.req.param('workspaceId') !== workspaceId) {
       return c.json({ error: 'workspaceId does not match authenticated workspace' }, 403);
     }
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'mutate founder profile');
+    if (roleDenied) return roleDenied;
 
     const raw = await c.req.json();
     const parsed = CreateFounderProfileInput.safeParse(raw);
@@ -352,13 +362,21 @@ export function founderRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Validation failed', details: parsed.error.flatten() }, 400);
     }
 
-    const profile = await upsertFounderProfile(deps, workspaceId, parsed.data);
-    return c.json(profile, 201);
+    const result = await upsertFounderProfile(
+      deps,
+      workspaceId,
+      parsed.data,
+      c.get('userId'),
+    ).catch(() => undefined);
+    if (!result) return c.json({ error: 'Failed to upsert founder profile evidence' }, 500);
+    return c.json({ ...result.profile, evidenceItemId: result.evidenceItemId }, 201);
   });
 
   app.post('/:founderId/assessment', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'create founder assessment');
+    if (roleDenied) return roleDenied;
 
     const { founderId } = c.req.param();
     const body = await c.req.json();
@@ -366,23 +384,85 @@ export function founderRoutes(deps: GatewayDeps) {
       return c.json({ error: 'assessmentType and responses are required' }, 400);
     }
 
-    const [profile] = await deps.db
-      .select({ id: founderProfiles.id })
-      .from(founderProfiles)
-      .where(and(eq(founderProfiles.id, founderId), eq(founderProfiles.workspaceId, workspaceId)))
-      .limit(1);
-    if (!profile) return c.json({ error: 'Founder profile not found' }, 404);
+    const result = await deps.db
+      .transaction(async (tx) => {
+        const [profile] = await tx
+          .select({ id: founderProfiles.id })
+          .from(founderProfiles)
+          .where(
+            and(eq(founderProfiles.id, founderId), eq(founderProfiles.workspaceId, workspaceId)),
+          )
+          .limit(1);
+        if (!profile) return null;
 
-    const [assessment] = await deps.db
-      .insert(founderAssessments)
-      .values({
-        founderId,
-        assessmentType: body.assessmentType,
-        responses: body.responses,
-        analysis: body.analysis,
+        const [assessment] = await tx
+          .insert(founderAssessments)
+          .values({
+            founderId,
+            assessmentType: body.assessmentType,
+            responses: body.responses,
+            analysis: body.analysis,
+          })
+          .returning();
+        if (!assessment) throw new Error('failed to create founder assessment');
+
+        const auditEventId = randomUUID();
+        const replayRef = `founder-assessment:${workspaceId}:${founderId}:${assessment.id}`;
+        const auditMetadata = {
+          founderId,
+          assessmentId: assessment.id,
+          assessmentType: body.assessmentType,
+          evidenceContract: 'founder_assessment_evidence_required',
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'FOUNDER_ASSESSMENT_CREATED',
+          actor: `user:${c.get('userId') ?? 'unknown'}`,
+          target: assessment.id,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'founder_assessment_created',
+            replayRef,
+            ...auditMetadata,
+          },
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'founder_assessment_created',
+          sourceType: 'gateway_founder',
+          title: `Founder assessment created: ${body.assessmentType}`,
+          summary: `Founder assessment ${assessment.id} was created for founder profile ${founderId}.`,
+          redactionState: 'none',
+          sensitivity: 'internal',
+          replayRef,
+          metadata: auditMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'founder_assessment_created',
+              replayRef,
+              evidenceItemId,
+              ...auditMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return { assessment, evidenceItemId };
       })
-      .returning();
-    return c.json(assessment, 201);
+      .catch(() => undefined);
+
+    if (result === null) return c.json({ error: 'Founder profile not found' }, 404);
+    if (result === undefined)
+      return c.json({ error: 'Failed to create founder assessment evidence' }, 500);
+
+    return c.json({ ...result.assessment, evidenceItemId: result.evidenceItemId }, 201);
   });
 
   app.get('/:founderId/strengths', async (c) => {
@@ -416,29 +496,80 @@ async function upsertFounderProfile(
     experience?: string;
     interests: string[];
   },
+  userId?: string,
 ) {
-  const [profile] = await deps.db
-    .insert(founderProfiles)
-    .values({
-      workspaceId,
-      name: body.name,
-      background: body.background,
-      experience: body.experience,
-      interests: body.interests,
-    })
-    .onConflictDoUpdate({
-      target: founderProfiles.workspaceId,
-      set: {
+  return deps.db.transaction(async (tx) => {
+    const [profile] = await tx
+      .insert(founderProfiles)
+      .values({
+        workspaceId,
         name: body.name,
         background: body.background,
         experience: body.experience,
         interests: body.interests,
-        updatedAt: new Date(),
-      },
-    })
-    .returning();
+      })
+      .onConflictDoUpdate({
+        target: founderProfiles.workspaceId,
+        set: {
+          name: body.name,
+          background: body.background,
+          experience: body.experience,
+          interests: body.interests,
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    if (!profile) throw new Error('failed to upsert founder profile');
 
-  return profile;
+    const auditEventId = randomUUID();
+    const replayRef = `founder-profile:${workspaceId}:${profile.id}:upsert`;
+    const auditMetadata = {
+      founderProfileId: profile.id,
+      fields: Object.keys(body).filter((key) => body[key as keyof typeof body] !== undefined),
+      evidenceContract: 'founder_profile_evidence_required',
+    };
+
+    await tx.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId,
+      action: 'FOUNDER_PROFILE_UPSERTED',
+      actor: `user:${userId ?? 'unknown'}`,
+      target: profile.id,
+      verdict: 'allow',
+      metadata: {
+        evidenceType: 'founder_profile_upserted',
+        replayRef,
+        ...auditMetadata,
+      },
+    });
+
+    const evidenceItemId = await appendEvidenceItem(tx, {
+      workspaceId,
+      auditEventId,
+      evidenceType: 'founder_profile_upserted',
+      sourceType: 'gateway_founder',
+      title: `Founder profile upserted: ${profile.id}`,
+      summary: `Founder profile ${profile.id} was created or updated.`,
+      redactionState: 'none',
+      sensitivity: 'internal',
+      replayRef,
+      metadata: auditMetadata,
+    });
+
+    await tx
+      .update(auditLog)
+      .set({
+        metadata: {
+          evidenceType: 'founder_profile_upserted',
+          replayRef,
+          evidenceItemId,
+          ...auditMetadata,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+    return { profile, evidenceItemId };
+  });
 }
 
 async function getFounderProfileFallback(deps: GatewayDeps, workspaceId: string) {
