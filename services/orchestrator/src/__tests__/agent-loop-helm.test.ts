@@ -196,15 +196,14 @@ describe('AgentLoop — HELM governance persistence', () => {
     expect(row.action).toBe('LLM_INFERENCE');
   });
 
-  it('does not commit mirrored receipt pack when receipt evidence item persistence fails', async () => {
+  it('fails closed and does not commit mirrored receipt pack when receipt evidence item persistence fails', async () => {
     const { db, committedMirrorInserts } = makeMirrorFailureDb();
     const loop = new AgentLoop(db as never, mockTrust);
     loop.setLlm(governedLlm() as never);
     loop.setTools(mockTools);
 
-    const result = await loop.execute(baseParams());
+    await expect(loop.execute(baseParams())).rejects.toThrow('evidence item insert failed');
 
-    expect(result.status).toBe('completed');
     expect(committedMirrorInserts.some((insert) => insert.table === 'evidencePacks')).toBe(false);
   });
 

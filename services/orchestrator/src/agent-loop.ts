@@ -1075,8 +1075,17 @@ export class AgentLoop {
       } catch (err) {
         l1InferenceLog.warn({ err }, 'validateL1 threw on LLM_INFERENCE pack');
       }
-    } catch {
-      // Non-critical — governance mirroring is best-effort
+    } catch (err) {
+      captureException(err, {
+        tags: { source: 'mirrorGovernanceEvidence', workspaceId },
+        extra: {
+          taskRunId,
+          decisionId: gov.decisionId,
+          action: govAction,
+          resource: govResource,
+        },
+      });
+      throw err;
     }
   }
 
