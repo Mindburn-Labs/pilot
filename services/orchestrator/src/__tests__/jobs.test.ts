@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { appendEvidenceItem } from '@pilot/db';
+import { auditLog, tasks, taskRuns } from '@pilot/db/schema';
 import { registerJobHandlers } from '../jobs.js';
 
 vi.mock('@pilot/db', () => ({
@@ -133,6 +134,7 @@ describe('registerJobHandlers', () => {
     expect(registeredNames).toContain('opportunity.score');
     expect(registeredNames).toContain('knowledge.recompile');
     expect(registeredNames).toContain('task.resume');
+    expect(registeredNames).toContain('tasks.reap_stuck');
     expect(registeredNames).toContain('pipeline.yc-scrape');
     expect(registeredNames).toContain('pipeline.ingest-knowledge');
 
@@ -622,6 +624,135 @@ describe('registerJobHandlers', () => {
       await expect(
         handler([{ data: { taskId: 'task-1', workspaceId: 'ws-1', context: 'test' } }]),
       ).resolves.toBeUndefined();
+    });
+  });
+
+  describe('tasks.reap_stuck', () => {
+    it('records reaped tasks with audit-linked evidence in one transaction', async () => {
+      vi.mocked(appendEvidenceItem).mockResolvedValueOnce('evidence-item-reaper');
+      const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const updates: Array<{ table: unknown; value: unknown }> = [];
+      const txDb = {
+        update: vi.fn((table: unknown) => {
+          if (table === tasks) {
+            return {
+              set: vi.fn((value: unknown) => ({
+                where: vi.fn(() => ({
+                  returning: vi.fn(async () => {
+                    updates.push({ table, value });
+                    return [{ id: 'task-1', workspaceId: 'ws-1' }];
+                  }),
+                })),
+              })),
+            };
+          }
+          if (table === auditLog) {
+            return {
+              set: vi.fn((value: unknown) => ({
+                where: vi.fn(async () => {
+                  updates.push({ table, value });
+                }),
+              })),
+            };
+          }
+          throw new Error('unexpected update table');
+        }),
+        insert: vi.fn((table: unknown) => ({
+          values: vi.fn((value: Record<string, unknown>) => {
+            inserts.push({ table, value });
+            return Promise.resolve([]);
+          }),
+        })),
+      };
+      mockDb.transaction = vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(txDb));
+
+      registerJobHandlers(mockBoss, { db: mockDb });
+      const handler = handlers.get('tasks.reap_stuck')!;
+
+      await handler([{ id: 'job-reap-1', data: {} }]);
+
+      expect(mockDb.transaction).toHaveBeenCalledOnce();
+      const runInsert = inserts.find((insert) => insert.table === taskRuns);
+      expect(runInsert?.value).toMatchObject({
+        taskId: 'task-1',
+        status: 'failed',
+        actionTool: 'system.tasks.reap_stuck',
+        verdict: 'reaped',
+      });
+      const auditInsert = inserts.find((insert) => insert.table === auditLog);
+      expect(auditInsert?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'TASK_REAPED_STUCK',
+        actor: 'job:tasks.reap_stuck',
+        target: 'task-1',
+        verdict: 'allow',
+      });
+      expect(appendEvidenceItem).toHaveBeenCalledWith(
+        txDb,
+        expect.objectContaining({
+          workspaceId: 'ws-1',
+          taskRunId: runInsert?.value.id,
+          auditEventId: auditInsert?.value.id,
+          evidenceType: 'task_reaped_stuck',
+          sourceType: 'task_reaper',
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+        }),
+      );
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-item-reaper',
+        }),
+      });
+    });
+
+    it('does not commit reaped task state when reaper evidence persistence fails', async () => {
+      vi.mocked(appendEvidenceItem).mockRejectedValueOnce(new Error('reaper evidence unavailable'));
+      const committedMutations: Array<{ table: unknown; value: unknown }> = [];
+      mockDb.transaction = vi.fn(async (callback: (tx: any) => Promise<unknown>) => {
+        const stagedMutations: Array<{ table: unknown; value: unknown }> = [];
+        const txDb = {
+          update: vi.fn((table: unknown) => {
+            if (table === tasks) {
+              return {
+                set: vi.fn((value: unknown) => ({
+                  where: vi.fn(() => ({
+                    returning: vi.fn(async () => {
+                      stagedMutations.push({ table, value });
+                      return [{ id: 'task-1', workspaceId: 'ws-1' }];
+                    }),
+                  })),
+                })),
+              };
+            }
+            return {
+              set: vi.fn((value: unknown) => ({
+                where: vi.fn(async () => {
+                  stagedMutations.push({ table, value });
+                }),
+              })),
+            };
+          }),
+          insert: vi.fn((table: unknown) => ({
+            values: vi.fn((value: unknown) => {
+              stagedMutations.push({ table, value });
+              return Promise.resolve([]);
+            }),
+          })),
+        };
+        const result = await callback(txDb);
+        committedMutations.push(...stagedMutations);
+        return result;
+      });
+
+      registerJobHandlers(mockBoss, { db: mockDb });
+      const handler = handlers.get('tasks.reap_stuck')!;
+
+      await expect(handler([{ id: 'job-reap-1', data: {} }])).rejects.toThrow(
+        'reaper evidence unavailable',
+      );
+      expect(mockDb.transaction).toHaveBeenCalledOnce();
+      expect(committedMutations).toEqual([]);
     });
   });
 
