@@ -1,6 +1,9 @@
-import { desc, eq } from 'drizzle-orm';
+import { randomUUID } from 'node:crypto';
+import { and, desc, eq } from 'drizzle-orm';
+import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
 import {
+  auditLog,
   operators,
   operatorRoles,
   operatorConfigs,
@@ -14,6 +17,10 @@ import {
   cofounderFollowUps,
 } from '@pilot/db/schema';
 import { type LlmProvider } from '@pilot/shared/llm';
+
+type CofounderAuditContext = {
+  actorUserId?: string;
+};
 
 /**
  * CofounderEngine — creates and manages digital co-founder operators.
@@ -239,41 +246,96 @@ export class CofounderEngine {
   async createCandidate(
     workspaceId: string,
     input: CofounderCandidateInput,
+    auditContext: CofounderAuditContext = {},
   ) {
-    let sourceId: string | null = null;
+    return this.db.transaction(async (tx) => {
+      let sourceId: string | null = null;
 
-    if (input.rawProfile || input.profileUrl || input.externalId) {
-      const [source] = await this.db
-        .insert(cofounderCandidateSources)
+      if (input.rawProfile || input.profileUrl || input.externalId) {
+        const [source] = await tx
+          .insert(cofounderCandidateSources)
+          .values({
+            workspaceId,
+            source: input.source ?? 'manual',
+            externalId: input.externalId,
+            profileUrl: input.profileUrl,
+            rawProfile: input.rawProfile ?? {},
+          })
+          .returning();
+        sourceId = source?.id ?? null;
+      }
+
+      const [candidate] = await tx
+        .insert(cofounderCandidates)
         .values({
           workspaceId,
-          source: input.source ?? 'manual',
-          externalId: input.externalId,
+          sourceId,
+          name: input.name,
+          headline: input.headline,
+          location: input.location,
+          bio: input.bio,
           profileUrl: input.profileUrl,
-          rawProfile: input.rawProfile ?? {},
+          strengths: input.strengths ?? [],
+          interests: input.interests ?? [],
+          preferredRoles: input.preferredRoles ?? [],
+          metadata: input.metadata ?? {},
         })
         .returning();
-      sourceId = source?.id ?? null;
-    }
 
-    const [candidate] = await this.db
-      .insert(cofounderCandidates)
-      .values({
-        workspaceId,
+      if (!candidate) throw new Error('Failed to create cofounder candidate');
+
+      const auditEventId = randomUUID();
+      const replayRef = `cofounder-candidate:${workspaceId}:${candidate.id}:created`;
+      const auditMetadata = {
+        candidateId: candidate.id,
         sourceId,
-        name: input.name,
-        headline: input.headline,
-        location: input.location,
-        bio: input.bio,
-        profileUrl: input.profileUrl,
-        strengths: input.strengths ?? [],
-        interests: input.interests ?? [],
-        preferredRoles: input.preferredRoles ?? [],
-        metadata: input.metadata ?? {},
-      })
-      .returning();
+        source: input.source ?? 'manual',
+        hasExternalProfile: Boolean(input.profileUrl || input.externalId),
+        hasRawProfile: Boolean(input.rawProfile),
+        evidenceContract: 'cofounder_candidate_creation_evidence_required',
+      };
 
-    return candidate;
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'COFOUNDER_CANDIDATE_CREATED',
+        actor: `user:${auditContext.actorUserId ?? 'unknown'}`,
+        target: candidate.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'cofounder_candidate_created',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId,
+        auditEventId,
+        evidenceType: 'cofounder_candidate_created',
+        sourceType: 'cofounder_engine',
+        title: `Cofounder candidate created: ${candidate.id}`,
+        summary: `Cofounder candidate ${candidate.id} was created from ${auditMetadata.source}.`,
+        redactionState: 'none',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'cofounder_candidate_created',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { ...candidate, evidenceItemId };
+    });
   }
 
   /**

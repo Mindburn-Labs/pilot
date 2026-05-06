@@ -570,6 +570,88 @@ describe('founderRoutes', () => {
     });
   });
 
+  describe('POST /candidates', () => {
+    it('denies members from creating cofounder candidates', async () => {
+      const res = await fetch(
+        'POST',
+        '/candidates',
+        {
+          name: 'Candidate One',
+        },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('passes actor context and returns candidate evidence metadata', async () => {
+      const createCandidate = vi.fn(async () => ({
+        id: 'cand-1',
+        workspaceId: 'ws-1',
+        name: 'Candidate One',
+        evidenceItemId: 'evidence-candidate-created-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { createCandidate } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates',
+        {
+          name: 'Candidate One',
+        },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        id: 'cand-1',
+        evidenceItemId: 'evidence-candidate-created-1',
+      });
+      expect(createCandidate).toHaveBeenCalledWith(
+        'ws-1',
+        expect.objectContaining({
+          source: 'manual',
+          name: 'Candidate One',
+          strengths: [],
+          interests: [],
+          preferredRoles: [],
+        }),
+        { actorUserId: 'user-1' },
+      );
+    });
+
+    it('fails closed when candidate creation evidence fails', async () => {
+      const createCandidate = vi.fn(async () => {
+        throw new Error('evidence unavailable');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { createCandidate } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates',
+        {
+          name: 'Candidate One',
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to create candidate evidence');
+    });
+  });
+
   describe('PUT /candidates/:id/status', () => {
     it('denies members from mutating candidate status', async () => {
       const res = await fetch(
