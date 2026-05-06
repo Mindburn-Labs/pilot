@@ -169,18 +169,15 @@ async function refreshOneGrant(
 
   if (access) {
     // Success: clear error + reset attempts.
-    await deps.db
-      .update(connectorGrants)
-      .set({
-        refreshAttempts: 0,
-        lastRefreshError: null,
-        needsReauth: false,
-      })
-      .where(eq(connectorGrants.id, grantId));
-    await appendRefreshEvidence(deps, {
+    await persistRefreshOutcome(deps, {
       workspaceId: existing?.workspaceId,
       grantId,
       connectorId,
+      grantUpdate: {
+        refreshAttempts: 0,
+        lastRefreshError: null,
+        needsReauth: false,
+      },
       status: 'succeeded',
       attempts: 0,
       permanent: false,
@@ -197,19 +194,15 @@ async function refreshOneGrant(
     ? `Refresh failed after ${attempts} attempts — grant marked for re-auth`
     : `Refresh failed (attempt ${attempts}/${PERMANENT_AFTER_ATTEMPTS})`;
 
-  await deps.db
-    .update(connectorGrants)
-    .set({
-      refreshAttempts: attempts,
-      lastRefreshError: errorMsg,
-      needsReauth: permanent,
-    })
-    .where(eq(connectorGrants.id, grantId));
-
-  await appendRefreshEvidence(deps, {
+  await persistRefreshOutcome(deps, {
     workspaceId: existing?.workspaceId,
     grantId,
     connectorId,
+    grantUpdate: {
+      refreshAttempts: attempts,
+      lastRefreshError: errorMsg,
+      needsReauth: permanent,
+    },
     status: 'failed',
     attempts,
     permanent,
@@ -235,8 +228,45 @@ async function refreshOneGrant(
   log.warn({ grantId, connectorId, attempts, permanent }, errorMsg);
 }
 
-async function appendRefreshEvidence(
+async function persistRefreshOutcome(
   deps: RefreshDeps,
+  input: {
+    workspaceId?: string | null;
+    grantId: string;
+    connectorId: string;
+    grantUpdate: {
+      refreshAttempts: number;
+      lastRefreshError: string | null;
+      needsReauth: boolean;
+    };
+    status: 'succeeded' | 'failed';
+    attempts: number;
+    permanent: boolean;
+    summary: string;
+  },
+): Promise<void> {
+  const { connectorGrants } = await import('@pilot/db/schema');
+  const workspaceId = input.workspaceId;
+  if (!workspaceId) {
+    throw new Error('Connector refresh evidence requires a workspace-scoped grant');
+  }
+
+  await deps.db.transaction(async (tx) => {
+    await appendRefreshEvidence(tx, input);
+    await tx
+      .update(connectorGrants)
+      .set(input.grantUpdate)
+      .where(
+        and(
+          eq(connectorGrants.id, input.grantId),
+          eq(connectorGrants.workspaceId, workspaceId),
+        ),
+      );
+  });
+}
+
+async function appendRefreshEvidence(
+  db: Pick<Db, 'insert' | 'update'>,
   input: {
     workspaceId?: string | null;
     grantId: string;
@@ -268,7 +298,7 @@ async function appendRefreshEvidence(
     ...metadata,
   };
 
-  await deps.db.insert(auditLog).values({
+  await db.insert(auditLog).values({
     id: auditEventId,
     workspaceId: input.workspaceId,
     action: evidenceType.toUpperCase(),
@@ -279,7 +309,7 @@ async function appendRefreshEvidence(
     metadata: auditMetadata,
   });
 
-  const evidenceItemId = await appendEvidenceItem(deps.db, {
+  const evidenceItemId = await appendEvidenceItem(db, {
     workspaceId: input.workspaceId,
     auditEventId,
     evidenceType,
@@ -293,7 +323,7 @@ async function appendRefreshEvidence(
     metadata,
   });
 
-  await deps.db
+  await db
     .update(auditLog)
     .set({
       metadata: {

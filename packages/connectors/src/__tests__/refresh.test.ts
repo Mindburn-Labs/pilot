@@ -23,7 +23,18 @@ vi.mock('drizzle-orm', () => ({
   }),
 }));
 
-function makeDb() {
+function makeDb(options: { failEvidence?: boolean } = {}) {
+  type UpdateCall = {
+    values: Record<string, unknown>;
+    where: unknown;
+  };
+  type DbSink = {
+    updateCalls: UpdateCall[];
+    auditUpdateCalls: UpdateCall[];
+    insertCalls: Array<Record<string, unknown>>;
+    auditInsertCalls: Array<Record<string, unknown>>;
+  };
+
   const updateCalls: Array<{
     values: Record<string, unknown>;
     where: unknown;
@@ -37,6 +48,12 @@ function makeDb() {
 
   let nextSelectRows: unknown[] = [];
   let nextLockAcquired = true;
+  const sink: DbSink = {
+    updateCalls,
+    auditUpdateCalls,
+    insertCalls,
+    auditInsertCalls,
+  };
 
   const selectChain = () => ({
     from: () => ({
@@ -51,16 +68,23 @@ function makeDb() {
     }),
   });
 
-  const db = {
+  const operationsFor = (target: DbSink) => ({
     insert: vi.fn((_table: unknown) => ({
       values: vi.fn((value: Record<string, unknown>) => {
         if (value['evidenceType']) {
-          insertCalls.push(value);
+          if (options.failEvidence) {
+            return {
+              returning: vi.fn(async () => {
+                throw new Error('evidence unavailable');
+              }),
+            };
+          }
+          target.insertCalls.push(value);
         } else {
-          auditInsertCalls.push(value);
+          target.auditInsertCalls.push(value);
         }
         return {
-          returning: vi.fn(async () => [{ id: `evidence-item-${insertCalls.length}` }]),
+          returning: vi.fn(async () => [{ id: `evidence-item-${target.insertCalls.length}` }]),
         };
       }),
     })),
@@ -68,16 +92,34 @@ function makeDb() {
       set: vi.fn((values: Record<string, unknown>) => ({
         where: (where: unknown) => {
           if (values['metadata']) {
-            auditUpdateCalls.push({ values, where });
+            target.auditUpdateCalls.push({ values, where });
           } else {
-            updateCalls.push({ values, where });
+            target.updateCalls.push({ values, where });
           }
           return Promise.resolve();
         },
       })),
     })),
+  });
+
+  const db = {
+    ...operationsFor(sink),
     select: vi.fn(() => selectChain()),
     execute: vi.fn(async () => ({ rows: [{ acquired: nextLockAcquired }] })),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const txSink: DbSink = {
+        updateCalls: [],
+        auditUpdateCalls: [],
+        insertCalls: [],
+        auditInsertCalls: [],
+      };
+      const result = await callback(operationsFor(txSink));
+      sink.updateCalls.push(...txSink.updateCalls);
+      sink.auditUpdateCalls.push(...txSink.auditUpdateCalls);
+      sink.insertCalls.push(...txSink.insertCalls);
+      sink.auditInsertCalls.push(...txSink.auditInsertCalls);
+      return result;
+    }),
   } as any;
 
   return {
@@ -256,6 +298,34 @@ describe('connector refresh — registerRefreshJobs', () => {
         permanent: false,
       }),
     });
+  });
+
+  it('does not commit refresh state when evidence persistence fails', async () => {
+    const {
+      db,
+      updateCalls,
+      insertCalls,
+      auditInsertCalls,
+      auditUpdateCalls,
+      setNextSelectRows,
+    } = makeDb({ failEvidence: true });
+    const oauth = makeOauth(null);
+    const { boss, handlers } = makeBoss();
+
+    setNextSelectRows([{ refreshAttempts: 0, workspaceId: 'ws_abc' }]);
+
+    await refresh.registerRefreshJobs(boss, { db, oauth });
+    const grantHandler = handlers.get('connectors.refresh.grant');
+
+    await expect(
+      grantHandler!([{ data: { grantId: 'cg_2', connectorId: 'conn_github' } }]),
+    ).resolves.not.toThrow();
+
+    expect(oauth.refreshToken).toHaveBeenCalledWith('cg_2', 'conn_github');
+    expect(updateCalls).toHaveLength(0);
+    expect(insertCalls).toHaveLength(0);
+    expect(auditInsertCalls).toHaveLength(0);
+    expect(auditUpdateCalls).toHaveLength(0);
   });
 
   it('3rd failure: sets needs_reauth=true and invokes notifier', async () => {
