@@ -507,49 +507,52 @@ export class Conductor {
     try {
       const { evidencePacks } = await import('@pilot/db/schema');
       const decisionId = `local_spawn_${randomUUID()}`;
-      const [row] = await this.db
-        .insert(evidencePacks)
-        .values({
-          workspaceId: params.workspaceId,
-          decisionId,
-          verdict: 'ALLOW',
-          policyVersion: params.policyVersion,
-          action: 'SUBAGENT_SPAWN',
-          resource: params.def.name,
-          principal: params.principal,
-          signedBlob: null,
-          parentEvidencePackId: params.parentEvidencePackId,
-        })
-        .returning({ id: evidencePacks.id });
-      const id = row?.id ?? '';
-      if (id) {
-        await appendEvidenceItem(this.db, {
-          workspaceId: params.workspaceId,
-          evidencePackId: id,
-          evidenceType: 'subagent_spawn_receipt',
-          sourceType: 'conductor',
-          title: `Subagent spawn: ${params.def.name}`,
-          summary: params.def.description,
-          redactionState: 'redacted',
-          sensitivity: 'internal',
-          replayRef: `helm:${decisionId}`,
-          metadata: {
+      const id = await this.db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(evidencePacks)
+          .values({
+            workspaceId: params.workspaceId,
             decisionId,
             verdict: 'ALLOW',
             policyVersion: params.policyVersion,
             action: 'SUBAGENT_SPAWN',
             resource: params.def.name,
             principal: params.principal,
+            signedBlob: null,
             parentEvidencePackId: params.parentEvidencePackId,
-            subagent: {
-              name: params.def.name,
-              version: params.def.version,
-              operatorRole: params.def.operatorRole,
-              maxRiskClass: params.def.maxRiskClass,
+          })
+          .returning({ id: evidencePacks.id });
+        const packId = row?.id ?? '';
+        if (packId) {
+          await appendEvidenceItem(tx, {
+            workspaceId: params.workspaceId,
+            evidencePackId: packId,
+            evidenceType: 'subagent_spawn_receipt',
+            sourceType: 'conductor',
+            title: `Subagent spawn: ${params.def.name}`,
+            summary: params.def.description,
+            redactionState: 'redacted',
+            sensitivity: 'internal',
+            replayRef: `helm:${decisionId}`,
+            metadata: {
+              decisionId,
+              verdict: 'ALLOW',
+              policyVersion: params.policyVersion,
+              action: 'SUBAGENT_SPAWN',
+              resource: params.def.name,
+              principal: params.principal,
+              parentEvidencePackId: params.parentEvidencePackId,
+              subagent: {
+                name: params.def.name,
+                version: params.def.version,
+                operatorRole: params.def.operatorRole,
+                maxRiskClass: params.def.maxRiskClass,
+              },
             },
-          },
-        });
-      }
+          });
+        }
+        return packId;
+      });
       // v1.2.1 — L1 structural integrity check. Non-fatal; warnings
       // logged. Signed-blob check is off until upstream helm-oss#43 lands.
       try {
