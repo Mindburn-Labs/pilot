@@ -59,6 +59,8 @@ export function founderRoutes(deps: GatewayDeps) {
   app.post('/analyze', async (c) => {
     const workspaceId = getWorkspaceId(c);
     if (!workspaceId) return c.json({ error: 'workspaceId required' }, 400);
+    const roleDenied = requireWorkspaceRole(c, 'partner', 'analyze founder profile');
+    if (roleDenied) return roleDenied;
 
     const raw = await c.req.json();
     const parsed = AnalyzeFounderInput.safeParse(raw);
@@ -70,7 +72,10 @@ export function founderRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Founder analysis requires an LLM provider' }, 503);
     }
 
-    const result = await deps.founderIntel.processIntake(workspaceId, parsed.data.rawText);
+    const result = await deps.founderIntel
+      .processIntake(workspaceId, parsed.data.rawText, { actorUserId: c.get('userId') })
+      .catch(() => undefined);
+    if (!result) return c.json({ error: 'Failed to persist founder intake evidence' }, 500);
     return c.json(result, 201);
   });
 
