@@ -905,23 +905,26 @@ export class ToolRegistry {
           founderSignals: Array.isArray(founderSignals) ? founderSignals : [],
           citations: Array.isArray(citations) ? citations : [],
         });
-        await this.db.insert(opportunityScores).values({
-          opportunityId,
-          overallScore: score.overall,
-          founderFitScore: score.dimensions.founderFit,
-          marketSignal: score.dimensions.marketPain,
-          feasibility: score.dimensions.technicalFeasibility,
-          timing: score.dimensions.urgency,
-          scoringMethod: 'evidence_v1',
-          policyDecisionId: policyDecisionId ?? null,
-          policyVersion: policyVersion ?? null,
-          helmDocumentVersionPins: helmDocumentVersionPins ?? {},
-          modelUsage: {},
+        await this.db.transaction(async (tx) => {
+          const db = tx as unknown as Db;
+          await db.insert(opportunityScores).values({
+            opportunityId,
+            overallScore: score.overall,
+            founderFitScore: score.dimensions.founderFit,
+            marketSignal: score.dimensions.marketPain,
+            feasibility: score.dimensions.technicalFeasibility,
+            timing: score.dimensions.urgency,
+            scoringMethod: 'evidence_v1',
+            policyDecisionId: policyDecisionId ?? null,
+            policyVersion: policyVersion ?? null,
+            helmDocumentVersionPins: helmDocumentVersionPins ?? {},
+            modelUsage: {},
+          });
+          await db
+            .update(opportunities)
+            .set({ status: 'scored' })
+            .where(eq(opportunities.id, opportunityId));
         });
-        await this.db
-          .update(opportunities)
-          .set({ status: 'scored' })
-          .where(eq(opportunities.id, opportunityId));
         return {
           opportunityId,
           method: 'evidence_v1',
