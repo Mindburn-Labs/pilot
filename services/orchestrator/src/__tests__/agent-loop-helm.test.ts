@@ -58,6 +58,65 @@ function makeMockDb() {
   return { db, inserts };
 }
 
+function makeMirrorFailureDb() {
+  const inserts: InsertCall[] = [];
+  const committedMirrorInserts: InsertCall[] = [];
+  let autoId = 0;
+
+  const makeInsert = (sink: InsertCall[], failAfterEvidencePack = false) => {
+    let sawEvidencePack = false;
+    return vi.fn((table: string) => ({
+      values: vi.fn((row: Record<string, unknown>) => {
+        if (failAfterEvidencePack && sawEvidencePack && table !== 'evidencePacks') {
+          throw new Error('evidence item insert failed');
+        }
+        if (table === 'evidencePacks') sawEvidencePack = true;
+        sink.push({ table, values: row });
+        return {
+          returning: vi.fn(() => Promise.resolve([{ id: `row-${++autoId}` }])),
+          then: (resolve: (v: unknown[]) => void) => resolve([]),
+          catch: vi.fn(),
+        };
+      }),
+    }));
+  };
+
+  const db = {
+    insert: makeInsert(inserts),
+    update: vi.fn((table: string) => ({
+      set: vi.fn((row: Record<string, unknown>) => ({
+        where: vi.fn(async () => {
+          inserts.push({ table: `${table}:update`, values: row });
+          return [];
+        }),
+      })),
+    })),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedMirrorInserts: InsertCall[] = [];
+      const result = await callback({
+        insert: makeInsert(stagedMirrorInserts, true),
+        update: vi.fn((table: string) => ({
+          set: vi.fn((row: Record<string, unknown>) => ({
+            where: vi.fn(async () => {
+              stagedMirrorInserts.push({ table: `${table}:update`, values: row });
+              return [];
+            }),
+          })),
+        })),
+      });
+      committedMirrorInserts.push(...stagedMirrorInserts);
+      return result;
+    }),
+  } as unknown as {
+    insert: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
+    select: ReturnType<typeof vi.fn>;
+    transaction: ReturnType<typeof vi.fn>;
+  };
+
+  return { db, inserts, committedMirrorInserts };
+}
+
 const mockTrust = {
   evaluate: vi.fn(() => ({ verdict: 'allow' })),
 } as any;
@@ -135,6 +194,18 @@ describe('AgentLoop — HELM governance persistence', () => {
     expect(row.policyVersion).toBe('founder-ops-v1');
     expect(row.principal).toBe('workspace:ws-1/operator:engineering');
     expect(row.action).toBe('LLM_INFERENCE');
+  });
+
+  it('does not commit mirrored receipt pack when receipt evidence item persistence fails', async () => {
+    const { db, committedMirrorInserts } = makeMirrorFailureDb();
+    const loop = new AgentLoop(db as never, mockTrust);
+    loop.setLlm(governedLlm() as never);
+    loop.setTools(mockTools);
+
+    const result = await loop.execute(baseParams());
+
+    expect(result.status).toBe('completed');
+    expect(committedMirrorInserts.some((insert) => insert.table === 'evidencePacks')).toBe(false);
   });
 
   it('does NOT emit evidence_packs rows when the LLM call had no governance', async () => {
