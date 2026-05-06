@@ -225,24 +225,28 @@ export class ToolBroker {
               evidenceIds: persistedEvidenceIds,
             },
           })
-          .where(
-            and(eq(auditLog.workspaceId, context.workspaceId), eq(auditLog.id, auditEventId)),
-          );
+          .where(and(eq(auditLog.workspaceId, context.workspaceId), eq(auditLog.id, auditEventId)));
 
         return evidenceItemId;
       });
     } catch (evidenceError) {
       if (isElevatedManifest(manifest)) {
-        await this.markElevatedEvidencePersistenceFailure({
-          actionId: action.id,
-          toolExecutionId: execution.id,
-          toolName,
-          context,
-          manifest,
-          outputHash,
-          sanitizedOutput,
-          error: evidenceError,
-        });
+        try {
+          await this.markElevatedEvidencePersistenceFailure({
+            actionId: action.id,
+            toolExecutionId: execution.id,
+            toolName,
+            context,
+            manifest,
+            outputHash,
+            sanitizedOutput,
+            error: evidenceError,
+          });
+        } catch (failurePersistenceError) {
+          throw new Error(
+            `Tool Broker could not persist elevated ${toolName} evidence-failure audit: ${stringifyError(failurePersistenceError)}`,
+          );
+        }
       }
       throw new Error(
         `Tool Broker blocked ${isElevatedManifest(manifest) ? 'elevated ' : ''}${toolName} completion: ${stringifyError(evidenceError)}`,
@@ -274,48 +278,51 @@ export class ToolBroker {
       params.error,
     )}`;
     const policyPin = buildPolicyPin(params.manifest, params.context);
-    await this.db
-      .update(toolExecutions)
-      .set({
-        status: 'failed',
-        outputHash: params.outputHash,
-        sanitizedOutput: params.sanitizedOutput,
-        evidenceIds: params.context.evidenceIds ?? [],
-        error: reason,
-        completedAt: new Date(),
-      })
-      .where(eq(toolExecutions.id, params.toolExecutionId));
+    await this.db.transaction(async (tx) => {
+      const db = tx as unknown as BrokerTx;
+      await db
+        .update(toolExecutions)
+        .set({
+          status: 'failed',
+          outputHash: params.outputHash,
+          sanitizedOutput: params.sanitizedOutput,
+          evidenceIds: params.context.evidenceIds ?? [],
+          error: reason,
+          completedAt: new Date(),
+        })
+        .where(eq(toolExecutions.id, params.toolExecutionId));
 
-    await this.db
-      .update(actions)
-      .set({
-        status: 'failed',
-        outputHash: params.outputHash,
-        completedAt: new Date(),
-      })
-      .where(eq(actions.id, params.actionId));
+      await db
+        .update(actions)
+        .set({
+          status: 'failed',
+          outputHash: params.outputHash,
+          completedAt: new Date(),
+        })
+        .where(eq(actions.id, params.actionId));
 
-    await this.db.insert(auditLog).values({
-      workspaceId: params.context.workspaceId,
-      action: 'TOOL_EXECUTION',
-      actor: params.context.operatorId ? `operator:${params.context.operatorId}` : 'agent',
-      target: params.toolName,
-      verdict: 'error',
-      reason,
-      metadata: {
-        broker: 'tool_broker_v1',
-        actionId: params.actionId,
-        toolExecutionId: params.toolExecutionId,
-        toolKey: params.toolName,
-        riskClass: params.manifest.riskClass,
-        effectLevel: params.manifest.effectLevel,
-        evidenceRequired: true,
-        evidencePersistenceRequired: 'fail_closed_for_elevated_actions',
-        policyDecisionId: params.context.policyDecisionId ?? null,
-        policyVersion: policyVersionFor(params.manifest, params.context),
-        helmDocumentVersionPins: policyPin.documentVersionPins,
-        policyPin,
-      },
+      await db.insert(auditLog).values({
+        workspaceId: params.context.workspaceId,
+        action: 'TOOL_EXECUTION',
+        actor: params.context.operatorId ? `operator:${params.context.operatorId}` : 'agent',
+        target: params.toolName,
+        verdict: 'error',
+        reason,
+        metadata: {
+          broker: 'tool_broker_v1',
+          actionId: params.actionId,
+          toolExecutionId: params.toolExecutionId,
+          toolKey: params.toolName,
+          riskClass: params.manifest.riskClass,
+          effectLevel: params.manifest.effectLevel,
+          evidenceRequired: true,
+          evidencePersistenceRequired: 'fail_closed_for_elevated_actions',
+          policyDecisionId: params.context.policyDecisionId ?? null,
+          policyVersion: policyVersionFor(params.manifest, params.context),
+          helmDocumentVersionPins: policyPin.documentVersionPins,
+          policyPin,
+        },
+      });
     });
   }
 }
