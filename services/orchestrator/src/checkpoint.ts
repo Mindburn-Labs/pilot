@@ -25,13 +25,15 @@ export interface CheckpointState {
 }
 
 /**
- * Persist a checkpoint for a task_runs row. Fail-soft: never throws.
- * If the taskRunId is unknown or the DB is flaky, the loop continues.
+ * Persist a checkpoint for a task_runs row. Fail-soft by default so
+ * watchdog/inspection callers stay tolerant, but runtime loops can request
+ * fail-closed semantics for durable resume guarantees.
  */
 export async function writeCheckpoint(
   db: Db,
   taskRunId: string,
   state: Omit<CheckpointState, 'takenAt'>,
+  options: { required?: boolean } = {},
 ): Promise<void> {
   if (!taskRunId) return;
   try {
@@ -47,8 +49,11 @@ export async function writeCheckpoint(
         lastCheckpointAt: new Date(),
       })
       .where(eq(taskRuns.id, taskRunId));
-  } catch {
-    // Non-critical — checkpoint failures must not kill a running loop.
+  } catch (err) {
+    if (options.required) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`Checkpoint persistence failed for task run ${taskRunId}: ${detail}`);
+    }
   }
 }
 

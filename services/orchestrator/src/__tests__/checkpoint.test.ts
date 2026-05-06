@@ -86,6 +86,27 @@ describe('checkpoint helpers', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('writeCheckpoint throws when durable checkpoint persistence is required', async () => {
+    const db = {
+      update: () => {
+        throw new Error('connection refused');
+      },
+    } as any;
+    await expect(
+      writeCheckpoint(
+        db,
+        'run-x',
+        {
+          iteration: 1,
+          actions: [],
+          runUsage: { tokensIn: 0, tokensOut: 0 },
+          runCost: 0,
+        },
+        { required: true },
+      ),
+    ).rejects.toThrow('Checkpoint persistence failed for task run run-x: connection refused');
+  });
+
   it('CHECKPOINT_EVERY_N_ITERATIONS is exported as a positive integer', () => {
     expect(CHECKPOINT_EVERY_N_ITERATIONS).toBeGreaterThan(0);
     expect(Number.isInteger(CHECKPOINT_EVERY_N_ITERATIONS)).toBe(true);
