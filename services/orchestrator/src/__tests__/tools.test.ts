@@ -5,6 +5,8 @@ import {
   auditLog,
   computerActions,
   evidenceItems,
+  opportunities,
+  opportunityScores,
 } from '@pilot/db/schema';
 import { getCapabilityRecord } from '@pilot/shared/capabilities';
 import { SkillRegistry, type SkillDefinition } from '@pilot/shared/skills';
@@ -70,8 +72,7 @@ function createComputerActionDb(options: { failEvidenceInsert?: boolean } = {}) 
             {
               id: '00000000-0000-4000-8000-000000000010',
               replayIndex: 0,
-              evidencePackId:
-                (value as { evidencePackId?: string | null }).evidencePackId ?? null,
+              evidencePackId: (value as { evidencePackId?: string | null }).evidencePackId ?? null,
             },
           ]),
         };
@@ -1437,7 +1438,7 @@ describe('ToolRegistry', () => {
             };
           }),
         }));
-      const db = {
+      const db: any = {
         select: vi.fn(() => ({
           from: vi.fn(() => ({
             where: vi.fn(() => ({
@@ -1638,6 +1639,9 @@ describe('ToolRegistry', () => {
         insert: vi.fn(() => ({ values: insertValues })),
         update: vi.fn(() => ({ set: updateSet })),
       };
+      Object.assign(db, {
+        transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(db)),
+      });
       const registry = createRegistryWithDb(db);
 
       const result = await registry.execute('score_opportunity', {
@@ -1680,6 +1684,79 @@ describe('ToolRegistry', () => {
         }),
       );
       expect(updateSet).toHaveBeenCalledWith({ status: 'scored' });
+      expect(db.transaction).toHaveBeenCalledOnce();
+    }, 10_000);
+
+    it('does not commit score row when opportunity status update fails', async () => {
+      const committedScores: unknown[] = [];
+      const committedOpportunityUpdates: unknown[] = [];
+      const db = {
+        select: vi.fn(() => ({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn(async () => [
+                {
+                  id: 'opp-1',
+                  title: 'AI compliance workflow for finance teams',
+                  description:
+                    'Finance teams have urgent, manual, expensive compliance workflows with clear ROI and paid budget.',
+                  source: 'yc',
+                  sourceUrl: 'https://example.com/source',
+                  rawData: { quote: 'manual process is slow' },
+                  aiFriendlyOk: true,
+                },
+              ]),
+            })),
+          })),
+        })),
+        insert: vi.fn(() => {
+          throw new Error('score_opportunity state must be persisted inside a transaction');
+        }),
+        update: vi.fn(() => {
+          throw new Error('score_opportunity state must be persisted inside a transaction');
+        }),
+        transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+          const stagedScores: unknown[] = [];
+          const stagedOpportunityUpdates: unknown[] = [];
+          const tx = {
+            insert: vi.fn((table: unknown) => ({
+              values: vi.fn((value: unknown) => {
+                if (table === opportunityScores) {
+                  stagedScores.push(value);
+                  return Promise.resolve([]);
+                }
+                return Promise.resolve([]);
+              }),
+            })),
+            update: vi.fn((table: unknown) => ({
+              set: vi.fn((value: unknown) => {
+                if (table === opportunities) stagedOpportunityUpdates.push(value);
+                return {
+                  where: vi.fn(async () => {
+                    throw new Error('opportunity status update failed');
+                  }),
+                };
+              }),
+            })),
+          };
+          const result = await callback(tx);
+          committedScores.push(...stagedScores);
+          committedOpportunityUpdates.push(...stagedOpportunityUpdates);
+          return result;
+        }),
+      };
+      const registry = createRegistryWithDb(db);
+
+      const result = await registry.execute('score_opportunity', {
+        opportunityId: 'opp-1',
+        founderSignals: ['finance automation', 'compliance'],
+        citations: [{ url: 'https://example.com/source', title: 'Source' }],
+      });
+
+      expect(result).toEqual({ error: 'opportunity status update failed' });
+      expect(db.transaction).toHaveBeenCalledOnce();
+      expect(committedScores).toEqual([]);
+      expect(committedOpportunityUpdates).toEqual([]);
     }, 10_000);
 
     it('exposes a typed manifest for opportunity scoring', () => {
