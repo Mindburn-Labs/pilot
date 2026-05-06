@@ -159,6 +159,62 @@ function captureFailedScheduleTransaction(deps: ReturnType<typeof createMockDeps
   return committedUpdates;
 }
 
+function captureFailedRecoveryPlanTransaction(deps: ReturnType<typeof createMockDeps>) {
+  const committedEvidenceItems: unknown[] = [];
+  const committedMissionUpdates: unknown[] = [];
+  const originalInsert = deps.db.insert;
+  const originalUpdate = deps.db.update;
+
+  const captureInsert = (sink: unknown[]) =>
+    vi.fn((table: unknown) => {
+      if (table === evidenceItems) {
+        return {
+          values: vi.fn((values: unknown) => {
+            sink.push(values);
+            return {
+              returning: vi.fn(async () => [{ id: '00000000-0000-4000-8000-000000000391' }]),
+            };
+          }),
+        };
+      }
+      return originalInsert(table);
+    }) as typeof deps.db.insert;
+  const captureUpdate = (sink: unknown[], failMissionUpdate: boolean) =>
+    vi.fn((table: unknown) => {
+      if (table === missions) {
+        return {
+          set: vi.fn((values: unknown) => ({
+            where: vi.fn(async () => {
+              if (failMissionUpdate) {
+                throw new Error('mission recovery plan metadata update failed');
+              }
+              sink.push(values);
+              return [];
+            }),
+          })),
+        };
+      }
+      return originalUpdate(table);
+    }) as typeof deps.db.update;
+
+  deps.db.insert = captureInsert(committedEvidenceItems);
+  deps.db.update = captureUpdate(committedMissionUpdates, false);
+  deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+    const stagedEvidenceItems: unknown[] = [];
+    const stagedMissionUpdates: unknown[] = [];
+    const result = await callback({
+      ...deps.db,
+      insert: captureInsert(stagedEvidenceItems),
+      update: captureUpdate(stagedMissionUpdates, true),
+    });
+    committedEvidenceItems.push(...stagedEvidenceItems);
+    committedMissionUpdates.push(...stagedMissionUpdates);
+    return result;
+  }) as typeof deps.db.transaction;
+
+  return { committedEvidenceItems, committedMissionUpdates };
+}
+
 function captureEvidenceAndMissionCheckpointInserts(deps: ReturnType<typeof createMockDeps>) {
   const insertedEvidenceItems: unknown[] = [];
   const insertedAuditEvents: unknown[] = [];
@@ -1219,6 +1275,84 @@ describe('startupLifecycleRoutes', () => {
       }),
     });
     expect(deps.db.update).toHaveBeenCalled();
+    expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
+  });
+
+  it('does not commit recovery plan evidence when mission metadata update fails', async () => {
+    const deps = createMockDeps();
+    const { committedEvidenceItems, committedMissionUpdates } =
+      captureFailedRecoveryPlanTransaction(deps);
+    const missionId = '00000000-0000-4000-8000-000000000380';
+    const ventureId = '00000000-0000-4000-8000-000000000381';
+    const nodeId = '00000000-0000-4000-8000-000000000382';
+    const checkpointReplayRef = `mission:${missionId}:checkpoint:failed-update`;
+    const checkpointId = 'mission-checkpoint:failed-update';
+    const selectResults = [
+      [
+        {
+          id: missionId,
+          workspaceId,
+          ventureId,
+          title: 'Launch EvidenceOS',
+          status: 'blocked',
+          productionReady: false,
+          metadata: {
+            lastCheckpoint: {
+              checkpointId,
+              evidenceItemId: '00000000-0000-4000-8000-000000000386',
+              replayRef: checkpointReplayRef,
+            },
+          },
+        },
+      ],
+      [
+        {
+          id: '00000000-0000-4000-8000-000000000386',
+          workspaceId,
+          missionId,
+          replayRef: checkpointReplayRef,
+          metadata: {
+            checkpointId,
+            snapshot: {
+              nodes: [{ id: nodeId, nodeKey: 'ideation', status: 'ready' }],
+            },
+          },
+        },
+      ],
+      [
+        {
+          id: nodeId,
+          workspaceId,
+          missionId,
+          nodeKey: 'ideation',
+          stage: 'ideation',
+          title: 'Venture hypothesis generation',
+          status: 'blocked',
+          sortOrder: 0,
+        },
+      ],
+      [],
+      [],
+    ];
+    let selectCall = 0;
+    const originalSelect = deps.db.select;
+    deps.db.select = vi.fn(() => {
+      deps.db._setResult(selectResults[selectCall] ?? []);
+      selectCall += 1;
+      return originalSelect();
+    }) as typeof deps.db.select;
+
+    const { fetch } = testApp(startupLifecycleRoutes, deps);
+    const res = await fetch(
+      'POST',
+      `/missions/${missionId}/recovery-plan`,
+      { reason: 'force metadata update failure' },
+      wsHeader,
+    );
+
+    expect(res.status).toBe(500);
+    expect(committedEvidenceItems).toEqual([]);
+    expect(committedMissionUpdates).toEqual([]);
     expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
   });
 
