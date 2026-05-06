@@ -726,6 +726,157 @@ describe('founderRoutes', () => {
     });
   });
 
+  describe('POST /candidates/:id/notes', () => {
+    it('denies members from adding cofounder candidate notes', async () => {
+      const res = await fetch(
+        'POST',
+        '/candidates/cand-1/notes',
+        { content: 'Looks promising.' },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('passes actor context and returns note evidence metadata', async () => {
+      const addCandidateNote = vi.fn(async () => ({
+        id: 'note-1',
+        workspaceId: 'ws-1',
+        candidateId: 'cand-1',
+        noteType: 'note',
+        content: 'Looks promising.',
+        evidenceItemId: 'evidence-candidate-note-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { addCandidateNote } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/notes',
+        { content: 'Looks promising.' },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        id: 'note-1',
+        evidenceItemId: 'evidence-candidate-note-1',
+      });
+      expect(addCandidateNote).toHaveBeenCalledWith(
+        'ws-1',
+        'cand-1',
+        'Looks promising.',
+        'note',
+        'user-1',
+        { actorUserId: 'user-1' },
+      );
+    });
+
+    it('returns 404 when the candidate is not in the workspace', async () => {
+      const addCandidateNote = vi.fn(async () => {
+        throw new Error('Candidate not found');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { addCandidateNote } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/notes',
+        { content: 'Looks promising.' },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 404);
+
+      expect(json.error).toBe('Candidate not found');
+    });
+
+    it('fails closed when note evidence fails', async () => {
+      const addCandidateNote = vi.fn(async () => {
+        throw new Error('evidence unavailable');
+      });
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { addCandidateNote } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/notes',
+        { content: 'Looks promising.' },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toContain('Failed to add candidate note evidence');
+    });
+  });
+
+  describe('POST /candidates/:id/conversations', () => {
+    it('denies members from adding cofounder candidate conversations', async () => {
+      const res = await fetch(
+        'POST',
+        '/candidates/cand-1/conversations',
+        { content: 'Intro call notes.' },
+        { ...wsHeader, 'X-Workspace-Role': 'member' },
+      );
+      const json = await expectJson<{ error: string; requiredRole: string }>(res, 403);
+
+      expect(json.error).toBe('insufficient workspace role');
+      expect(json.requiredRole).toBe('partner');
+    });
+
+    it('persists conversations through the governed note path', async () => {
+      const addCandidateNote = vi.fn(async () => ({
+        id: 'note-1',
+        workspaceId: 'ws-1',
+        candidateId: 'cand-1',
+        noteType: 'conversation',
+        content: 'Intro call notes.',
+        evidenceItemId: 'evidence-candidate-note-1',
+      }));
+      const scoped = testApp(
+        founderRoutes,
+        createMockDeps({
+          cofounderEngine: { addCandidateNote } as never,
+        }),
+      );
+
+      const res = await scoped.fetch(
+        'POST',
+        '/candidates/cand-1/conversations',
+        { content: 'Intro call notes.' },
+        wsHeader,
+      );
+      const json = await expectJson<Record<string, unknown>>(res, 201);
+
+      expect(json).toMatchObject({
+        id: 'note-1',
+        noteType: 'conversation',
+        evidenceItemId: 'evidence-candidate-note-1',
+      });
+      expect(addCandidateNote).toHaveBeenCalledWith(
+        'ws-1',
+        'cand-1',
+        'Intro call notes.',
+        'conversation',
+        'user-1',
+        { actorUserId: 'user-1' },
+      );
+    });
+  });
+
   describe('PUT /candidates/:id/status', () => {
     it('denies members from mutating candidate status', async () => {
       const res = await fetch(
