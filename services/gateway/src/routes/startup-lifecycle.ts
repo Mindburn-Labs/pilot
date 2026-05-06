@@ -122,127 +122,80 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
     const compiled = compileStartupLifecycleMission(parsed.data);
     const ventureName = parsed.data.ventureName ?? deriveVentureName(parsed.data.founderGoal);
 
-    const [createdVenture] = await _deps.db
-      .insert(ventures)
-      .values({
-        workspaceId,
-        name: ventureName,
-        status: 'draft',
-        metadata: {
-          source: 'startup_lifecycle_persist',
-          ventureContext: parsed.data.ventureContext ?? null,
-          productionReady: false,
-        },
-      })
-      .returning();
-    if (!createdVenture) return c.json({ error: 'venture was not persisted' }, 500);
-
-    const [createdGoal] = await _deps.db
-      .insert(goals)
-      .values({
-        workspaceId,
-        ventureId: createdVenture.id,
-        title: 'Founder startup goal',
-        description: parsed.data.founderGoal,
-        status: 'compiled',
-        autonomyMode: parsed.data.autonomyMode,
-        constraints: parsed.data.constraints,
-        metadata: {
-          source: 'startup_lifecycle_persist',
-          ventureContext: parsed.data.ventureContext ?? null,
-        },
-      })
-      .returning();
-    if (!createdGoal) return c.json({ error: 'goal was not persisted' }, 500);
-
-    const [createdMission] = await _deps.db
-      .insert(missions)
-      .values({
-        workspaceId,
-        ventureId: createdVenture.id,
-        goalId: createdGoal.id,
-        missionKey: compiled.mission.id,
-        title: compiled.mission.title,
-        status: 'persisted_not_executing',
-        compilerVersion: compiled.compilerVersion,
-        autonomyMode: compiled.mission.autonomyMode,
-        capabilityState: compiled.capabilityState,
-        productionReady: false,
-        assumptions: compiled.mission.assumptions,
-        blockers: persistedMissionBlockers(compiled.mission.blockers),
-        metadata: {
-          source: 'startup_lifecycle_persist',
-          founderGoal: compiled.mission.founderGoal,
-          ventureContext: compiled.mission.ventureContext ?? null,
-          constraints: compiled.mission.constraints,
-        },
-      })
-      .returning();
-    if (!createdMission) return c.json({ error: 'mission was not persisted' }, 500);
-
-    const createdNodes = [];
-    for (const [index, node] of compiled.mission.nodes.entries()) {
-      const [createdNode] = await _deps.db
-        .insert(missionNodes)
-        .values({
-          workspaceId,
-          missionId: createdMission.id,
-          nodeKey: node.id,
-          stage: node.stage,
-          title: node.title,
-          objective: node.objective,
-          status: 'pending',
-          sortOrder: index,
-          requiredAgents: node.requiredAgents,
-          requiredSkills: node.requiredSkills,
-          requiredTools: node.requiredTools,
-          requiredEvidence: node.requiredEvidence,
-          helmPolicyClasses: node.helmPolicyClasses,
-          escalationConditions: node.escalationConditions,
-          acceptanceCriteria: node.acceptanceCriteria,
-          metadata: {
-            dependsOn: node.dependsOn,
-            source: 'startup_lifecycle_template',
-          },
-        })
-        .returning();
-      if (!createdNode) return c.json({ error: `mission node ${node.id} was not persisted` }, 500);
-      createdNodes.push({ node, row: createdNode });
-    }
-
-    if (compiled.mission.edges.length > 0) {
-      await _deps.db.insert(missionEdges).values(
-        compiled.mission.edges.map((edge) => ({
-          workspaceId,
-          missionId: createdMission.id,
-          edgeKey: edge.id,
-          fromNodeKey: edge.from,
-          toNodeKey: edge.to,
-          reason: edge.reason,
-          metadata: { source: 'startup_lifecycle_template' },
-        })),
-      );
-    }
-
-    let taskCount = 0;
-    if (parsed.data.createNodeTasks) {
-      for (const { node, row } of createdNodes) {
-        const [createdTask] = await _deps.db
-          .insert(tasks)
+    const { createdVenture, createdGoal, createdMission, createdNodes, taskCount, evidenceItemId } =
+      await _deps.db.transaction(async (tx) => {
+        const db = tx as unknown as typeof _deps.db;
+        const [persistedVenture] = await db
+          .insert(ventures)
           .values({
             workspaceId,
-            title: `[Lifecycle] ${node.title}`,
-            description: node.objective,
-            mode: 'mission',
-            status: 'pending',
-            priority: taskPriorityForStage(node.stage),
+            name: ventureName,
+            status: 'draft',
             metadata: {
-              kind: 'startup_lifecycle_node',
-              ventureId: createdVenture.id,
-              goalId: createdGoal.id,
-              missionId: createdMission.id,
-              missionNodeId: row.id,
+              source: 'startup_lifecycle_persist',
+              ventureContext: parsed.data.ventureContext ?? null,
+              productionReady: false,
+            },
+          })
+          .returning();
+        if (!persistedVenture) throw new Error('venture was not persisted');
+
+        const [persistedGoal] = await db
+          .insert(goals)
+          .values({
+            workspaceId,
+            ventureId: persistedVenture.id,
+            title: 'Founder startup goal',
+            description: parsed.data.founderGoal,
+            status: 'compiled',
+            autonomyMode: parsed.data.autonomyMode,
+            constraints: parsed.data.constraints,
+            metadata: {
+              source: 'startup_lifecycle_persist',
+              ventureContext: parsed.data.ventureContext ?? null,
+            },
+          })
+          .returning();
+        if (!persistedGoal) throw new Error('goal was not persisted');
+
+        const [persistedMission] = await db
+          .insert(missions)
+          .values({
+            workspaceId,
+            ventureId: persistedVenture.id,
+            goalId: persistedGoal.id,
+            missionKey: compiled.mission.id,
+            title: compiled.mission.title,
+            status: 'persisted_not_executing',
+            compilerVersion: compiled.compilerVersion,
+            autonomyMode: compiled.mission.autonomyMode,
+            capabilityState: compiled.capabilityState,
+            productionReady: false,
+            assumptions: compiled.mission.assumptions,
+            blockers: persistedMissionBlockers(compiled.mission.blockers),
+            metadata: {
+              source: 'startup_lifecycle_persist',
+              founderGoal: compiled.mission.founderGoal,
+              ventureContext: compiled.mission.ventureContext ?? null,
+              constraints: compiled.mission.constraints,
+            },
+          })
+          .returning();
+        if (!persistedMission) throw new Error('mission was not persisted');
+
+        const persistedNodes = [];
+        for (const [index, node] of compiled.mission.nodes.entries()) {
+          const [createdNode] = await db
+            .insert(missionNodes)
+            .values({
+              workspaceId,
+              missionId: persistedMission.id,
+              nodeKey: node.id,
               stage: node.stage,
+              title: node.title,
+              objective: node.objective,
+              status: 'pending',
+              sortOrder: index,
               requiredAgents: node.requiredAgents,
               requiredSkills: node.requiredSkills,
               requiredTools: node.requiredTools,
@@ -250,51 +203,110 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
               helmPolicyClasses: node.helmPolicyClasses,
               escalationConditions: node.escalationConditions,
               acceptanceCriteria: node.acceptanceCriteria,
-              productionReady: false,
-            },
-          })
-          .returning();
-        if (!createdTask)
-          return c.json({ error: `task for node ${node.id} was not persisted` }, 500);
-        await _deps.db.insert(missionTasks).values({
-          workspaceId,
-          missionId: createdMission.id,
-          nodeId: row.id,
-          taskId: createdTask.id,
-          role: 'startup_lifecycle_node',
-        });
-        taskCount += 1;
-      }
-    }
+              metadata: {
+                dependsOn: node.dependsOn,
+                source: 'startup_lifecycle_template',
+              },
+            })
+            .returning();
+          if (!createdNode) throw new Error(`mission node ${node.id} was not persisted`);
+          persistedNodes.push({ node, row: createdNode });
+        }
 
-    const evidenceItemId = await appendEvidenceItem(_deps.db, {
-      workspaceId,
-      ventureId: createdVenture.id,
-      missionId: createdMission.id,
-      evidenceType: 'startup_lifecycle_mission_persisted',
-      sourceType: 'gateway_startup_lifecycle',
-      title: `Startup lifecycle mission persisted: ${compiled.mission.title}`,
-      summary: compiled.mission.founderGoal,
-      redactionState: 'redacted',
-      sensitivity: 'internal',
-      contentHash: hashJson({
-        missionKey: compiled.mission.id,
-        founderGoal: compiled.mission.founderGoal,
-        nodeKeys: compiled.mission.nodes.map((node) => node.id),
-        edges: compiled.mission.edges,
-      }),
-      replayRef: `mission:${createdMission.id}:persisted`,
-      metadata: {
-        compilerVersion: compiled.compilerVersion,
-        autonomyMode: compiled.mission.autonomyMode,
-        capabilityState: compiled.capabilityState,
-        productionReady: false,
-        nodeCount: createdNodes.length,
-        edgeCount: compiled.mission.edges.length,
-        taskCount,
-        source: 'startup_lifecycle_persist',
-      },
-    });
+        if (compiled.mission.edges.length > 0) {
+          await db.insert(missionEdges).values(
+            compiled.mission.edges.map((edge) => ({
+              workspaceId,
+              missionId: persistedMission.id,
+              edgeKey: edge.id,
+              fromNodeKey: edge.from,
+              toNodeKey: edge.to,
+              reason: edge.reason,
+              metadata: { source: 'startup_lifecycle_template' },
+            })),
+          );
+        }
+
+        let createdTaskCount = 0;
+        if (parsed.data.createNodeTasks) {
+          for (const { node, row } of persistedNodes) {
+            const [createdTask] = await db
+              .insert(tasks)
+              .values({
+                workspaceId,
+                title: `[Lifecycle] ${node.title}`,
+                description: node.objective,
+                mode: 'mission',
+                status: 'pending',
+                priority: taskPriorityForStage(node.stage),
+                metadata: {
+                  kind: 'startup_lifecycle_node',
+                  ventureId: persistedVenture.id,
+                  goalId: persistedGoal.id,
+                  missionId: persistedMission.id,
+                  missionNodeId: row.id,
+                  stage: node.stage,
+                  requiredAgents: node.requiredAgents,
+                  requiredSkills: node.requiredSkills,
+                  requiredTools: node.requiredTools,
+                  requiredEvidence: node.requiredEvidence,
+                  helmPolicyClasses: node.helmPolicyClasses,
+                  escalationConditions: node.escalationConditions,
+                  acceptanceCriteria: node.acceptanceCriteria,
+                  productionReady: false,
+                },
+              })
+              .returning();
+            if (!createdTask) throw new Error(`task for node ${node.id} was not persisted`);
+            await db.insert(missionTasks).values({
+              workspaceId,
+              missionId: persistedMission.id,
+              nodeId: row.id,
+              taskId: createdTask.id,
+              role: 'startup_lifecycle_node',
+            });
+            createdTaskCount += 1;
+          }
+        }
+
+        const persistedEvidenceItemId = await appendEvidenceItem(db, {
+          workspaceId,
+          ventureId: persistedVenture.id,
+          missionId: persistedMission.id,
+          evidenceType: 'startup_lifecycle_mission_persisted',
+          sourceType: 'gateway_startup_lifecycle',
+          title: `Startup lifecycle mission persisted: ${compiled.mission.title}`,
+          summary: compiled.mission.founderGoal,
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          contentHash: hashJson({
+            missionKey: compiled.mission.id,
+            founderGoal: compiled.mission.founderGoal,
+            nodeKeys: compiled.mission.nodes.map((node) => node.id),
+            edges: compiled.mission.edges,
+          }),
+          replayRef: `mission:${persistedMission.id}:persisted`,
+          metadata: {
+            compilerVersion: compiled.compilerVersion,
+            autonomyMode: compiled.mission.autonomyMode,
+            capabilityState: compiled.capabilityState,
+            productionReady: false,
+            nodeCount: persistedNodes.length,
+            edgeCount: compiled.mission.edges.length,
+            taskCount: createdTaskCount,
+            source: 'startup_lifecycle_persist',
+          },
+        });
+
+        return {
+          createdVenture: persistedVenture,
+          createdGoal: persistedGoal,
+          createdMission: persistedMission,
+          createdNodes: persistedNodes,
+          taskCount: createdTaskCount,
+          evidenceItemId: persistedEvidenceItemId,
+        };
+      });
 
     const response = PersistedStartupLifecycleMissionSchema.parse({
       ...compiled,
