@@ -60,5 +60,8 @@
     "minimatch@>=9 <9.0.9": "9.0.9",
     "minimatch@>=10 <10.2.5": "10.2.5",
     "postcss": "8.5.13"
+  },
+  "dependencies": {
+    "hono": "^4.12.16"
   }
 }
