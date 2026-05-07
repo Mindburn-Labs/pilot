@@ -108,7 +108,7 @@ jobs:
       # Vulnerability scan: fail the release on HIGH or CRITICAL CVEs so we
       # don't ship an image with known exploitable paths.
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/mindburn-labs/pilot:${{ steps.tag.outputs.version }}
           format: sarif
@@ -118,7 +118,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Trivy vulnerability scan (web)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/mindburn-labs/pilot-web:${{ steps.tag.outputs.version }}
           format: sarif
