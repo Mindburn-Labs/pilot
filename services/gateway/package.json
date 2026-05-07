@@ -31,7 +31,7 @@
     "@types/nodemailer": "^8.0.0",
     "drizzle-orm": "^0.45.2",
     "grammy": "^1.36.0",
-    "hono": "^4.7.0",
+    "hono": "^4.12.18",
     "ioredis": "^5.10.1",
     "nodemailer": "^8.0.5",
     "pg-boss": "^10.3.0",
