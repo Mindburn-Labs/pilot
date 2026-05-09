@@ -18,7 +18,8 @@ export type ConductEventType =
   | 'action.approval_required'
   | 'subagent.spawned'
   | 'subagent.completed'
-  | 'task.verdict';
+  | 'task.verdict'
+  | 'ambient.event';
 
 export interface ConductEvent {
   type: ConductEventType;

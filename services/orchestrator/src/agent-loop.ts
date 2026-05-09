@@ -108,13 +108,35 @@ export class AgentLoop {
     this.currentWorkspaceId = params.workspaceId;
 
     const maxIterations = Math.min(params.iterationBudget ?? 50, MAX_ITERATION_BUDGET);
+    const stallTimeoutMs = params.stallTimeoutMs ?? 300_000; // 5 min default (Symphony stall_timeout_ms)
     const actions: ActionRecord[] = [];
+    let lastActivityAt = Date.now();
 
     for (let iteration = 1; iteration <= maxIterations; iteration++) {
+      // Symphony-adopted stall detection: abort if no activity within timeout
+      if (Date.now() - lastActivityAt > stallTimeoutMs) {
+        emitConductEvent({
+          type: 'task.verdict',
+          taskId: params.taskId,
+          iteration: iteration - 1,
+          payload: { status: 'stalled', reason: 'inactivity_timeout', stallTimeoutMs },
+        });
+        // Best-effort checkpoint before returning stalled
+        if (params.taskRunId) {
+          await writeCheckpoint(this.db, params.taskRunId, {
+            iteration: iteration - 1,
+            actions,
+            runUsage: { tokensIn: this.runTokensIn, tokensOut: this.runTokensOut },
+            runCost: this.runCost,
+          }).catch(() => { /* fail-soft */ });
+        }
+        return this.result('stalled', iteration - 1, maxIterations, actions, `Agent stalled: no activity for ${stallTimeoutMs}ms`);
+      }
       emitConductEvent({ type: 'iteration.started', taskId: params.taskId, iteration });
 
       // 1. Plan next action via LLM (ephemeral context — never persisted)
       const action = await this.planNextAction(params, actions);
+      lastActivityAt = Date.now(); // Reset activity timer after LLM response
       if (!action) {
         emitConductEvent({
           type: 'task.verdict',
@@ -1302,11 +1324,18 @@ function parsePlanResponse(response: string): Pick<ActionRecord, 'tool' | 'input
 
 export interface AgentRunParams {
   taskId: string;
+  taskRunId?: string;
   workspaceId: string;
   ventureId?: string;
   missionId?: string;
   operatorId?: string;
   iterationBudget?: number;
+  /** Inactivity timeout in ms. If no tool call or LLM response within this
+   *  window, the loop aborts with status 'stalled'. Default: 300000 (5 min).
+   *  Adopted from the Symphony SPEC stall_timeout_ms parameter. */
+  stallTimeoutMs?: number;
+  /** Maximum turns for multi-turn continuation. Default: 1 (single-shot). */
+  maxTurns?: number;
   context: string;
   /** Product mode (discover/decide/build/launch/apply) — gates available tools */
   mode?: string;
@@ -1317,7 +1346,7 @@ export interface AgentRunParams {
 }
 
 export interface AgentRunResult {
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval';
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled';
   iterationsUsed: number;
   iterationBudget: number;
   actions: ActionRecord[];

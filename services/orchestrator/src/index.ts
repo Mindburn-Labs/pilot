@@ -413,6 +413,17 @@ export {
   type ConductEvent,
   type ConductEventType,
 } from './conduct-stream.js';
+export {
+  PolicyReloader,
+  type PolicySnapshot,
+} from './policy-reload.js';
+export {
+  AmbientEventListener,
+  DEFAULT_EVENT_CONFIG,
+  type AmbientEvent,
+  type EventHandler,
+  type EventListenerConfig,
+} from './event-listener.js';
 
 function toFiniteNumber(value: unknown) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;

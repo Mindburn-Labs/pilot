@@ -375,8 +375,8 @@ describe('ToolRegistry', () => {
       expect(names).toContain('skill.invoke');
       expect(names).toContain('slack_workspace_agent_reply');
 
-      // Phase 15 Track I + K plus Workspace Agents: 46 connector tools + 2 multimodal + Operator CUA/browser + skill runtime adapter.
-      expect(tools.length).toBe(51);
+      // Phase 15 Track I + K plus Workspace Agents: 46 connector tools + 5 core + a2a.delegate
+      expect(tools.length).toBe(52);
     });
   });
 

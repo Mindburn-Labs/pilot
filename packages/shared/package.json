@@ -29,7 +29,8 @@
     "./mcp": "./dist/mcp/index.js",
     "./multimodal": "./dist/multimodal/index.js",
     "./a2a": "./dist/a2a/index.js",
-    "./conformance": "./dist/conformance/index.js"
+    "./conformance": "./dist/conformance/index.js",
+    "./workflow": "./dist/workflow/index.js"
   },
   "scripts": {
     "build": "tsc",

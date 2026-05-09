@@ -268,6 +268,66 @@ export class ToolRegistry {
     // Universal tools (available in all modes)
     // ═══════════════════════════════════════════
 
+    // ─── A2A Outbound Delegation ───
+    this.register({
+      name: 'a2a.delegate',
+      description:
+        'Delegate a task to an external A2A agent via the Agent-to-Agent protocol. Discovers the remote agent card, sends a task, and returns the result. Input: {"agent_url":"https://agent.example.com","task":"perform analysis","auth":{"type":"bearer","token":"..."}}',
+      manifest: {
+        key: 'a2a.delegate',
+        version: 'a2a_outbound_v1',
+        riskClass: 'high',
+        effectLevel: 'E3',
+        requiredEvidence: ['a2a_delegation', 'remote_agent_card', 'task_result'],
+        permissionRequirements: ['a2a:delegate'],
+        outputSensitivity: 'sensitive',
+      },
+      execute: async (input) => {
+        const { A2AClient } = await import('@pilot/shared/a2a');
+        const req = input as {
+          agent_url: string;
+          task: string;
+          auth?: { type: string; token?: string };
+          timeout_ms?: number;
+        };
+        if (!req.agent_url || !req.task) {
+          return { error: 'a2a.delegate requires agent_url and task' };
+        }
+
+        const client = new A2AClient({
+          baseUrl: req.agent_url,
+          bearerToken: req.auth?.token,
+          timeoutMs: req.timeout_ms ?? 60_000,
+        });
+
+        try {
+          // 1. Discovery: fetch and validate remote agent card
+          const card = await client.fetchAgentCard();
+          if (!card.name || !card.url) {
+            return { error: `Invalid agent card from ${req.agent_url}` };
+          }
+
+          // 2. Send task
+          const task = await client.sendTask({
+            message: { role: 'user', parts: [{ type: 'text', text: req.task }] },
+          });
+
+          return {
+            task_id: task.id,
+            status: task.status?.state,
+            agent: { name: card.name, url: card.url },
+            artifacts: task.artifacts ?? [],
+            messages: task.status?.message ? [task.status.message] : [],
+          };
+        } catch (err) {
+          return {
+            error: `A2A delegation failed: ${err instanceof Error ? err.message : String(err)}`,
+            agent_url: req.agent_url,
+          };
+        }
+      },
+    });
+
     // ─── Runtime Skill Invocation ───
     this.register({
       name: 'skill.invoke',
