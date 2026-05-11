@@ -1,3 +1,9 @@
+> **Launch boundary note**
+>
+> Pilot is an experimental downstream application. It is not part of HELM OSS and should not be used to evaluate HELM kernel readiness, HELM OSS conformance, or the HELM launch surface.
+>
+> For HELM OSS, use: https://github.com/Mindburn-Labs/helm-oss
+
 # Pilot
 
 Open-source, self-hostable autonomous founder operating system. Pilot helps founders assess fit, discover opportunities, evaluate real co-founder candidates, coordinate digital operators, build, launch, and apply, all behind a governed trust boundary.
