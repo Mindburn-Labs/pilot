@@ -596,6 +596,9 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     extraArgs: string[] = [],
   ): Promise<PipelineRunResult> {
     const workspaceId = job.data?.workspaceId;
+    if (!workspaceId) {
+      throw new Error(`${name} requires workspaceId for durable pipeline evidence`);
+    }
     try {
       const result = await runPipeline(name, extraArgs);
       await appendPipelineEvidence({
@@ -653,11 +656,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     fallbackArgs?: string[];
   }): Promise<void> {
     if (!input.workspaceId) {
-      log.warn(
-        { pipeline: input.name, jobId: input.job.id, status: input.status },
-        'Skipping pipeline evidence item without workspace scope',
-      );
-      return;
+      throw new Error(`${input.name} cannot append pipeline evidence without workspaceId`);
     }
 
     const workspaceId = input.workspaceId;

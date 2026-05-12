@@ -85,6 +85,6 @@ Medium, high, and restricted actions must not execute if any of these fail:
 - Browser execution is limited to governed read-only observation and lacks a productized bridge/eval pass.
 - Computer use is limited to safe local actions and lacks sandbox provider eval promotion.
 - Mission runtime has explicit bounded execution and recovery controls, but not a production long-running founder-off-grid loop.
-- Evidence ledger coverage still has legacy and ad-hoc ingestion gaps.
+- Evidence ledger coverage still has non-broker legacy writer gaps.
 - Command center surfaces real state, but mission autonomy is still prototype-only.
 - Founder-off-grid and Polsia outperformance remain blocked.

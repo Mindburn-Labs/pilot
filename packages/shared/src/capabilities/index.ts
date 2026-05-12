@@ -371,10 +371,10 @@ const capabilityRecords = validateCapabilityRecords([
     name: 'Evidence ledger',
     state: 'prototype',
     summary:
-      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, conductor dispatch, A2A inbound dispatch/cancel, task run dispatch/resume, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, launch deployment execution, retained tenant hard-delete receipt, retained user-erasure receipt, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace knowledge memory mutation/recompile, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append durable proof. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
+      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, conductor dispatch, A2A inbound dispatch/cancel, task run dispatch/resume, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, launch deployment execution, retained tenant hard-delete receipt, retained user-erasure receipt, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace knowledge memory mutation/recompile, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append durable proof. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails; pipeline workers fail closed before script execution without workspace-scoped evidence. Evidence coverage is still not complete for every meaningful action.',
     owner: 'Foundation Agent',
     blockers: [
-      'Ad-hoc non-workspace ingestion jobs and non-broker legacy writers do not yet append evidence_items for every meaningful action',
+      'Non-broker legacy writers do not yet append evidence_items for every meaningful action',
       'Browser/computer replay contract has not passed Browser/Computer Replay Eval and is not production-ready',
       'Non-broker legacy execution paths still need elevated-action receipt/evidence fail-closed guards',
     ],
@@ -413,7 +413,8 @@ const capabilityRecords = validateCapabilityRecords([
       'Connector lifecycle evidence_items now link to CONNECTOR_* audit_log rows through audit_event_id with audit metadata backfilled to the evidence item id',
       'Connector refresh background worker success and failure paths append sanitized evidence_items rows without token material and link them to CONNECTOR_REFRESH_* audit_log rows',
       'Workspace-scoped YC, Startup School, private YC, knowledge ingestion, and opportunity-cluster pipeline workers append redacted pipeline_worker evidence_items rows for success and failure',
-      'pipeline.ingest-knowledge now fails closed without workspaceId, passes --workspace-id into the ccunpacked importer, and the importer writes workspace-scoped pages plus redacted knowledge_ingestion_* evidence for direct runs',
+      'The generic pipeline executor now fails closed before script execution without workspaceId, so private YC, knowledge ingestion, and opportunity-cluster workers cannot silently run without durable workspace-scoped evidence',
+      'pipeline.ingest-knowledge fails closed without workspaceId, passes --workspace-id into the ccunpacked importer, and the importer writes workspace-scoped pages plus redacted knowledge_ingestion_* evidence for direct runs',
       'Scheduled public YC and Startup School pipeline jobs enumerate workspaces before execution so cron-triggered ingestion writes workspace-scoped pipeline_worker evidence_items rows',
       'YC scraper ingestion finalizers append redacted yc_scraper_ingestion evidence_items rows for parsed and failed workspace-scoped ingestion records without session, token, or raw error material',
       'Orchestrator and MCP artifact creation append artifact_created evidence_items rows linked to artifact_id, replay refs, and ARTIFACT_CREATED audit_log rows',
