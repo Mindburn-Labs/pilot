@@ -365,7 +365,7 @@ async function main() {
           });
         }
         if (status === 'approved' && !updated.taskId) {
-          await managedTelegram.sendApprovedMessage(updated.id).catch(() => {});
+          await managedTelegram.sendApprovedMessage(updated.id);
         }
       },
     });

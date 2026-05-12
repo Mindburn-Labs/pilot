@@ -370,7 +370,7 @@ const capabilityRecords = validateCapabilityRecords([
     name: 'Evidence ledger',
     state: 'prototype',
     summary:
-      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, Tool Broker, browser session control, browser observation, computer action, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append to it. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
+      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append to it. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
     owner: 'Foundation Agent',
     blockers: [
       'Ad-hoc non-workspace ingestion jobs and non-broker legacy writers do not yet append evidence_items for every meaningful action',
@@ -394,6 +394,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gateway workspace settings, mode, and invite routes persist redacted workspace_control evidence_items linked to their WORKSPACE_SETTINGS_*, WORKSPACE_MODE_CHANGED, and WORKSPACE_INVITE_CREATED audit_log rows without storing invite tokens in evidence metadata',
       'Gateway approval resolution persists workspace_approval_resolved evidence_items linked to WORKSPACE_APPROVAL_RESOLVED audit_log rows before any approved task resume side effect',
       'Gateway compliance framework and attestation routes persist compliance_* evidence_items linked to COMPLIANCE_* audit_log rows before returning control-plane mutation success',
+      'Managed Telegram approved and autonomous sends persist redacted managed_telegram_send_intent evidence_items linked to TELEGRAM_CHILD_SEND_MESSAGE audit_log rows before dispatching external Telegram messages',
       'Tool Broker refuses medium, high, and restricted tool manifests before action persistence or execution unless HELM policy decision metadata is present, and marks elevated tool executions failed if evidence_items persistence fails before completion',
       'Gateway browser observation evidence_items now link to their BROWSER_OBSERVATION_CAPTURED audit_log rows through audit_event_id',
       'Safe computer action evidence_items now link to OPERATOR_COMPUTER_USE audit_log rows through audit_event_id',
