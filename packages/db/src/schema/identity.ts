@@ -1,4 +1,13 @@
-import { pgTable, uuid, text, timestamp, boolean } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  boolean,
+  integer,
+  jsonb,
+  index,
+} from 'drizzle-orm/pg-core';
 
 // ─── Identity Domain ───
 
@@ -35,3 +44,23 @@ export const apiKeys = pgTable('api_keys', {
   expiresAt: timestamp('expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const userErasureReceipts = pgTable(
+  'user_erasure_receipts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    subjectHash: text('subject_hash').notNull(),
+    source: text('source').notNull(),
+    actor: text('actor').notNull(),
+    deletedWorkspaceCount: integer('deleted_workspace_count').notNull().default(0),
+    workspaceSetHash: text('workspace_set_hash'),
+    replayRef: text('replay_ref').notNull(),
+    metadata: jsonb('metadata').notNull().default({}),
+    requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('user_erasure_receipts_subject_hash_idx').on(table.subjectHash),
+    index('user_erasure_receipts_created_at_idx').on(table.createdAt),
+  ],
+);
