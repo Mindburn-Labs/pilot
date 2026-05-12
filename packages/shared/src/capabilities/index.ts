@@ -410,6 +410,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Connector lifecycle evidence_items now link to CONNECTOR_* audit_log rows through audit_event_id with audit metadata backfilled to the evidence item id',
       'Connector refresh background worker success and failure paths append sanitized evidence_items rows without token material and link them to CONNECTOR_REFRESH_* audit_log rows',
       'Workspace-scoped YC, Startup School, private YC, knowledge ingestion, and opportunity-cluster pipeline workers append redacted pipeline_worker evidence_items rows for success and failure',
+      'pipeline.ingest-knowledge now fails closed without workspaceId, passes --workspace-id into the ccunpacked importer, and the importer writes workspace-scoped pages plus redacted knowledge_ingestion_* evidence for direct runs',
       'Scheduled public YC and Startup School pipeline jobs enumerate workspaces before execution so cron-triggered ingestion writes workspace-scoped pipeline_worker evidence_items rows',
       'YC scraper ingestion finalizers append redacted yc_scraper_ingestion evidence_items rows for parsed and failed workspace-scoped ingestion records without session, token, or raw error material',
       'Orchestrator and MCP artifact creation append artifact_created evidence_items rows linked to artifact_id, replay refs, and ARTIFACT_CREATED audit_log rows',

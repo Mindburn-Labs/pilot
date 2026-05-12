@@ -1035,7 +1035,7 @@ describe('registerJobHandlers', () => {
       ]);
     });
 
-    it('does not create pipeline evidence without a workspace scope', async () => {
+    it('passes workspace scope into knowledge ingestion before indexing evidence', async () => {
       const pipelineRunner = vi.fn(async (name: string, extraArgs: string[]) => ({
         scriptPath: `pipelines/${name}.py`,
         args: [`/repo/pipelines/${name}.py`, ...extraArgs],
@@ -1046,9 +1046,65 @@ describe('registerJobHandlers', () => {
       registerJobHandlers(mockBoss, { db: mockDb, pipelineRunner });
       const handler = handlers.get('pipeline.ingest-knowledge')!;
 
-      await handler([{ id: 'job-3', data: {} }]);
+      await handler([
+        {
+          id: 'job-3',
+          data: {
+            workspaceId: 'ws-3',
+            auditEventId: 'request-audit-3',
+            evidenceItemId: 'request-evidence-3',
+            replayRef: 'knowledge-ingestion:ws-3:request',
+          },
+        },
+      ]);
 
-      expect(pipelineRunner).toHaveBeenCalledWith('pipeline.ingest-knowledge', []);
+      expect(pipelineRunner).toHaveBeenCalledWith('pipeline.ingest-knowledge', [
+        '--workspace-id',
+        'ws-3',
+      ]);
+      expect(mockDb._inserts[0]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          workspaceId: 'ws-3',
+          action: 'PIPELINE_JOB_SUCCEEDED',
+          actor: 'job:pipeline.ingest-knowledge',
+          target: 'job-3',
+        },
+      });
+      expect(appendEvidenceItem).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          workspaceId: 'ws-3',
+          evidenceType: 'pipeline_job_succeeded',
+          sourceType: 'pipeline_worker',
+          replayRef: 'pipeline:pipeline.ingest-knowledge:job-3:pipeline_job_succeeded',
+        }),
+      );
+      const metadata = vi.mocked(appendEvidenceItem).mock.calls[0]?.[1].metadata;
+      expect(metadata).toMatchObject({
+        pipeline: 'pipeline.ingest-knowledge',
+        requestAuditEventId: 'request-audit-3',
+        requestEvidenceItemId: 'request-evidence-3',
+        requestReplayRef: 'knowledge-ingestion:ws-3:request',
+      });
+    });
+
+    it('fails closed before knowledge ingestion without a workspace scope', async () => {
+      const pipelineRunner = vi.fn(async (name: string, extraArgs: string[]) => ({
+        scriptPath: `pipelines/${name}.py`,
+        args: [`/repo/pipelines/${name}.py`, ...extraArgs],
+        stdoutPreview: 'completed',
+        stderrPreview: null,
+      }));
+
+      registerJobHandlers(mockBoss, { db: mockDb, pipelineRunner });
+      const handler = handlers.get('pipeline.ingest-knowledge')!;
+
+      await expect(handler([{ id: 'job-3', data: {} }])).rejects.toThrow(
+        'pipeline.ingest-knowledge requires workspaceId',
+      );
+
+      expect(pipelineRunner).not.toHaveBeenCalled();
       expect(appendEvidenceItem).not.toHaveBeenCalled();
       expect(mockDb._inserts).toEqual([]);
     });

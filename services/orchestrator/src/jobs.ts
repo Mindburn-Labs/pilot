@@ -618,9 +618,16 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   );
 
   boss.work('pipeline.ingest-knowledge', async (jobs: PgBoss.Job[]) => {
-    for (const job of jobs as Array<PgBoss.Job<{ workspaceId?: string }>>) {
+    for (const job of jobs as Array<PgBoss.Job<PipelineJobData>>) {
+      const workspaceId = job.data?.workspaceId;
+      if (!workspaceId) {
+        throw new Error('pipeline.ingest-knowledge requires workspaceId for durable evidence');
+      }
       try {
-        await runPipelineWithEvidence('pipeline.ingest-knowledge', job);
+        await runPipelineWithEvidence('pipeline.ingest-knowledge', job, [
+          '--workspace-id',
+          workspaceId,
+        ]);
       } catch (err) {
         log.error({ err }, 'Knowledge ingestion pipeline failed');
         throw err;
