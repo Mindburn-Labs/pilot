@@ -86,6 +86,16 @@ type KnowledgeRecompileJobData = {
   replayRef?: string;
 };
 
+type TaskResumeJobData = {
+  taskId: string;
+  workspaceId: string;
+  operatorId?: string;
+  context: string;
+  requestAuditEventId?: string;
+  requestEvidenceItemId?: string;
+  requestReplayRef?: string;
+};
+
 /**
  * Register background job handlers on a pg-boss instance.
  */
@@ -409,14 +419,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   // ─── Task Resume (after approval) ───
   boss.work(
     'task.resume',
-    async (
-      jobs: PgBoss.Job<{
-        taskId: string;
-        workspaceId: string;
-        operatorId?: string;
-        context: string;
-      }>[],
-    ) => {
+    async (jobs: PgBoss.Job<TaskResumeJobData>[]) => {
       for (const job of jobs) {
         const { taskId, workspaceId, operatorId, context } = job.data;
         log.info({ taskId }, 'Resuming task after approval');
@@ -427,11 +430,23 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
         }
 
         try {
+          if (!workspaceId) {
+            throw new Error('task.resume requires workspaceId for durable evidence');
+          }
+
           const history = await loadParentRunHistory(deps.db, { taskId, workspaceId });
           if (!history.taskFound) {
             log.warn({ taskId, workspaceId }, 'Skipping resume for task outside workspace');
             continue;
           }
+
+          await deps.db.transaction(async (tx) => {
+            await appendTaskResumeDispatchEvidence({
+              db: tx,
+              job,
+              priorActionCount: history.priorActions.length,
+            });
+          });
 
           const result = await deps.orchestrator.resumeTask({
             taskId,
@@ -452,6 +467,67 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
       }
     },
   );
+
+  async function appendTaskResumeDispatchEvidence(input: {
+    db: EvidencePersistenceDb;
+    job: PgBoss.Job<TaskResumeJobData>;
+    priorActionCount: number;
+  }): Promise<void> {
+    const { taskId, workspaceId, operatorId, context } = input.job.data;
+    const auditEventId = randomUUID();
+    const replayRef = `task:${workspaceId}:${taskId}:resume:${auditEventId}`;
+    const metadata = {
+      taskId,
+      jobId: input.job.id ?? null,
+      operatorId: operatorId ?? null,
+      priorActionCount: input.priorActionCount,
+      contextHash: `sha256:${hashJson(context)}`,
+      requestAuditEventId: input.job.data.requestAuditEventId ?? null,
+      requestEvidenceItemId: input.job.data.requestEvidenceItemId ?? null,
+      requestReplayRef: input.job.data.requestReplayRef ?? null,
+      replayRef,
+      evidenceContract: 'task_resume_dispatch_before_orchestrator_resume',
+      credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+    };
+
+    await input.db.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId,
+      action: 'TASK_RESUME_DISPATCHED',
+      actor: 'job:task.resume',
+      target: taskId,
+      verdict: 'allow',
+      metadata: {
+        ...metadata,
+        evidenceItemId: null,
+      },
+    });
+
+    const evidenceItemId = await appendEvidenceItem(input.db, {
+      workspaceId,
+      auditEventId,
+      evidenceType: 'task_resume_dispatched',
+      sourceType: 'task_resume_worker',
+      title: `Task resume dispatched: ${taskId}`,
+      summary:
+        'Workspace-scoped approval resume was authorized after deterministic parent history load.',
+      redactionState: 'redacted',
+      sensitivity: 'internal',
+      contentHash: `sha256:${hashJson(metadata)}`,
+      replayRef,
+      metadata,
+    });
+
+    await input.db
+      .update(auditLog)
+      .set({
+        metadata: {
+          ...metadata,
+          evidenceItemId,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+  }
 
   // ─── Pipeline Execution (Python scripts) ───
   //
