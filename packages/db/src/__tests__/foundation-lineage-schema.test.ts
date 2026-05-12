@@ -26,6 +26,7 @@ import {
   opportunityScores,
   tenantDeletionReceipts,
   taskRuns,
+  userErasureReceipts,
   ventures,
 } from '../schema/index.js';
 
@@ -96,6 +97,18 @@ describe('retained tenant hard-delete receipt schema', () => {
     expect(tenantDeletionReceipts.actor.name).toBe('actor');
     expect(tenantDeletionReceipts.replayRef.name).toBe('replay_ref');
     expect(tenantDeletionReceipts.metadata.name).toBe('metadata');
+  });
+});
+
+describe('retained user erasure receipt schema', () => {
+  it('exports non-cascading user-erasure receipt fields', () => {
+    expect(userErasureReceipts.subjectHash.name).toBe('subject_hash');
+    expect(userErasureReceipts.source.name).toBe('source');
+    expect(userErasureReceipts.actor.name).toBe('actor');
+    expect(userErasureReceipts.deletedWorkspaceCount.name).toBe('deleted_workspace_count');
+    expect(userErasureReceipts.workspaceSetHash.name).toBe('workspace_set_hash');
+    expect(userErasureReceipts.replayRef.name).toBe('replay_ref');
+    expect(userErasureReceipts.metadata.name).toBe('metadata');
   });
 });
 

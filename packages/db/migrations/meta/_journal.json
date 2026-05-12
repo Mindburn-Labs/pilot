@@ -239,6 +239,13 @@
       "when": 1778043600000,
       "tag": "0032_tenant_deletion_receipts",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1778047200000,
+      "tag": "0033_user_erasure_receipts",
+      "breakpoints": true
     }
   ]
 }

@@ -5,3 +5,7 @@ export {
   appendTenantDeletionReceipt,
   type AppendTenantDeletionReceiptInput,
 } from './tenant-deletion-receipts.js';
+export {
+  appendUserErasureReceipt,
+  type AppendUserErasureReceiptInput,
+} from './user-erasure-receipts.js';
