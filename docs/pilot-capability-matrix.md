@@ -2,7 +2,7 @@
 
 Source of truth: `packages/shared/src/capabilities/index.ts`.
 
-This document is a human-readable Gate 0 mirror. The API and UI must read the shared registry; production claims must not be made from this document alone.
+This document is a human-readable Gate 0 mirror. The API and UI must read the shared registry; production claims must not be made from this document alone. The operational promotion checklist lives in `docs/production-readiness-checklist.md`.
 
 ## Capability States
 
@@ -38,11 +38,13 @@ This document is a human-readable Gate 0 mirror. The API and UI must read the sh
 
 Current production-ready count: `0/18`.
 
+Continuation note, 2026-05-12: PR #172 strengthened subagent spawn fail-closed behavior and clean-run CI wiring, but it did not promote any capability. The only remaining PR-merge check blockers observed after that merge were repository configuration issues for Gitleaks licensing and Claude review OIDC permissions, not eval-backed production evidence.
+
 ## Eval Readiness Inventory
 
 Pilot now exposes `GET /api/evals/readiness` as the current workspace-scoped promotion inventory. It combines the shared capability registry, required eval scenarios, recent durable eval runs, required tools, required integrations, required HELM policies, evidence requirements, audit requirements, and the missing real eval blockers for every capability.
 
-The inventory deliberately distinguishes the current narrow `control_plane_proof_check` executor from the required `real_external_eval` mode. A passed control-plane proof check can create durable eval evidence and blocker/promotion-eligibility rows for review, but it does not satisfy production promotion. A capability remains non-production until every required eval has a passed durable run with evidence refs, audit receipt refs, completion metadata, and `metadata.executionMode = "real_external_eval"`.
+The inventory deliberately distinguishes the current narrow `control_plane_proof_check` executor from the required `real_external_eval` mode. A passed control-plane proof check can create durable eval evidence and blocker rows for review, but it cannot create promotion eligibility and does not satisfy production promotion. A capability remains non-production until every required eval has a passed durable run with evidence refs, audit receipt refs, completion metadata, and `metadata.executionMode = "real_external_eval"`.
 
 ## Enforcement Rule
 

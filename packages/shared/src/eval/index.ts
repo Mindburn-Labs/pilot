@@ -22,6 +22,7 @@ export {
   PilotEvalStepRecordSchema,
   RecordPilotEvalRunInputSchema,
   RecordablePilotEvalStatusSchema,
+  PRODUCTION_READY_EXECUTION_MODE,
   buildCapabilityEvalReadinessInventory,
   checkCapabilityPromotionReadiness,
   executePilotProductionEval,
