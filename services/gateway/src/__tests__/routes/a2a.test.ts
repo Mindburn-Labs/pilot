@@ -1,7 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { a2aMessages, a2aThreads } from '@pilot/db/schema';
+import { a2aMessages, a2aThreads, auditLog } from '@pilot/db/schema';
 import { a2aRoutes, __resetA2aTasks } from '../../routes/a2a.js';
 import { createMockDeps, testApp } from '../helpers.js';
+
+const appendEvidenceItemMock = vi.hoisted(() => vi.fn(async () => 'evidence-a2a-1'));
+
+vi.mock('@pilot/db', () => ({
+  appendEvidenceItem: appendEvidenceItemMock,
+}));
 
 vi.mock('@pilot/db/schema', () => ({
   a2aThreads: {
@@ -21,6 +27,10 @@ vi.mock('@pilot/db/schema', () => ({
     parts: 'a2aMessages.parts',
     sequence: 'a2aMessages.sequence',
   },
+  auditLog: {
+    id: 'auditLog.id',
+    workspaceId: 'auditLog.workspaceId',
+  },
   tasks: {
     id: 'tasks.id',
     workspaceId: 'tasks.workspaceId',
@@ -39,6 +49,8 @@ const WS_ID = 'ws-a2a-1';
 describe('a2aRoutes', () => {
   beforeEach(() => {
     __resetA2aTasks();
+    appendEvidenceItemMock.mockClear();
+    appendEvidenceItemMock.mockResolvedValue('evidence-a2a-1');
     process.env['PILOT_A2A_TOKEN'] = BEARER;
     process.env['PILOT_A2A_WORKSPACE_ID'] = WS_ID;
     process.env['PILOT_A2A_PUBLIC_URL'] = 'http://localhost:3100';
@@ -144,8 +156,74 @@ describe('a2aRoutes', () => {
     expect(body.result.task.status.state).toBe('completed');
     expect(body.result.task.status.message?.parts[0]?.text).toBe('All done.');
     expect(runConductMock).toHaveBeenCalledTimes(1);
+    expect(appendEvidenceItemMock).toHaveBeenCalledTimes(1);
+    expect(appendEvidenceItemMock.mock.invocationCallOrder[0]).toBeLessThan(
+      runConductMock.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
+    const evidenceInput = appendEvidenceItemMock.mock.calls[0]?.[1] as {
+      evidenceType?: string;
+      sourceType?: string;
+      metadata?: Record<string, unknown>;
+    };
+    expect(evidenceInput).toMatchObject({
+      evidenceType: 'a2a_task_dispatched',
+      sourceType: 'gateway_a2a_route',
+      metadata: {
+        workspaceId: WS_ID,
+        externalTaskId: expect.any(String),
+        pilotTaskId: 'task-row-1',
+        textHash: expect.any(String),
+        textLength: 'Find AI opportunities'.length,
+        evidenceContract: 'a2a_dispatch_evidence_required',
+      },
+    });
+    expect(JSON.stringify(evidenceInput.metadata)).not.toContain('Find AI opportunities');
     expect(deps.db.insert).toHaveBeenCalledWith(a2aThreads);
     expect(deps.db.insert).toHaveBeenCalledWith(a2aMessages);
+  });
+
+  it('tasks/send fails closed before conductor execution when dispatch evidence cannot persist', async () => {
+    appendEvidenceItemMock.mockRejectedValueOnce(new Error('evidence unavailable'));
+    const deps = createMockDeps();
+    deps.db.insert = vi.fn(() => ({
+      values: vi.fn(() => ({
+        returning: vi.fn(async () => [{ id: 'task-row-1' }]),
+      })),
+    })) as unknown as typeof deps.db.insert;
+    const runConductMock = vi.fn(async () => ({
+      status: 'completed',
+      actions: [{ tool: 'finish', input: { summary: 'All done.' } }],
+    }));
+    (deps.orchestrator as unknown as { runConduct: typeof runConductMock }).runConduct =
+      runConductMock;
+
+    const { fetch } = testApp(a2aRoutes, deps);
+    const res = await fetch(
+      'POST',
+      '/a2a',
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tasks/send',
+        params: {
+          message: {
+            role: 'user',
+            parts: [{ type: 'text', text: 'Find AI opportunities' }],
+          },
+        },
+      },
+      { authorization: `Bearer ${BEARER}` },
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: { code: number; message: string } };
+    expect(body.error).toMatchObject({
+      code: -32603,
+      message: 'A2A dispatch evidence persistence failed',
+    });
+    expect(runConductMock).not.toHaveBeenCalled();
+    expect(deps.db.insert).not.toHaveBeenCalledWith(a2aThreads);
+    expect(deps.db.insert).toHaveBeenCalledWith(auditLog);
   });
 
   it('does not commit A2A thread state when message persistence fails', async () => {

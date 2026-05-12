@@ -1,8 +1,9 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Hono } from 'hono';
 import type { Context } from 'hono';
 import { and, asc, eq } from 'drizzle-orm';
-import { a2aMessages, a2aThreads, tasks as tasksTable } from '@pilot/db/schema';
+import { appendEvidenceItem } from '@pilot/db';
+import { a2aMessages, a2aThreads, auditLog, tasks as tasksTable } from '@pilot/db/schema';
 import {
   buildPilotAgentCard,
   type A2AMessage,
@@ -94,20 +95,17 @@ export function a2aRoutes(deps: GatewayDeps) {
             return rpcError(c, id, -32602, 'message requires a text part');
           }
 
-          // 1. Persist a tasks row so runConduct's tenancy gate accepts taskId.
-          const [taskRow] = await deps.db
-            .insert(tasksTable)
-            .values({
-              workspaceId,
-              title: text.slice(0, 60),
-              description: text,
-              mode: 'a2a',
-              status: 'pending',
-              priority: 0,
-              metadata: { a2a: { taskId } },
-            })
-            .returning({ id: tasksTable.id });
-          const pilotTaskId = taskRow?.id ?? '';
+          // 1. Persist the task row and redacted dispatch proof before conductor execution.
+          const dispatchProof = await persistA2aDispatchProof(deps, {
+            workspaceId,
+            externalTaskId: taskId,
+            text,
+            jsonrpcId: id,
+          });
+          if (!dispatchProof) {
+            return rpcError(c, id, -32603, 'A2A dispatch evidence persistence failed', 500);
+          }
+          const { pilotTaskId, evidenceItemId } = dispatchProof;
 
           // 2. Dispatch through the governed orchestrator.
           let result: { status: string; actions?: Array<{ tool: string; input?: unknown }> };
@@ -136,7 +134,11 @@ export function a2aRoutes(deps: GatewayDeps) {
               state: 'failed',
               userMessage: req.message,
               agentMessage: failed.status.message,
-              metadata: { jsonrpcId: id, error: err instanceof Error ? err.message : String(err) },
+              metadata: {
+                jsonrpcId: id,
+                error: err instanceof Error ? err.message : String(err),
+                dispatchEvidenceItemId: evidenceItemId,
+              },
             });
             return c.json({ jsonrpc: '2.0', id, result: { task: failed } });
           }
@@ -176,7 +178,11 @@ export function a2aRoutes(deps: GatewayDeps) {
             state,
             userMessage: req.message,
             agentMessage: task.status.message,
-            metadata: { jsonrpcId: id, conductStatus: result.status },
+            metadata: {
+              jsonrpcId: id,
+              conductStatus: result.status,
+              dispatchEvidenceItemId: evidenceItemId,
+            },
           });
           return c.json({ jsonrpc: '2.0', id, result: { task } });
         }
@@ -255,6 +261,85 @@ function rpcError(
 ) {
   const body = { jsonrpc: '2.0', id, error: { code, message } };
   return httpStatus ? c.json(body, httpStatus) : c.json(body);
+}
+
+type A2aDispatchProofInput = {
+  workspaceId: string;
+  externalTaskId: string;
+  text: string;
+  jsonrpcId: number | string | null;
+};
+
+async function persistA2aDispatchProof(
+  deps: GatewayDeps,
+  input: A2aDispatchProofInput,
+): Promise<{ pilotTaskId: string; auditEventId: string; evidenceItemId: string } | null> {
+  const textHash = hashA2aValue(input.text);
+
+  return deps.db
+    .transaction(async (tx) => {
+      const db = tx as unknown as typeof deps.db;
+      const [taskRow] = await db
+        .insert(tasksTable)
+        .values({
+          workspaceId: input.workspaceId,
+          title: input.text.slice(0, 60),
+          description: input.text,
+          mode: 'a2a',
+          status: 'pending',
+          priority: 0,
+          metadata: { a2a: { taskId: input.externalTaskId } },
+        })
+        .returning({ id: tasksTable.id });
+      const pilotTaskId = taskRow?.id;
+      if (!pilotTaskId) {
+        throw new Error('A2A task persistence failed');
+      }
+
+      const auditEventId = randomUUID();
+      const auditMetadata = {
+        workspaceId: input.workspaceId,
+        externalTaskId: input.externalTaskId,
+        pilotTaskId,
+        jsonrpcId: input.jsonrpcId,
+        textHash,
+        textLength: input.text.length,
+        evidenceContract: 'a2a_dispatch_evidence_required',
+      };
+
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId: input.workspaceId,
+        action: 'A2A_TASK_SEND_DISPATCHED',
+        actor: 'a2a:bearer',
+        target: pilotTaskId,
+        verdict: 'allow',
+        metadata: auditMetadata,
+      });
+
+      const evidenceItemId = await appendEvidenceItem(db, {
+        workspaceId: input.workspaceId,
+        taskId: pilotTaskId,
+        auditEventId,
+        evidenceType: 'a2a_task_dispatched',
+        sourceType: 'gateway_a2a_route',
+        title: 'A2A task dispatched',
+        summary:
+          'Gateway A2A tasks/send accepted bearer auth, created a task row, and persisted redacted dispatch proof before conductor execution.',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef: `a2a:${input.externalTaskId}:dispatch:${auditEventId}`,
+        metadata: auditMetadata,
+      });
+
+      await db
+        .update(auditLog)
+        .set({ metadata: { ...auditMetadata, evidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { pilotTaskId, auditEventId, evidenceItemId };
+    })
+    .catch(() => null);
 }
 
 function extractText(user: A2AMessage): string {
@@ -382,4 +467,17 @@ function coerceTaskState(state: string): TaskState {
 /** Test hook retained for backward-compatible tests; A2A state is DB-backed. */
 export function __resetA2aTasks(): void {
   // no-op
+}
+
+function hashA2aValue(value: unknown): string {
+  return createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(',')}}`;
 }
