@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Hono } from 'hono';
 import { createHmac } from 'node:crypto';
-import { apiKeys, auditLog, evidenceItems } from '@pilot/db/schema';
+import {
+  apiKeys,
+  auditLog,
+  evidenceItems,
+  sessions,
+  users,
+  workspaceMembers,
+} from '@pilot/db/schema';
 import { authenticatedAuthRoutes, authRoutes } from '../../routes/auth.js';
 import { createGateway } from '../../index.js';
 import { requireAuth } from '../../middleware/auth.js';
@@ -84,6 +91,104 @@ function createApiKeyDb(options: { failEvidence?: boolean; selectResults?: unkno
   };
 
   return { db, inserts, updates };
+}
+
+function createInviteAcceptDb(
+  options: { failEvidence?: boolean; userExists?: boolean; expiresAt?: Date } = {},
+) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const deletes: Array<{ table: unknown }> = [];
+  const inviteSession = {
+    id: 'invite-session-1',
+    userId: 'inviter-1',
+    token: `invite:${workspaceId}:partner:opaque-token`,
+    channel: 'invite',
+    expiresAt: options.expiresAt ?? new Date(Date.now() + 60_000),
+  };
+  const existingUser =
+    options.userExists === false
+      ? null
+      : mockUser({ id: 'user-invitee-1', email: 'invitee@example.com', name: 'Invitee' });
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+    deleteSink: Array<{ table: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => {
+            if (table === sessions) return [inviteSession];
+            if (table === users) return existingUser ? [existingUser] : [];
+            return [];
+          }),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === users) {
+              return [
+                {
+                  id: 'user-invitee-created',
+                  email: value['email'],
+                  name: value['name'],
+                },
+              ];
+            }
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('invite evidence unavailable');
+              return [{ id: 'evidence-invite-accepted-1' }];
+            }
+            return [];
+          }),
+          onConflictDoNothing: vi.fn(async () => []),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })),
+    delete: vi.fn((table: unknown) => {
+      deleteSink.push({ table });
+      return {
+        where: vi.fn(async () => []),
+      };
+    }),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates, deletes),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const stagedDeletes: Array<{ table: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates, stagedDeletes);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      deletes.push(...stagedDeletes);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, deletes };
 }
 
 describe('authRoutes', () => {
@@ -467,6 +572,118 @@ describe('authRoutes', () => {
       expect(String(pending?.token)).not.toContain(json.code ?? '');
       expect(randomSpy).not.toHaveBeenCalled();
       randomSpy.mockRestore();
+    });
+  });
+
+  describe('POST /invite/:token', () => {
+    it('writes redacted audit-linked evidence when accepting a workspace invite', async () => {
+      const { db, inserts, updates, deletes } = createInviteAcceptDb();
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request(
+          'http://localhost/invite/00000000-0000-4000-8000-000000000001:partner:opaque-token',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: 'Invitee@Example.com' }),
+          },
+        ),
+      );
+
+      const json = await expectJson<{
+        token: string;
+        workspaceId: string;
+        role: string;
+        evidenceItemId: string;
+      }>(res, 200);
+      expect(json.workspaceId).toBe(workspaceId);
+      expect(json.role).toBe('partner');
+      expect(json.evidenceItemId).toBe('evidence-invite-accepted-1');
+
+      expect(inserts.map((insert) => insert.table)).toEqual([
+        workspaceMembers,
+        sessions,
+        auditLog,
+        evidenceItems,
+      ]);
+      expect(inserts.find((insert) => insert.table === workspaceMembers)?.value).toMatchObject({
+        workspaceId,
+        userId: 'user-invitee-1',
+        role: 'partner',
+      });
+      expect(deletes.map((entry) => entry.table)).toEqual([sessions]);
+
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+        metadata: Record<string, unknown>;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId,
+        action: 'WORKSPACE_INVITE_ACCEPTED',
+        actor: 'user:user-invitee-1',
+        target: workspaceId,
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          evidenceType: 'workspace_invite_accepted',
+          role: 'partner',
+          emailStoredInEvidence: false,
+          inviteTokenStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        }),
+      });
+
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceType: 'workspace_invite_accepted',
+        sourceType: 'gateway_auth',
+        redactionState: 'redacted',
+        sensitivity: 'sensitive',
+        metadata: expect.objectContaining({
+          emailStoredInEvidence: false,
+          inviteTokenStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        }),
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-invite-accepted-1',
+        }),
+      });
+
+      const serializedProof = JSON.stringify({ auditInsert, evidenceInsert });
+      expect(serializedProof).not.toContain('invitee@example.com');
+      expect(serializedProof).not.toContain('Invitee@Example.com');
+      expect(serializedProof).not.toContain('opaque-token');
+      expect(serializedProof).not.toContain(json.token);
+    });
+
+    it('fails closed without committing invite acceptance rows when evidence persistence fails', async () => {
+      const { db, inserts, deletes } = createInviteAcceptDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request(
+          'http://localhost/invite/00000000-0000-4000-8000-000000000001:partner:opaque-token',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: 'invitee@example.com' }),
+          },
+        ),
+      );
+
+      const json = await expectJson<{ error: string }>(res, 500);
+      expect(json.error).toContain('failed to persist invite acceptance evidence');
+      expect(inserts).toEqual([]);
+      expect(deletes).toEqual([]);
+      expect(res.headers.get('set-cookie')).toBeNull();
     });
   });
 

@@ -1,7 +1,14 @@
 import { Hono } from 'hono';
 import { getCookie } from 'hono/cookie';
 import { and, eq } from 'drizzle-orm';
-import { createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomInt,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 import { appendEvidenceItem } from '@pilot/db';
 import { users, sessions, apiKeys, workspaces, workspaceMembers, auditLog } from '@pilot/db/schema';
 import {
@@ -322,42 +329,103 @@ export function authRoutes(deps: GatewayDeps) {
 
     if (!workspaceId) return c.json({ error: 'Malformed invite token' }, 400);
 
-    // Find or create user
-    let [user] = await deps.db.select().from(users).where(eq(users.email, email)).limit(1);
-    if (!user) {
-      [user] = await deps.db
-        .insert(users)
-        .values({ email, name: email.split('@')[0] ?? 'User' })
-        .returning();
-    }
-    if (!user) return c.json({ error: 'Failed to create user' }, 500);
-
-    // Add to workspace
-    await deps.db
-      .insert(workspaceMembers)
-      .values({ workspaceId, userId: user.id, role })
-      .onConflictDoNothing();
-
-    // Delete the invite session
-    await deps.db.delete(sessions).where(eq(sessions.id, inviteSession.id));
-
-    // Create auth session
     const sessionToken = generateToken();
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await deps.db.insert(sessions).values({
-      userId: user.id,
-      token: sessionToken,
-      channel: 'email',
-      expiresAt,
-    });
+    const accepted = await deps.db
+      .transaction(async (tx) => {
+        let [user] = await tx.select().from(users).where(eq(users.email, email)).limit(1);
+        if (!user) {
+          [user] = await tx
+            .insert(users)
+            .values({ email, name: email.split('@')[0] ?? 'User' })
+            .returning();
+        }
+        if (!user) throw new Error('failed to create invite user');
+
+        await tx
+          .insert(workspaceMembers)
+          .values({ workspaceId, userId: user.id, role })
+          .onConflictDoNothing();
+
+        await tx.delete(sessions).where(eq(sessions.id, inviteSession.id));
+
+        await tx.insert(sessions).values({
+          userId: user.id,
+          token: sessionToken,
+          channel: 'email',
+          expiresAt,
+        });
+
+        const auditEventId = randomUUID();
+        const replayRef = `workspace-invite:${workspaceId}:${user.id}:accepted`;
+        const evidenceMetadata = {
+          workspaceId,
+          userId: user.id,
+          role,
+          inviteSessionId: inviteSession.id,
+          emailHash: stableAuthEvidenceHash(email),
+          emailStoredInEvidence: false,
+          inviteTokenStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId,
+          action: 'WORKSPACE_INVITE_ACCEPTED',
+          actor: `user:${user.id}`,
+          target: workspaceId,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'workspace_invite_accepted',
+            replayRef,
+            evidenceItemId: null,
+            ...evidenceMetadata,
+          },
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId,
+          auditEventId,
+          evidenceType: 'workspace_invite_accepted',
+          sourceType: 'gateway_auth',
+          title: 'Workspace invite accepted',
+          summary:
+            'A user accepted a workspace invite; invite token, email, and session token were not stored in evidence.',
+          redactionState: 'redacted',
+          sensitivity: 'sensitive',
+          contentHash: `sha256:${stableAuthEvidenceHash(JSON.stringify(evidenceMetadata))}`,
+          replayRef,
+          metadata: evidenceMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'workspace_invite_accepted',
+              replayRef,
+              evidenceItemId,
+              ...evidenceMetadata,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+
+        return { user, evidenceItemId };
+      })
+      .catch(() => null);
+
+    if (!accepted) return c.json({ error: 'failed to persist invite acceptance evidence' }, 500);
+
     const csrfToken = setSessionCookies(c, sessionToken, expiresAt);
 
     return c.json({
       token: sessionToken,
       csrfToken,
-      user: { id: user.id, name: user.name, email: user.email },
+      user: { id: accepted.user.id, name: accepted.user.name, email: accepted.user.email },
       workspaceId,
       role,
+      evidenceItemId: accepted.evidenceItemId,
     });
   });
 
@@ -453,6 +521,10 @@ export function authenticatedAuthRoutes(deps: GatewayDeps) {
 
 function normalizeEmail(email: unknown): string {
   return typeof email === 'string' ? email.trim().toLowerCase() : '';
+}
+
+function stableAuthEvidenceHash(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function createMagicCodeSessionToken(email: string, code: string): string {
