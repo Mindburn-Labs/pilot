@@ -118,6 +118,93 @@ function evalCapabilityMismatch(evalId: string, capabilityKey?: CapabilityKey) {
   };
 }
 
+function failedRealExternalEvalRun(
+  workspaceId: string,
+  input: z.infer<typeof ExecutePilotEvalInputSchema>,
+  failureReason: string,
+): RecordPilotEvalRunInput {
+  return {
+    workspaceId,
+    evalId: input.evalId,
+    status: 'failed',
+    capabilityKey: input.capabilityKey,
+    runRef: input.runRef ?? `real-external-eval:${input.evalId}:${randomUUID()}`,
+    failureReason,
+    summary: failureReason,
+    evidenceRefs: [],
+    auditReceiptRefs: [],
+    metadata: {
+      requestedExecutionMode: PRODUCTION_READY_EXECUTION_MODE,
+      trustedRunnerAvailable: false,
+    },
+    completedAt: new Date().toISOString(),
+    steps: [],
+  };
+}
+
+async function executeTrustedRealExternalEval(
+  deps: GatewayDeps,
+  workspaceId: string,
+  input: z.infer<typeof ExecutePilotEvalInputSchema>,
+): Promise<{
+  run: RecordPilotEvalRunInput;
+  blockers: string[];
+}> {
+  if (!deps.productionEvalRunner) {
+    const failureReason =
+      'real_external_eval requested, but no trusted production eval runner is configured';
+    return {
+      run: failedRealExternalEvalRun(workspaceId, input, failureReason),
+      blockers: [failureReason],
+    };
+  }
+
+  try {
+    const executed = await deps.productionEvalRunner.execute({
+      ...input,
+      workspaceId,
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+    });
+    const parsedRun = RecordPilotEvalRunInputSchema.parse({
+      ...executed.run,
+      workspaceId,
+    });
+    const runnerBlockers = (executed.blockers ?? []).filter((blocker) => blocker.length > 0);
+    if (runnerBlockers.length > 0) {
+      const failureReason = `trusted real_external_eval runner reported blockers: ${runnerBlockers.join('; ')}`;
+      return {
+        run: failedRealExternalEvalRun(workspaceId, input, failureReason),
+        blockers: runnerBlockers,
+      };
+    }
+    if (parsedRun.evalId !== input.evalId) {
+      const failureReason = `trusted real_external_eval runner returned evalId ${parsedRun.evalId} for requested evalId ${input.evalId}`;
+      return {
+        run: failedRealExternalEvalRun(workspaceId, input, failureReason),
+        blockers: [failureReason],
+      };
+    }
+    if (input.capabilityKey && parsedRun.capabilityKey !== input.capabilityKey) {
+      const failureReason = `trusted real_external_eval runner returned capabilityKey ${parsedRun.capabilityKey} for requested capabilityKey ${input.capabilityKey}`;
+      return {
+        run: failedRealExternalEvalRun(workspaceId, input, failureReason),
+        blockers: [failureReason],
+      };
+    }
+    return {
+      run: parsedRun,
+      blockers: executed.blockers ?? [],
+    };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const failureReason = `trusted real_external_eval runner failed: ${detail}`;
+    return {
+      run: failedRealExternalEvalRun(workspaceId, input, failureReason),
+      blockers: [failureReason],
+    };
+  }
+}
+
 function capabilityRunScope(capabilityKey: CapabilityKey): SQL {
   const requiredEvalIds = getRequiredEvalsForCapability(capabilityKey).map(
     (scenario) => scenario.id,
@@ -570,7 +657,13 @@ export function evalRoutes(deps: GatewayDeps) {
     const mismatch = evalCapabilityMismatch(parsed.data.evalId, parsed.data.capabilityKey);
     if (mismatch) return c.json(mismatch, 400);
 
-    const executed = executePilotProductionEval(parsed.data);
+    const executed =
+      parsed.data.executionMode === PRODUCTION_READY_EXECUTION_MODE
+        ? {
+            ...(await executeTrustedRealExternalEval(deps, workspaceId, parsed.data)),
+            executionMode: PRODUCTION_READY_EXECUTION_MODE,
+          }
+        : executePilotProductionEval(parsed.data);
     const persisted = await persistEvalRun(deps, workspaceId, executed.run, {
       executionMode: executed.executionMode,
       executionBlockers: executed.blockers,

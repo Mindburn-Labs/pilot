@@ -51,6 +51,7 @@ import { type HelmClient } from '@pilot/helm-client';
 import { type EventBus } from './events/bus.js';
 import { type EmailProvider } from './services/email-provider.js';
 import { type ManagedTelegramBotService } from './services/managed-telegram-bots.js';
+import type { ExecutePilotEvalInput, RecordPilotEvalRunInput } from '@pilot/shared/eval';
 
 const log = createLogger('gateway');
 
@@ -65,6 +66,22 @@ export interface GatewayDeps {
   eventBus?: EventBus;
   emailProvider?: EmailProvider;
   managedTelegram?: ManagedTelegramBotService;
+  /**
+   * Trusted internal runner for real external production evals. Route callers
+   * can request real_external_eval, but only this server-owned runner can
+   * attach trusted real-eval execution metadata for promotion eligibility.
+   */
+  productionEvalRunner?: {
+    execute: (
+      input: ExecutePilotEvalInput & {
+        workspaceId: string;
+        executionMode: 'real_external_eval';
+      },
+    ) => Promise<{
+      run: RecordPilotEvalRunInput;
+      blockers?: string[];
+    }>;
+  };
   /**
    * HELM governance client. When present the orchestrator routes LLM calls
    * through HELM's /v1/chat/completions and persists receipts to

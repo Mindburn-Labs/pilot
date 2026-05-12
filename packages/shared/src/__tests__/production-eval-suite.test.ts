@@ -348,6 +348,27 @@ describe('production eval suite', () => {
     expect(executed.blockers.join(' ')).toContain('Missing evidence coverage');
   });
 
+  it('does not let the control-plane executor simulate real external evals', () => {
+    const scenario = getRequiredEvalForCapability('startup_lifecycle');
+    if (!scenario) throw new Error('startup_lifecycle eval missing');
+
+    const executed = executePilotProductionEval({
+      evalId: scenario.id,
+      capabilityKey: 'startup_lifecycle',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: ['evidence:startup-launch'],
+      auditReceiptRefs: ['audit:startup-launch'],
+      evidenceCoverage: scenario.evidenceRequirements,
+      auditCoverage: scenario.auditRequirements,
+      completedAt: '2026-05-05T00:00:00.000Z',
+    });
+
+    expect(executed.executionMode).toBe('control_plane_proof_check');
+    expect(executed.run.status).toBe('failed');
+    expect(executed.blockers.join(' ')).toContain('real_external_eval requires a trusted runtime');
+    expect(executed.run.metadata['executionMode']).toBe('control_plane_proof_check');
+  });
+
   it('fails closed when an eval is executed for an unrelated capability', () => {
     const scenario = getRequiredEvalForCapability('helm_receipts');
     if (!scenario) throw new Error('helm_receipts eval missing');
