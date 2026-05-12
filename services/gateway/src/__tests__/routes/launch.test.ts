@@ -434,9 +434,10 @@ describe('launchRoutes', () => {
       expect(mockEngine.deployToTarget).not.toHaveBeenCalled();
     });
 
-    it('returns 201 on success after HELM approval', async () => {
+    it('returns 201 with audit-linked evidence on success after HELM approval', async () => {
       const helmClient = mockHelmClient();
-      const deps = createMockDeps({ helmClient: helmClient as never });
+      const { db, inserts, updates } = createDeployTargetDb();
+      const deps = createMockDeps({ helmClient: helmClient as never, db: db as never });
       const { fetch } = testApp(launchRoutes, deps);
       const res = await fetch(
         'POST',
@@ -445,10 +446,16 @@ describe('launchRoutes', () => {
           workspaceId: 'ws-1',
           targetId: 'target-1',
           image: 'registry.example.com/app:v1',
+          envVars: { API_KEY: 'super-secret' },
         },
         wsHeader,
       );
-      const json = await expectJson(res, 201);
+      const json = await expectJson<{
+        deployment: { status: string };
+        evidenceItemId: string;
+        auditEventId: string;
+        replayRef: string;
+      }>(res, 201);
 
       expect(helmClient.evaluate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -466,7 +473,7 @@ describe('launchRoutes', () => {
           image: 'registry.example.com/app:v1',
           appName: undefined,
           region: undefined,
-          envVars: undefined,
+          envVars: { API_KEY: 'super-secret' },
         },
         expect.objectContaining({ name: 'digitalocean' }),
         expect.objectContaining({
@@ -480,6 +487,76 @@ describe('launchRoutes', () => {
         }),
       );
       expect(json.deployment.status).toBe('live');
+      expect(json.evidenceItemId).toBe('evidence-deploy-target-1');
+      expect(json.auditEventId).toBeTruthy();
+      expect(json.replayRef).toContain('launch:ws-1:deploy:');
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'DEPLOY',
+        actor: 'user:user-1',
+        target: 'digitalocean:target-1',
+        verdict: 'pending',
+        metadata: {
+          evidenceType: 'launch_deployment_requested',
+          executionStatus: 'pending',
+          targetId: 'target-1',
+          provider: 'digitalocean',
+          imageProvided: true,
+          envVarKeys: ['API_KEY'],
+        },
+      });
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId: 'ws-1',
+        auditEventId: auditInsert.id,
+        evidenceType: 'launch_deployment_requested',
+        sourceType: 'gateway_launch',
+        redactionState: 'redacted',
+        sensitivity: 'restricted',
+        metadata: {
+          envVarKeys: ['API_KEY'],
+          secretValuesStoredInEvidence: false,
+        },
+      });
+      expect(JSON.stringify(evidenceInsert)).not.toContain('super-secret');
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: { evidenceItemId: 'evidence-deploy-target-1' },
+      });
+      expect(updates.at(-1)?.value).toMatchObject({
+        verdict: 'allow',
+        metadata: {
+          executionStatus: 'completed',
+          deploymentId: 'deploy-1',
+          providerDeploymentId: 'do-deploy-1',
+          providerStatus: 'live',
+        },
+      });
+    });
+
+    it('fails closed before deployment dispatch when evidence persistence fails', async () => {
+      const helmClient = mockHelmClient();
+      const { db, inserts } = createDeployTargetDb({ failEvidence: true });
+      const deps = createMockDeps({ helmClient: helmClient as never, db: db as never });
+      const { fetch } = testApp(launchRoutes, deps);
+      const res = await fetch(
+        'POST',
+        '/deployments',
+        {
+          workspaceId: 'ws-1',
+          targetId: 'target-1',
+          image: 'registry.example.com/app:v1',
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('failed to persist launch deployment evidence');
+      expect(mockEngine.deployToTarget).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
     });
   });
 
@@ -539,12 +616,18 @@ describe('launchRoutes', () => {
       expect(mockEngine.runDeploymentHealthCheck).not.toHaveBeenCalled();
     });
 
-    it('returns 201 on success', async () => {
+    it('returns 201 with audit-linked evidence on success', async () => {
       const helmClient = mockHelmClient();
-      const deps = createMockDeps({ helmClient: helmClient as never });
+      const { db, inserts, updates } = createDeployTargetDb();
+      const deps = createMockDeps({ helmClient: helmClient as never, db: db as never });
       const { fetch } = testApp(launchRoutes, deps);
       const res = await fetch('POST', '/deployments/dep-1/health', undefined, wsHeader);
-      const json = await expectJson(res, 201);
+      const json = await expectJson<{
+        check: { id: string; status: string };
+        evidenceItemId: string;
+        auditEventId: string;
+        replayRef: string;
+      }>(res, 201);
 
       expect(helmClient.evaluate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -565,6 +648,45 @@ describe('launchRoutes', () => {
         }),
       );
       expect(json.check).toEqual({ id: 'hc-1', status: 'healthy' });
+      expect(json.evidenceItemId).toBe('evidence-deploy-target-1');
+      expect(json.auditEventId).toBeTruthy();
+      expect(json.replayRef).toContain('launch:ws-1:deploy_health_check:');
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'DEPLOY_HEALTH_CHECK',
+        target: 'digitalocean:target-1',
+        verdict: 'pending',
+        metadata: {
+          evidenceType: 'launch_deployment_health_check_requested',
+          executionStatus: 'pending',
+          deploymentId: 'dep-1',
+          provider: 'digitalocean',
+        },
+      });
+      expect(updates.at(-1)?.value).toMatchObject({
+        verdict: 'allow',
+        metadata: {
+          executionStatus: 'completed',
+          deploymentId: 'dep-1',
+          healthStatus: 'healthy',
+          providerStatus: 200,
+          responseTimeMs: 42,
+        },
+      });
+    });
+
+    it('fails closed before health-check dispatch when evidence persistence fails', async () => {
+      const helmClient = mockHelmClient();
+      const { db, inserts } = createDeployTargetDb({ failEvidence: true });
+      const deps = createMockDeps({ helmClient: helmClient as never, db: db as never });
+      const { fetch } = testApp(launchRoutes, deps);
+      const res = await fetch('POST', '/deployments/dep-1/health', undefined, wsHeader);
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('failed to persist launch health-check evidence');
+      expect(mockEngine.runDeploymentHealthCheck).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
     });
   });
 
@@ -585,9 +707,10 @@ describe('launchRoutes', () => {
       expect(mockEngine.rollbackDeployment).not.toHaveBeenCalled();
     });
 
-    it('runs rollback only after HELM approval', async () => {
+    it('runs rollback only after HELM approval and evidence persistence', async () => {
       const helmClient = mockHelmClient();
-      const deps = createMockDeps({ helmClient: helmClient as never });
+      const { db, inserts, updates } = createDeployTargetDb();
+      const deps = createMockDeps({ helmClient: helmClient as never, db: db as never });
       const { fetch } = testApp(launchRoutes, deps);
       const res = await fetch(
         'POST',
@@ -595,7 +718,12 @@ describe('launchRoutes', () => {
         { targetVersion: 'v1' },
         wsHeader,
       );
-      const json = await expectJson(res, 200);
+      const json = await expectJson<{
+        deployment: { id: string; status: string };
+        evidenceItemId: string;
+        auditEventId: string;
+        replayRef: string;
+      }>(res, 200);
 
       expect(helmClient.evaluate).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -617,6 +745,51 @@ describe('launchRoutes', () => {
         }),
       );
       expect(json.deployment).toEqual({ id: 'dep-1', status: 'rolled_back' });
+      expect(json.evidenceItemId).toBe('evidence-deploy-target-1');
+      expect(json.auditEventId).toBeTruthy();
+      expect(json.replayRef).toContain('launch:ws-1:deploy_rollback:');
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'DEPLOY_ROLLBACK',
+        target: 'digitalocean:target-1',
+        verdict: 'pending',
+        metadata: {
+          evidenceType: 'launch_deployment_rollback_requested',
+          executionStatus: 'pending',
+          deploymentId: 'dep-1',
+          targetVersion: 'v1',
+          provider: 'digitalocean',
+        },
+      });
+      expect(updates.at(-1)?.value).toMatchObject({
+        verdict: 'allow',
+        metadata: {
+          executionStatus: 'completed',
+          deploymentId: 'dep-1',
+          targetVersion: 'v1',
+          rollbackStatus: 'rolled_back',
+          deploymentStatus: 'rolled_back',
+        },
+      });
+    });
+
+    it('fails closed before rollback dispatch when evidence persistence fails', async () => {
+      const helmClient = mockHelmClient();
+      const { db, inserts } = createDeployTargetDb({ failEvidence: true });
+      const deps = createMockDeps({ helmClient: helmClient as never, db: db as never });
+      const { fetch } = testApp(launchRoutes, deps);
+      const res = await fetch(
+        'POST',
+        '/deployments/dep-1/rollback',
+        { targetVersion: 'v1' },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('failed to persist launch rollback evidence');
+      expect(mockEngine.rollbackDeployment).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
     });
   });
 });
