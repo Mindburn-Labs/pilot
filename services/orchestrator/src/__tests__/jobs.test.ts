@@ -1297,5 +1297,25 @@ describe('registerJobHandlers', () => {
       expect(appendEvidenceItem).not.toHaveBeenCalled();
       expect(mockDb._inserts).toEqual([]);
     });
+
+    it('fails closed before private session ingestion without workspace-scoped evidence', async () => {
+      const pipelineRunner = vi.fn(async (name: string, extraArgs: string[]) => ({
+        scriptPath: `pipelines/${name}.py`,
+        args: [`/repo/pipelines/${name}.py`, ...extraArgs],
+        stdoutPreview: 'completed',
+        stderrPreview: null,
+      }));
+
+      registerJobHandlers(mockBoss, { db: mockDb, pipelineRunner });
+      const handler = handlers.get('pipeline.yc-private')!;
+
+      await expect(
+        handler([{ id: 'job-private-no-workspace', data: { grantId: 'grant-secret-id' } }]),
+      ).rejects.toThrow('pipeline.yc-private requires workspaceId for durable pipeline evidence');
+
+      expect(pipelineRunner).not.toHaveBeenCalled();
+      expect(appendEvidenceItem).not.toHaveBeenCalled();
+      expect(mockDb._inserts).toEqual([]);
+    });
   });
 });
