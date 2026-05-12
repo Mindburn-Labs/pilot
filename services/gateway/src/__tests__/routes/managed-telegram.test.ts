@@ -4,6 +4,7 @@ import {
   approvals,
   auditLog,
   evidenceItems,
+  managedTelegramBotLeads,
   managedTelegramBotMessages,
   managedTelegramBots,
   workspaceMembers,
@@ -40,6 +41,9 @@ type ManagedTelegramDraftBuilder = {
 type ManagedTelegramSupportCapturer = {
   captureSupportMessage(managedBotId: string, ctx: unknown): Promise<void>;
 };
+type ManagedTelegramLeadCapturer = {
+  captureLead(managedBotId: string, ctx: unknown): Promise<void>;
+};
 
 function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } = {}) {
   const inserts: Array<{ table: unknown; value: unknown }> = [];
@@ -48,6 +52,7 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
     workspace: Record<string, unknown>;
     membership: Record<string, unknown>;
     bot: Record<string, unknown>;
+    lead: Record<string, unknown> | null;
     message: Record<string, unknown>;
   } = {
     workspace: { id: 'ws-1', ownerId: 'user-1' },
@@ -74,6 +79,7 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
       updatedAt: new Date('2026-05-05T00:00:00Z'),
       disabledAt: null,
     },
+    lead: null,
     message: {
       id: 'msg-1',
       managedBotId: 'bot-1',
@@ -101,6 +107,7 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
   const resultForTable = (table: unknown) => {
     if (table === workspaces) return [state.workspace];
     if (table === workspaceMembers) return [state.membership];
+    if (table === managedTelegramBotLeads) return state.lead ? [state.lead] : [];
     if (table === managedTelegramBotMessages) return [state.message];
     if (table === managedTelegramBots) return [state.bot];
     return [];
@@ -116,6 +123,10 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
       state.message = { ...state.message, ...values };
       return [state.message];
     }
+    if (table === managedTelegramBotLeads) {
+      state.lead = { ...(state.lead ?? {}), ...values };
+      return [state.lead];
+    }
     return [];
   };
 
@@ -128,6 +139,15 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
         id: values['id'] ?? state.message['id'] ?? 'msg-1',
       };
       return [state.message];
+    }
+    if (table === managedTelegramBotLeads) {
+      state.lead = {
+        ...values,
+        id: values['id'] ?? 'lead-1',
+        createdAt: new Date('2026-05-05T00:00:00Z'),
+        updatedAt: new Date('2026-05-05T00:00:00Z'),
+      };
+      return [state.lead];
     }
     if (table === approvals) {
       return [
@@ -423,6 +443,127 @@ describe('managed Telegram service governance', () => {
         },
       },
     });
+  });
+
+  it('persists audit-linked evidence for managed Telegram lead capture', async () => {
+    const { db, state, inserts, updates } = makeManagedTelegramActionDb();
+    const service = new ManagedTelegramBotService({ db });
+    const ctx = {
+      from: { id: 777, username: 'founder_user', first_name: 'Founder' },
+      chat: { id: 888 },
+    };
+
+    await (service as unknown as ManagedTelegramLeadCapturer).captureLead('bot-1', ctx);
+
+    expect(state.lead).toMatchObject({
+      managedBotId: 'bot-1',
+      workspaceId: 'ws-1',
+      telegramUserId: '777',
+    });
+    const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+      id: string;
+      metadata: Record<string, unknown>;
+    };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      action: 'TELEGRAM_CHILD_LEAD_CAPTURED',
+      actor: 'managed_telegram_bot:bot-1',
+      target: state.lead?.['id'],
+      verdict: 'allow',
+    });
+    expect(JSON.stringify(auditInsert.metadata)).not.toContain('founder_user');
+    expect(JSON.stringify(auditInsert.metadata)).not.toContain('Founder');
+
+    const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value as {
+      auditEventId: string;
+      evidenceType: string;
+      metadata: Record<string, unknown>;
+      replayRef: string;
+    };
+    expect(evidenceInsert).toMatchObject({
+      auditEventId: auditInsert.id,
+      evidenceType: 'managed_telegram_lead_captured',
+      replayRef: `managed-telegram-lead:${state.lead?.['id']}:captured`,
+      metadata: expect.objectContaining({
+        rawTelegramIdentityStoredInEvidence: false,
+        existingLead: false,
+        credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+      }),
+    });
+    expect(updates.filter((update) => update.table === auditLog).at(-1)?.value).toMatchObject({
+      metadata: expect.objectContaining({ evidenceItemId: 'evidence-send-item' }),
+    });
+  });
+
+  it('persists audit-linked redacted evidence for managed Telegram support intake', async () => {
+    const { db, inserts, updates } = makeManagedTelegramActionDb();
+    const service = new ManagedTelegramBotService({ db });
+    const ctx = {
+      from: { id: 777, username: 'founder_user', first_name: 'Founder' },
+      chat: { id: 888 },
+      message: { message_id: 42, text: 'Can Pilot deploy this?' },
+      reply: vi.fn(async () => ({ message_id: 4242 })),
+    };
+
+    await (service as unknown as ManagedTelegramSupportCapturer).captureSupportMessage(
+      'bot-1',
+      ctx,
+    );
+
+    const auditInsert = inserts.find(
+      (insert) =>
+        insert.table === auditLog &&
+        (insert.value as { action?: string }).action ===
+          'TELEGRAM_CHILD_SUPPORT_MESSAGE_CAPTURED',
+    )?.value as { id: string; metadata: Record<string, unknown> };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      actor: 'managed_telegram_bot:bot-1',
+      verdict: 'allow',
+      metadata: expect.objectContaining({
+        rawInboundTextStoredInEvidence: false,
+        inboundTextHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+        inboundTextLength: 22,
+      }),
+    });
+    expect(JSON.stringify(auditInsert.metadata)).not.toContain('Can Pilot deploy this?');
+    expect(JSON.stringify(auditInsert.metadata)).not.toContain('founder_user');
+
+    const evidenceInsert = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_support_message_captured',
+    )?.value as { auditEventId: string; metadata: Record<string, unknown> };
+    expect(evidenceInsert).toMatchObject({
+      auditEventId: auditInsert.id,
+      metadata: expect.objectContaining({
+        rawInboundTextStoredInEvidence: false,
+        evidenceContract: 'managed_telegram_inbound_audit_before_response',
+      }),
+    });
+    expect(updates.filter((update) => update.table === auditLog).at(-1)?.value).toMatchObject({
+      metadata: expect.objectContaining({ evidenceItemId: 'evidence-send-item' }),
+    });
+    expect(ctx.reply).toHaveBeenCalledWith('Thanks. Your message reached the founder team.');
+  });
+
+  it('fails closed before acknowledging support intake when evidence persistence fails', async () => {
+    const { db, inserts } = makeManagedTelegramActionDb({ failEvidenceInsert: true });
+    const service = new ManagedTelegramBotService({ db });
+    const ctx = {
+      from: { id: 777, username: 'founder_user', first_name: 'Founder' },
+      chat: { id: 888 },
+      message: { message_id: 42, text: 'Can Pilot deploy this?' },
+      reply: vi.fn(async () => ({ message_id: 4242 })),
+    };
+
+    await expect(
+      (service as unknown as ManagedTelegramSupportCapturer).captureSupportMessage('bot-1', ctx),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(inserts.some((insert) => insert.table === approvals)).toBe(false);
   });
 
   it('fails closed for production support drafts without governed LLM metadata', async () => {
