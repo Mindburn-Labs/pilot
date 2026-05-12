@@ -88,6 +88,178 @@ function createTaskStatusDb(options: { failEvidence?: boolean; existingTask?: un
   return { db, inserts, updates };
 }
 
+function createTaskRunDispatchDb(options: { failEvidence?: boolean } = {}) {
+  const task = mockTask({
+    id: 'task-1',
+    workspaceId: VALID_UUID,
+    operatorId: 'operator-1',
+    title: 'Run task',
+    description: 'Existing task context',
+    status: 'pending',
+  });
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  let selectCount = 0;
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => {
+            selectCount++;
+            return selectCount === 1
+              ? [task]
+              : [{ ...task, status: 'completed', updatedAt: new Date('2026-05-05T10:05:00Z') }];
+          }),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('run evidence unavailable');
+              return [{ id: 'evidence-task-run-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates };
+}
+
+function createAutoRunDispatchDb(options: { failDispatchEvidence?: boolean } = {}) {
+  const created = mockTask({
+    id: 'task-1',
+    workspaceId: VALID_UUID,
+    title: 'Auto task',
+    description: 'Auto task context',
+    mode: 'discover',
+    status: 'pending',
+  });
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  let evidenceInsertCount = 0;
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => [created]),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === tasks) return [created];
+            if (table === evidenceItems) {
+              evidenceInsertCount++;
+              if (options.failDispatchEvidence && evidenceInsertCount === 2) {
+                throw new Error('dispatch evidence unavailable');
+              }
+              return [
+                {
+                  id:
+                    evidenceInsertCount === 1
+                      ? 'evidence-task-create-1'
+                      : 'evidence-task-run-1',
+                },
+              ];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => []),
+            then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+              Promise.resolve([]).then(resolve, reject),
+            catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+          })),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates };
+}
+
 function orderByColumnName(value: unknown): string | undefined {
   return (value as { queryChunks?: Array<{ name?: string }> })?.queryChunks?.[1]?.name;
 }
@@ -311,6 +483,45 @@ describe('taskRoutes', () => {
         expect.objectContaining({ taskId: 'task-1', workspaceId: VALID_UUID }),
       );
     });
+
+    it('fails autoRun before orchestrator dispatch when task run evidence cannot persist', async () => {
+      const { db, inserts, updates } = createAutoRunDispatchDb({ failDispatchEvidence: true });
+      const deps = createMockDeps({ db: db as never });
+      const { fetch } = testApp(taskRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/',
+        {
+          workspaceId: VALID_UUID,
+          title: 'Auto task',
+          description: 'Auto task context',
+          mode: 'discover',
+          autoRun: true,
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('Task run dispatch evidence persistence failed');
+      expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
+      expect(inserts.some((insert) => insert.table === tasks)).toBe(true);
+      expect(
+        inserts.some(
+          (insert) =>
+            insert.table === auditLog &&
+            (insert.value as { action?: string }).action === 'TASK_RUN_DISPATCHED',
+        ),
+      ).toBe(false);
+      expect(
+        inserts.some(
+          (insert) =>
+            insert.table === evidenceItems &&
+            (insert.value as { evidenceType?: string }).evidenceType === 'task_run_dispatched',
+        ),
+      ).toBe(false);
+      expect(updates.filter((update) => update.table === tasks)).toEqual([]);
+    });
   });
 
   describe('PUT /:id/status', () => {
@@ -392,6 +603,87 @@ describe('taskRoutes', () => {
       const json = await expectJson<{ error: string }>(res, 500);
 
       expect(json.error).toContain('Failed to update task status evidence');
+      expect(inserts).toEqual([]);
+      expect(updates).toEqual([]);
+    });
+  });
+
+  describe('POST /:id/run', () => {
+    it('writes audit-linked evidence before dispatching a task run', async () => {
+      const { db, inserts, updates } = createTaskRunDispatchDb();
+      const deps = createMockDeps({ db: db as never });
+      const { fetch } = testApp(taskRoutes, deps);
+      const res = await fetch(
+        'POST',
+        '/task-1/run',
+        { context: 'Manual run context', iterationBudget: 2 },
+        wsHeader,
+      );
+      const json = await expectJson<{ run: { status: string } }>(res, 200);
+
+      expect(json.run.status).toBe('completed');
+      expect(deps.orchestrator.runTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          taskId: 'task-1',
+          workspaceId: VALID_UUID,
+          operatorId: 'operator-1',
+          context: 'Manual run context',
+          iterationBudget: 2,
+        }),
+      );
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId: VALID_UUID,
+        action: 'TASK_RUN_DISPATCHED',
+        actor: 'user:user-1',
+        target: 'task-1',
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          evidenceType: 'task_run_dispatched',
+          taskId: 'task-1',
+          operatorId: 'operator-1',
+          trigger: 'manual',
+          previousStatus: 'pending',
+          iterationBudget: 2,
+          contextLength: 'Manual run context'.length,
+          evidenceContract: 'task_run_dispatch_evidence_required',
+        }),
+      });
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId: VALID_UUID,
+        taskId: 'task-1',
+        auditEventId: auditInsert.id,
+        evidenceType: 'task_run_dispatched',
+        sourceType: 'gateway_task_route',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        metadata: expect.objectContaining({
+          taskId: 'task-1',
+          trigger: 'manual',
+          contextLength: 'Manual run context'.length,
+        }),
+      });
+      expect(JSON.stringify(evidenceInsert)).not.toContain('Manual run context');
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-task-run-1',
+        }),
+      });
+      expect(updates.filter((update) => update.table === tasks)).toHaveLength(2);
+    });
+
+    it('fails closed before orchestrator dispatch when task run evidence cannot persist', async () => {
+      const { db, inserts, updates } = createTaskRunDispatchDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as never });
+      const { fetch } = testApp(taskRoutes, deps);
+      const res = await fetch('POST', '/task-1/run', { context: 'Manual run context' }, wsHeader);
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('Task run dispatch evidence persistence failed');
+      expect(deps.orchestrator.runTask).not.toHaveBeenCalled();
       expect(inserts).toEqual([]);
       expect(updates).toEqual([]);
     });
@@ -492,9 +784,7 @@ describe('taskRoutes', () => {
       const res = await fetch('GET', '/task-1/runs', undefined, wsHeader);
       const json = await expectJson<unknown[]>(res, 200);
 
-      expect(json).toEqual(
-        runs.map((run) => ({ ...run, startedAt: run.startedAt.toISOString() })),
-      );
+      expect(json).toEqual(runs.map((run) => ({ ...run, startedAt: run.startedAt.toISOString() })));
       expect(orderByCalls).toHaveLength(1);
       expect(orderByCalls[0]).toHaveLength(3);
       expect(orderByColumnName(orderByCalls[0]?.[0])).toBe('started_at');
