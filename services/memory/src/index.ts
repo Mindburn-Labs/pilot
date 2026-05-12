@@ -334,8 +334,11 @@ export class MemoryService {
    * Recompile the truth summary for a page from its timeline entries.
    * Uses LLM if available, otherwise concatenates recent entries.
    */
-  async recompileTruth(pageId: string): Promise<void> {
-    const [page] = await this.db.select().from(pages).where(eq(pages.id, pageId)).limit(1);
+  async recompileTruth(pageId: string, workspaceId?: string): Promise<void> {
+    const pageScope = workspaceId
+      ? and(eq(pages.id, pageId), eq(pages.workspaceId, workspaceId))
+      : eq(pages.id, pageId);
+    const [page] = await this.db.select().from(pages).where(pageScope).limit(1);
     if (!page) return;
 
     const entries = await this.db
@@ -379,7 +382,7 @@ export class MemoryService {
     await this.db
       .update(pages)
       .set({ compiledTruth, updatedAt: new Date() })
-      .where(eq(pages.id, pageId));
+      .where(pageScope);
   }
 
   // ─── Knowledge Graph: Links ───

@@ -12,6 +12,12 @@ vi.mock('@pilot/db/schema', () => ({
   auditLog: 'auditLog',
   opportunities: 'opportunities',
   opportunityScores: 'opportunityScores',
+  pages: {
+    id: 'pages.id',
+    workspaceId: 'pages.workspaceId',
+    type: 'pages.type',
+    title: 'pages.title',
+  },
   policyViolations: 'policyViolations',
   taskRuns: {
     id: 'taskRuns.id',
@@ -638,15 +644,123 @@ describe('registerJobHandlers', () => {
   });
 
   describe('knowledge.recompile', () => {
-    it('calls memory.recompileTruth', async () => {
+    it('persists workspace-scoped dispatch evidence before recompiling truth', async () => {
+      vi.mocked(appendEvidenceItem).mockClear();
+      const mockMemory = { recompileTruth: vi.fn(async () => {}) } as any;
+      mockDb.select = vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => [
+              {
+                id: 'page-1',
+                workspaceId: 'ws-1',
+                type: 'source',
+                title: 'YC batch notes',
+              },
+            ]),
+          })),
+        })),
+      }));
+
+      registerJobHandlers(mockBoss, { db: mockDb, memory: mockMemory });
+      const handler = handlers.get('knowledge.recompile')!;
+
+      await handler([
+        {
+          id: 'recompile-job-1',
+          data: {
+            pageId: 'page-1',
+            workspaceId: 'ws-1',
+            auditEventId: 'request-audit-1',
+            evidenceItemId: 'request-evidence-1',
+            replayRef: 'knowledge:ws-1:page:page-1:requested',
+          },
+        },
+      ]);
+
+      expect(mockMemory.recompileTruth).toHaveBeenCalledWith('page-1', 'ws-1');
+      expect(mockDb.transaction).toHaveBeenCalledOnce();
+      const auditInsert = mockDb._inserts
+        .map((entry: any) => entry.value)
+        .find((value: any) => value?.action === 'KNOWLEDGE_RECOMPILE_DISPATCHED');
+      expect(auditInsert).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'KNOWLEDGE_RECOMPILE_DISPATCHED',
+        actor: 'job:knowledge.recompile',
+        target: 'page-1',
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          pageId: 'page-1',
+          pageType: 'source',
+          pageTitle: 'YC batch notes',
+          jobId: 'recompile-job-1',
+          requestAuditEventId: 'request-audit-1',
+          requestEvidenceItemId: 'request-evidence-1',
+          requestReplayRef: 'knowledge:ws-1:page:page-1:requested',
+          evidenceContract: 'knowledge_recompile_dispatch_before_memory_mutation',
+          evidenceItemId: null,
+        }),
+      });
+      expect(appendEvidenceItem).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          workspaceId: 'ws-1',
+          auditEventId: auditInsert.id,
+          evidenceType: 'knowledge_recompile_dispatched',
+          sourceType: 'knowledge_recompile_worker',
+          replayRef: 'knowledge:ws-1:page:page-1:requested',
+          metadata: expect.objectContaining({
+            credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+          }),
+        }),
+      );
+      expect(mockDb._updates.at(-1)).toMatchObject({
+        table: 'auditLog',
+        value: {
+          metadata: expect.objectContaining({
+            evidenceItemId: 'evidence-item-1',
+          }),
+        },
+      });
+      expect(vi.mocked(appendEvidenceItem).mock.invocationCallOrder[0]).toBeLessThan(
+        mockMemory.recompileTruth.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('fails closed before recompilation without workspace scope', async () => {
       const mockMemory = { recompileTruth: vi.fn(async () => {}) } as any;
 
       registerJobHandlers(mockBoss, { db: mockDb, memory: mockMemory });
       const handler = handlers.get('knowledge.recompile')!;
 
-      await handler([{ data: { pageId: 'page-1' } }]);
+      await expect(handler([{ data: { pageId: 'page-1' } }])).rejects.toThrow(
+        'knowledge.recompile requires workspaceId for durable evidence',
+      );
 
-      expect(mockMemory.recompileTruth).toHaveBeenCalledWith('page-1');
+      expect(mockDb.select).not.toHaveBeenCalled();
+      expect(appendEvidenceItem).not.toHaveBeenCalled();
+      expect(mockMemory.recompileTruth).not.toHaveBeenCalled();
+    });
+
+    it('rejects cross-workspace page recompilation before memory mutation', async () => {
+      const mockMemory = { recompileTruth: vi.fn(async () => {}) } as any;
+      mockDb.select = vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => []),
+          })),
+        })),
+      }));
+
+      registerJobHandlers(mockBoss, { db: mockDb, memory: mockMemory });
+      const handler = handlers.get('knowledge.recompile')!;
+
+      await expect(
+        handler([{ data: { pageId: 'page-foreign', workspaceId: 'ws-1' } }]),
+      ).rejects.toThrow('knowledge.recompile page not found in workspace');
+
+      expect(appendEvidenceItem).not.toHaveBeenCalled();
+      expect(mockMemory.recompileTruth).not.toHaveBeenCalled();
     });
 
     it('skips when memory not available', async () => {

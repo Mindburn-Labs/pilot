@@ -7,6 +7,7 @@ import {
   auditLog,
   opportunityScores,
   opportunities,
+  pages,
   policyViolations,
   tasks,
   taskRuns,
@@ -54,7 +55,7 @@ export interface JobDeps {
   pipelineRunner?: (name: string, extraArgs: string[]) => Promise<PipelineRunResult>;
 }
 
-type OpportunityScorePersistenceDb = Pick<Db, 'insert' | 'update'>;
+type EvidencePersistenceDb = Pick<Db, 'insert' | 'update'>;
 
 interface PipelineRunResult {
   scriptPath: string;
@@ -72,6 +73,14 @@ type PipelineJobData = {
 
 type OpportunityScoreJobData = {
   opportunityId: string;
+  auditEventId?: string;
+  evidenceItemId?: string;
+  replayRef?: string;
+};
+
+type KnowledgeRecompileJobData = {
+  pageId: string;
+  workspaceId?: string;
   auditEventId?: string;
   evidenceItemId?: string;
   replayRef?: string;
@@ -206,7 +215,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   });
 
   async function appendOpportunityScoreGovernanceEvidence(input: {
-    db: OpportunityScorePersistenceDb;
+    db: EvidencePersistenceDb;
     opportunity: typeof opportunities.$inferSelect;
     result: ScoringResult;
     jobId?: string;
@@ -280,25 +289,122 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   }
 
   // ─── Knowledge Recompilation ───
-  boss.work('knowledge.recompile', async (jobs: PgBoss.Job<{ pageId: string }>[]) => {
+  boss.work('knowledge.recompile', async (jobs: PgBoss.Job<KnowledgeRecompileJobData>[]) => {
     for (const job of jobs) {
-      const { pageId } = job.data;
-      log.info({ pageId }, 'Recompiling knowledge page');
+      const { pageId, workspaceId } = job.data;
+      log.info({ pageId, workspaceId }, 'Recompiling knowledge page');
 
       if (!deps.memory) {
         log.warn('Memory service not available');
         continue;
       }
 
+      if (!workspaceId) {
+        throw new Error('knowledge.recompile requires workspaceId for durable evidence');
+      }
+
       try {
-        await deps.memory.recompileTruth(pageId);
-        log.info({ pageId }, 'Knowledge page recompiled');
+        const [page] = await deps.db
+          .select({
+            id: pages.id,
+            workspaceId: pages.workspaceId,
+            type: pages.type,
+            title: pages.title,
+          })
+          .from(pages)
+          .where(and(eq(pages.id, pageId), eq(pages.workspaceId, workspaceId)))
+          .limit(1);
+
+        if (!page) {
+          throw new Error('knowledge.recompile page not found in workspace');
+        }
+
+        await deps.db.transaction(async (tx) => {
+          await appendKnowledgeRecompileDispatchEvidence({
+            db: tx,
+            job,
+            page,
+          });
+        });
+
+        await deps.memory.recompileTruth(pageId, workspaceId);
+        log.info({ pageId, workspaceId }, 'Knowledge page recompiled');
       } catch (err) {
-        log.error({ err, pageId }, 'Failed to recompile knowledge page');
+        log.error({ err, pageId, workspaceId }, 'Failed to recompile knowledge page');
         throw err;
       }
     }
   });
+
+  async function appendKnowledgeRecompileDispatchEvidence(input: {
+    db: EvidencePersistenceDb;
+    job: PgBoss.Job<KnowledgeRecompileJobData>;
+    page: {
+      id: string;
+      workspaceId: string | null;
+      type: string;
+      title: string;
+    };
+  }): Promise<void> {
+    const workspaceId = input.page.workspaceId;
+    if (!workspaceId) {
+      throw new Error('knowledge.recompile page missing workspaceId');
+    }
+
+    const auditEventId = randomUUID();
+    const replayRef =
+      input.job.data.replayRef ??
+      `knowledge:${workspaceId}:page:${input.page.id}:recompile:${auditEventId}`;
+    const metadata = {
+      pageId: input.page.id,
+      pageType: input.page.type,
+      pageTitle: input.page.title,
+      jobId: input.job.id ?? null,
+      requestAuditEventId: input.job.data.auditEventId ?? null,
+      requestEvidenceItemId: input.job.data.evidenceItemId ?? null,
+      requestReplayRef: input.job.data.replayRef ?? null,
+      replayRef,
+      evidenceContract: 'knowledge_recompile_dispatch_before_memory_mutation',
+      credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+    };
+
+    await input.db.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId,
+      action: 'KNOWLEDGE_RECOMPILE_DISPATCHED',
+      actor: 'job:knowledge.recompile',
+      target: input.page.id,
+      verdict: 'allow',
+      metadata: {
+        ...metadata,
+        evidenceItemId: null,
+      },
+    });
+
+    const evidenceItemId = await appendEvidenceItem(input.db, {
+      workspaceId,
+      auditEventId,
+      evidenceType: 'knowledge_recompile_dispatched',
+      sourceType: 'knowledge_recompile_worker',
+      title: `Knowledge recompile dispatched: ${input.page.title}`,
+      summary: 'Workspace-scoped knowledge page recompilation was authorized for memory update.',
+      redactionState: 'redacted',
+      sensitivity: 'internal',
+      contentHash: `sha256:${hashJson(metadata)}`,
+      replayRef,
+      metadata,
+    });
+
+    await input.db
+      .update(auditLog)
+      .set({
+        metadata: {
+          ...metadata,
+          evidenceItemId,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
+  }
 
   // ─── Task Resume (after approval) ───
   boss.work(
