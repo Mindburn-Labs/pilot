@@ -1,12 +1,13 @@
 import PgBoss from 'pg-boss';
 import { createHash, randomUUID } from 'node:crypto';
 import { and, eq, isNull, lt } from 'drizzle-orm';
-import { appendEvidenceItem } from '@pilot/db';
+import { appendEvidenceItem, appendTenantDeletionReceipt } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
 import {
   auditLog,
   opportunityScores,
   opportunities,
+  policyViolations,
   tasks,
   taskRuns,
   workspaces,
@@ -765,11 +766,30 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
             ),
           )
           .limit(limit);
+        const hardDeletedAt = new Date();
+        for (const row of pending) {
+          await appendTenantDeletionReceipt(deps.db, {
+            workspaceId: row.workspaceId,
+            deletionId: row.id,
+            source: 'orchestrator_job',
+            actor: 'job:tenant.hard-delete-sweep',
+            reason: row.reason,
+            softDeletedAt: row.softDeletedAt,
+            hardDeleteAfter: row.hardDeleteAfter,
+            hardDeletedAt,
+            replayRef: `tenant-hard-delete:${row.workspaceId}:${row.id}:scheduled-job`,
+            metadata: {
+              trigger: 'scheduled_pg_boss_cleanup',
+              jobId: job.id,
+              limit,
+              retainedAfterWorkspaceDelete: true,
+              workspaceScopedLedgerRowsDeleted: true,
+            },
+          });
+        }
         let deleted = 0;
         for (const row of pending) {
-          // lint-tenancy: ok — scheduled platform cleanup is the only task
-          //   allowed to issue cross-tenant hard deletes.
-          await deps.db.delete(workspaces).where(eq(workspaces.id, row.workspaceId));
+          await hardDeleteWorkspaceRows(deps.db, row.workspaceId);
           deleted++;
         }
         if (deleted > 0) log.info({ deleted, pending: pending.length }, 'tenant hard-delete sweep');
@@ -854,6 +874,21 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   }
 
   log.info('Background job handlers registered');
+}
+
+async function hardDeleteWorkspaceRows(db: Db, workspaceId: string): Promise<void> {
+  // These workspace-scoped tables intentionally do not cascade in the
+  // original schema. A retained tenant_deletion_receipts row is persisted
+  // before this point so the hard-delete proof survives the tenant teardown.
+  // lint-tenancy: ok — scheduled platform cleanup after retained receipt.
+  await db.delete(auditLog).where(eq(auditLog.workspaceId, workspaceId));
+  // lint-tenancy: ok — scheduled platform cleanup after retained receipt.
+  await db.delete(policyViolations).where(eq(policyViolations.workspaceId, workspaceId));
+  // lint-tenancy: ok — scheduled platform cleanup after retained receipt.
+  await db.delete(opportunities).where(eq(opportunities.workspaceId, workspaceId));
+  // lint-tenancy: ok — scheduled platform cleanup is the only task allowed
+  //   to issue cross-tenant hard deletes.
+  await db.delete(workspaces).where(eq(workspaces.id, workspaceId));
 }
 
 function sanitizePipelineArgs(args: string[]): string[] {

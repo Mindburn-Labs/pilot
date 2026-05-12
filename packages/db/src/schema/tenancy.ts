@@ -1,4 +1,14 @@
-import { pgTable, uuid, text, integer, timestamp, doublePrecision, primaryKey, index } from 'drizzle-orm/pg-core';
+import {
+  pgTable,
+  uuid,
+  text,
+  integer,
+  timestamp,
+  doublePrecision,
+  primaryKey,
+  index,
+  jsonb,
+} from 'drizzle-orm/pg-core';
 import { workspaces } from './workspace.js';
 
 // ─── Tenancy Domain ───
@@ -35,9 +45,7 @@ export const tenantSecrets = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    index('tenant_secrets_workspace_idx').on(table.workspaceId),
-  ],
+  (table) => [index('tenant_secrets_workspace_idx').on(table.workspaceId)],
 );
 
 // ─── Rate-limit buckets (Phase 2c) ────────────────────────────────────────
@@ -95,7 +103,31 @@ export const workspaceDeletions = pgTable(
     hardDeleteAfter: timestamp('hard_delete_after', { withTimezone: true }).notNull(),
     hardDeletedAt: timestamp('hard_deleted_at', { withTimezone: true }),
   },
+  (t) => [index('workspace_deletions_hard_idx').on(t.hardDeleteAfter, t.hardDeletedAt)],
+);
+
+// Retained hard-delete receipts deliberately do not reference `workspaces`.
+// They must survive the cascading tenant delete while avoiding retained
+// workspace data beyond the minimum redacted proof needed for audit.
+export const tenantDeletionReceipts = pgTable(
+  'tenant_deletion_receipts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    workspaceId: uuid('workspace_id').notNull(),
+    deletionId: uuid('deletion_id'),
+    workspaceName: text('workspace_name'),
+    source: text('source').notNull(),
+    actor: text('actor').notNull(),
+    reason: text('reason'),
+    softDeletedAt: timestamp('soft_deleted_at', { withTimezone: true }),
+    hardDeleteAfter: timestamp('hard_delete_after', { withTimezone: true }),
+    hardDeletedAt: timestamp('hard_deleted_at', { withTimezone: true }).notNull().defaultNow(),
+    replayRef: text('replay_ref').notNull(),
+    metadata: jsonb('metadata').notNull().default({}),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
   (t) => [
-    index('workspace_deletions_hard_idx').on(t.hardDeleteAfter, t.hardDeletedAt),
+    index('tenant_deletion_receipts_workspace_idx').on(t.workspaceId),
+    index('tenant_deletion_receipts_created_idx').on(t.createdAt),
   ],
 );

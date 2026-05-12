@@ -1,16 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { appendEvidenceItem } from '@pilot/db';
+import { appendEvidenceItem, appendTenantDeletionReceipt } from '@pilot/db';
 import { auditLog, tasks, taskRuns } from '@pilot/db/schema';
 import { registerJobHandlers } from '../jobs.js';
 
 vi.mock('@pilot/db', () => ({
   appendEvidenceItem: vi.fn(async () => 'evidence-item-1'),
+  appendTenantDeletionReceipt: vi.fn(async () => 'tenant-delete-receipt-1'),
 }));
 
 vi.mock('@pilot/db/schema', () => ({
   auditLog: 'auditLog',
   opportunities: 'opportunities',
   opportunityScores: 'opportunityScores',
+  policyViolations: 'policyViolations',
   taskRuns: {
     id: 'taskRuns.id',
     taskId: 'taskRuns.taskId',
@@ -71,6 +73,7 @@ function restoreEnv(name: keyof typeof originalEnv) {
 function freshMockDb() {
   const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
   const updates: Array<{ table: unknown; value: unknown }> = [];
+  const deletes: Array<{ table: unknown }> = [];
   const db: any = {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
@@ -99,9 +102,16 @@ function freshMockDb() {
         }),
       })),
     })),
+    delete: vi.fn((table: unknown) => ({
+      where: vi.fn(() => {
+        deletes.push({ table });
+        return Promise.resolve();
+      }),
+    })),
     transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(db)),
     _inserts: inserts,
     _updates: updates,
+    _deletes: deletes,
   };
   return db;
 }
@@ -137,6 +147,7 @@ describe('registerJobHandlers', () => {
     expect(registeredNames).toContain('tasks.reap_stuck');
     expect(registeredNames).toContain('pipeline.yc-scrape');
     expect(registeredNames).toContain('pipeline.ingest-knowledge');
+    expect(registeredNames).toContain('tenant.hard-delete-sweep');
 
     // Schedule called for yc-scrape
     expect(mockBoss.schedule).toHaveBeenCalledWith(
@@ -145,6 +156,75 @@ describe('registerJobHandlers', () => {
       expect.anything(),
       expect.anything(),
     );
+  });
+
+  describe('tenant.hard-delete-sweep', () => {
+    const pendingDeletion = {
+      id: '00000000-0000-4000-8000-000000000201',
+      workspaceId: '00000000-0000-4000-8000-000000000101',
+      reason: 'expired test tenant',
+      softDeletedAt: new Date('2026-05-01T00:00:00Z'),
+      hardDeleteAfter: new Date('2026-05-02T00:00:00Z'),
+    };
+
+    function mockPendingTenantDeletion() {
+      mockDb.select = vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(() => ({
+              then: (resolve: (value: unknown[]) => void) => resolve([pendingDeletion]),
+            })),
+          })),
+        })),
+      }));
+    }
+
+    it('persists retained receipts before deleting tenant rows', async () => {
+      mockPendingTenantDeletion();
+      registerJobHandlers(mockBoss, { db: mockDb });
+      const handler = handlers.get('tenant.hard-delete-sweep')!;
+
+      await handler([{ id: 'hard-delete-job-1', data: { limit: 1 } }]);
+
+      expect(appendTenantDeletionReceipt).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          workspaceId: pendingDeletion.workspaceId,
+          deletionId: pendingDeletion.id,
+          source: 'orchestrator_job',
+          actor: 'job:tenant.hard-delete-sweep',
+          reason: pendingDeletion.reason,
+          replayRef: `tenant-hard-delete:${pendingDeletion.workspaceId}:${pendingDeletion.id}:scheduled-job`,
+          metadata: expect.objectContaining({
+            trigger: 'scheduled_pg_boss_cleanup',
+            jobId: 'hard-delete-job-1',
+            retainedAfterWorkspaceDelete: true,
+            workspaceScopedLedgerRowsDeleted: true,
+          }),
+        }),
+      );
+      expect(mockDb._deletes.map((entry: { table: unknown }) => entry.table)).toEqual([
+        auditLog,
+        'policyViolations',
+        'opportunities',
+        { id: 'workspaces.id' },
+      ]);
+    });
+
+    it('does not delete tenant rows when retained receipt persistence fails', async () => {
+      mockPendingTenantDeletion();
+      vi.mocked(appendTenantDeletionReceipt).mockRejectedValueOnce(
+        new Error('receipt unavailable'),
+      );
+      registerJobHandlers(mockBoss, { db: mockDb });
+      const handler = handlers.get('tenant.hard-delete-sweep')!;
+
+      await expect(handler([{ id: 'hard-delete-job-1', data: { limit: 1 } }])).rejects.toThrow(
+        'receipt unavailable',
+      );
+
+      expect(mockDb._deletes).toEqual([]);
+    });
   });
 
   describe('opportunity.score', () => {

@@ -24,6 +24,7 @@ import {
   missions,
   missionTasks,
   opportunityScores,
+  tenantDeletionReceipts,
   taskRuns,
   ventures,
 } from '../schema/index.js';
@@ -84,6 +85,17 @@ describe('Gate 7 computer operation schema', () => {
     expect(computerActions.helmDocumentVersionPins.name).toBe('helm_document_version_pins');
     expect(computerActions.evidencePackId.name).toBe('evidence_pack_id');
     expect(computerActions.replayIndex.name).toBe('replay_index');
+  });
+});
+
+describe('retained tenant hard-delete receipt schema', () => {
+  it('exports non-cascading deletion receipt fields', () => {
+    expect(tenantDeletionReceipts.workspaceId.name).toBe('workspace_id');
+    expect(tenantDeletionReceipts.deletionId.name).toBe('deletion_id');
+    expect(tenantDeletionReceipts.source.name).toBe('source');
+    expect(tenantDeletionReceipts.actor.name).toBe('actor');
+    expect(tenantDeletionReceipts.replayRef.name).toBe('replay_ref');
+    expect(tenantDeletionReceipts.metadata.name).toBe('metadata');
   });
 });
 

@@ -2,6 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   auditLog,
   evidenceItems,
+  opportunities,
+  policyViolations,
+  tenantDeletionReceipts,
   workspaceDeletions,
   workspaceMembers,
   workspaceSettings,
@@ -90,7 +93,12 @@ function createTenantCreationDb(options: { failEvidence?: boolean; ownerExists?:
 }
 
 function createTenantLifecycleDb(
-  options: { failEvidence?: boolean; selectResults?: unknown[][]; restoreRows?: unknown[] } = {},
+  options: {
+    failEvidence?: boolean;
+    failHardDeleteReceipt?: boolean;
+    selectResults?: unknown[][];
+    restoreRows?: unknown[];
+  } = {},
 ) {
   const inserts: Array<{ table: unknown; value: unknown }> = [];
   const updates: Array<{ table: unknown; value: unknown }> = [];
@@ -115,12 +123,26 @@ function createTenantLifecycleDb(
     })),
     insert: vi.fn((table: unknown) => ({
       values: vi.fn((value: unknown) => {
+        const isHardDeleteReceipt =
+          typeof value === 'object' &&
+          value !== null &&
+          'replayRef' in value &&
+          String((value as { replayRef?: unknown }).replayRef).startsWith('tenant-hard-delete:');
+        if (isHardDeleteReceipt && options.failHardDeleteReceipt) {
+          throw new Error('receipt unavailable');
+        }
         insertSink.push({ table, value });
         return {
           returning: vi.fn(async () => {
+            if (isHardDeleteReceipt) {
+              return [{ id: 'tenant-delete-receipt-1' }];
+            }
             if (table === evidenceItems) {
               if (options.failEvidence) throw new Error('evidence unavailable');
               return [{ id: 'evidence-admin-lifecycle-1' }];
+            }
+            if (table === tenantDeletionReceipts) {
+              return [{ id: 'tenant-delete-receipt-1' }];
             }
             return [];
           }),
@@ -522,8 +544,12 @@ describe('adminRoutes', () => {
 
       const { fetch } = testApp(adminRoutes, deps);
       const res = await fetch('POST', '/tenants/cleanup', undefined, authHeader());
-      const body = await expectJson<{ hardDeleted: number; remaining: number }>(res, 200);
-      expect(body).toEqual({ hardDeleted: 0, remaining: 0 });
+      const body = await expectJson<{
+        hardDeleted: number;
+        remaining: number;
+        receiptIds: string[];
+      }>(res, 200);
+      expect(body).toEqual({ hardDeleted: 0, remaining: 0, receiptIds: [] });
     });
 
     it('clamps the limit to the [1, 500] range', async () => {
@@ -534,6 +560,83 @@ describe('adminRoutes', () => {
       // Absurd limit should still return ok — the clamp protects the DB.
       const res = await fetch('POST', '/tenants/cleanup?limit=99999', undefined, authHeader());
       await expectJson(res, 200);
+    });
+
+    it('writes retained receipts before hard-deleting tenant rows', async () => {
+      const { db, inserts, deletes } = createTenantLifecycleDb({
+        selectResults: [
+          [
+            {
+              id: '00000000-0000-4000-8000-000000000201',
+              workspaceId: tenantWorkspaceId,
+              reason: 'expired test tenant',
+              softDeletedAt: new Date('2026-05-01T00:00:00Z'),
+              hardDeleteAfter: new Date('2026-05-02T00:00:00Z'),
+            },
+          ],
+        ],
+      });
+      const deps = createMockDeps({ db: db as never });
+
+      const { fetch } = testApp(adminRoutes, deps);
+      const res = await fetch('POST', '/tenants/cleanup', undefined, authHeader());
+      const body = await expectJson<{
+        hardDeleted: number;
+        remaining: number;
+        receiptIds: string[];
+      }>(res, 200);
+
+      expect(body).toEqual({
+        hardDeleted: 1,
+        remaining: 0,
+        receiptIds: ['tenant-delete-receipt-1'],
+      });
+      expect(inserts.map((insert) => insert.table)).toEqual([tenantDeletionReceipts]);
+      expect(inserts[0]?.value).toMatchObject({
+        workspaceId: tenantWorkspaceId,
+        deletionId: '00000000-0000-4000-8000-000000000201',
+        source: 'gateway_admin',
+        actor: 'platform-admin',
+        reason: 'expired test tenant',
+        replayRef: `tenant-hard-delete:${tenantWorkspaceId}:00000000-0000-4000-8000-000000000201:gateway-admin`,
+        metadata: {
+          trigger: 'manual_admin_cleanup',
+          retainedAfterWorkspaceDelete: true,
+          workspaceScopedLedgerRowsDeleted: true,
+        },
+      });
+      expect(deletes.map((entry) => entry.table)).toEqual([
+        auditLog,
+        policyViolations,
+        opportunities,
+        workspaces,
+      ]);
+    });
+
+    it('fails closed without deleting tenant rows when retained receipt persistence fails', async () => {
+      const { db, inserts, deletes } = createTenantLifecycleDb({
+        failHardDeleteReceipt: true,
+        selectResults: [
+          [
+            {
+              id: '00000000-0000-4000-8000-000000000201',
+              workspaceId: tenantWorkspaceId,
+              reason: 'expired test tenant',
+              softDeletedAt: new Date('2026-05-01T00:00:00Z'),
+              hardDeleteAfter: new Date('2026-05-02T00:00:00Z'),
+            },
+          ],
+        ],
+      });
+      const deps = createMockDeps({ db: db as never });
+
+      const { fetch } = testApp(adminRoutes, deps);
+      const res = await fetch('POST', '/tenants/cleanup', undefined, authHeader());
+      const body = await expectJson<{ error: string }>(res, 500);
+
+      expect(body.error).toBe('failed to persist tenant hard-delete receipt');
+      expect(inserts).toEqual([]);
+      expect(deletes).toEqual([]);
     });
   });
 });
