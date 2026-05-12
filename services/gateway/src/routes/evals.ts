@@ -446,7 +446,7 @@ export function evalRoutes(deps: GatewayDeps) {
     return c.json({
       workspaceId,
       productionReadyPromotionRule:
-        'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, and completedAt.',
+        'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, completedAt, and metadata.executionMode=real_external_eval.',
       scenarios: getPilotProductionEvalSuite(),
     });
   });

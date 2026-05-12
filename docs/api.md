@@ -548,11 +548,11 @@ List durable eval run records for the authenticated workspace. Requires at least
 
 ### POST /api/evals/runs
 
-Record a durable eval run with status, optional capability key, evidence references, audit receipt references, optional run reference, step metadata, failure reason, summary, and completion metadata. Requires at least the workspace `partner` role. When `capabilityKey` is omitted, the eval run is scenario-wide and may satisfy every capability mapped to that eval scenario, subject to each capability's full eval requirements. Failed runs create blocker tasks. Passed runs may create `capability_promotions` eligibility rows, but the route does not mutate the shared capability registry or mark anything `production_ready`.
+Record a durable eval run with status, optional capability key, evidence references, audit receipt references, optional run reference, step metadata, failure reason, summary, and completion metadata. Requires at least the workspace `partner` role. When `capabilityKey` is omitted, the eval run is scenario-wide and may satisfy every capability mapped to that eval scenario, subject to each capability's full eval requirements. Failed runs create blocker tasks. Passed runs may create `capability_promotions` eligibility rows only when `metadata.executionMode = "real_external_eval"` and all required evals for the capability have passed, but the route does not mutate the shared capability registry or mark anything `production_ready`.
 
 ### POST /api/evals/execute
 
-Run a narrow control-plane production eval proof check for one registered eval scenario. Requires at least the workspace `partner` role. The executor validates scenario evidence/audit coverage, writes a durable eval run/result pack, creates blocker tasks when proof is missing, and writes promotion eligibility only when the proof check passes. This is not a full external-world eval runner yet.
+Run a narrow control-plane production eval proof check for one registered eval scenario. Requires at least the workspace `partner` role. The executor validates scenario evidence/audit coverage, writes a durable eval run/result pack, and creates blocker tasks when proof is missing. It does not write promotion eligibility because promotion requires a separately recorded passed `real_external_eval` run. This is not a full external-world eval runner yet.
 
 ### POST /api/evals/promotion-check
 

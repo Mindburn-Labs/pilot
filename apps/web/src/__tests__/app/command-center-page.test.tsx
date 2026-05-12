@@ -386,7 +386,7 @@ describe('CommandCenterPage', () => {
               evalRequirement: 'Command Center Real-State UX Eval',
             },
             promotionRule:
-              'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, and completedAt; command-center eval status never mutates the registry.',
+              'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, completedAt, and metadata.executionMode=real_external_eval; command-center eval status never mutates the registry.',
             evals: {
               scenarios: [
                 {

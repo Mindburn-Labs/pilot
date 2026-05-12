@@ -7,10 +7,12 @@ import {
   getPilotProductionEvalSuite,
   getRequiredEvalForCapability,
   getRequiredEvalsForCapability,
+  PRODUCTION_READY_EXECUTION_MODE,
   RecordPilotEvalRunInputSchema,
 } from '../eval/index.js';
 
 const workspaceId = '00000000-0000-4000-8000-000000000001';
+const realExternalMetadata = { executionMode: PRODUCTION_READY_EXECUTION_MODE };
 
 describe('production eval suite', () => {
   it('defines the required production autonomy evals with evidence and audit requirements', () => {
@@ -92,7 +94,7 @@ describe('production eval suite', () => {
           capabilityKey: 'startup_lifecycle',
           evidenceRefs: [],
           auditReceiptRefs: ['audit:1'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:00.000Z',
         },
       ],
@@ -110,7 +112,7 @@ describe('production eval suite', () => {
           capabilityKey: 'startup_lifecycle',
           evidenceRefs: ['evidence:startup-launch'],
           auditReceiptRefs: ['audit:startup-launch'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:00.000Z',
         },
       ],
@@ -118,6 +120,30 @@ describe('production eval suite', () => {
 
     expect(passed.canPromote).toBe(true);
     expect(passed.matchedEvalId).toBe('full_startup_launch');
+  });
+
+  it('blocks promotion from control-plane proof checks even with evidence and audit receipts', () => {
+    const capability = getCapabilityRecord('startup_lifecycle');
+    if (!capability) throw new Error('startup_lifecycle capability missing');
+
+    const check = checkCapabilityPromotionReadiness({
+      capability,
+      runs: [
+        {
+          evalId: 'full_startup_launch',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: 'startup_lifecycle',
+          evidenceRefs: ['evidence:startup-launch'],
+          auditReceiptRefs: ['audit:startup-launch'],
+          metadata: { executionMode: 'control_plane_proof_check' },
+          completedAt: '2026-05-05T00:00:00.000Z',
+        },
+      ],
+    });
+
+    expect(check.canPromote).toBe(false);
+    expect(check.blockers.join(' ')).toContain(`executionMode ${PRODUCTION_READY_EXECUTION_MODE}`);
   });
 
   it('treats capability-less eval runs as scenario-wide proof for covered capabilities', () => {
@@ -133,7 +159,7 @@ describe('production eval suite', () => {
           status: 'passed',
           evidenceRefs: ['evidence:startup-launch'],
           auditReceiptRefs: ['audit:startup-launch'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:00.000Z',
         },
       ],
@@ -157,7 +183,7 @@ describe('production eval suite', () => {
           capabilityKey: 'evidence_ledger',
           evidenceRefs: ['evidence:helm'],
           auditReceiptRefs: ['audit:helm'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:00.000Z',
         },
       ],
@@ -177,7 +203,7 @@ describe('production eval suite', () => {
           capabilityKey: 'evidence_ledger',
           evidenceRefs: ['evidence:helm'],
           auditReceiptRefs: ['audit:helm'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:00.000Z',
         },
         {
@@ -187,7 +213,7 @@ describe('production eval suite', () => {
           capabilityKey: 'evidence_ledger',
           evidenceRefs: ['evidence:recovery'],
           auditReceiptRefs: ['audit:recovery'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:01.000Z',
         },
       ],
@@ -213,7 +239,7 @@ describe('production eval suite', () => {
           capabilityKey: 'mission_runtime',
           evidenceRefs: ['evidence:startup-launch'],
           auditReceiptRefs: ['audit:startup-launch'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:00:00.000Z',
         },
       ],
@@ -225,6 +251,30 @@ describe('production eval suite', () => {
       'Multi-Agent Parallel Build Eval',
     ]);
     expect(check.blockers.join(' ')).toContain('Multi-Agent Parallel Build Eval');
+  });
+
+  it('blocks production promotion from control-plane proof checks even when proof is complete', () => {
+    const capability = getCapabilityRecord('helm_receipts');
+    if (!capability) throw new Error('helm_receipts capability missing');
+
+    const check = checkCapabilityPromotionReadiness({
+      capability,
+      runs: [
+        {
+          evalId: 'helm_governance',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: 'helm_receipts',
+          evidenceRefs: ['evidence:helm'],
+          auditReceiptRefs: ['audit:helm'],
+          metadata: { executionMode: 'control_plane_proof_check' },
+          completedAt: '2026-05-05T00:00:00.000Z',
+        },
+      ],
+    });
+
+    expect(check.canPromote).toBe(false);
+    expect(check.blockers.join(' ')).toContain('executionMode real_external_eval');
   });
 
   it('validates recordable eval runs before promotion checks can use them', () => {

@@ -10,13 +10,18 @@ import {
   evaluations,
   tasks,
 } from '@pilot/db/schema';
-import { getRequiredEvalForCapability, getRequiredEvalsForCapability } from '@pilot/shared/eval';
+import {
+  getRequiredEvalForCapability,
+  getRequiredEvalsForCapability,
+  PRODUCTION_READY_EXECUTION_MODE,
+} from '@pilot/shared/eval';
 import { evalRoutes } from '../../routes/evals.js';
 import { createMockDeps, expectJson, testApp } from '../helpers.js';
 
 const workspaceId = '00000000-0000-4000-8000-000000000001';
 const foreignWorkspaceId = '00000000-0000-4000-8000-000000000099';
 const wsHeader = { 'X-Workspace-Id': workspaceId };
+const realExternalMetadata = { executionMode: PRODUCTION_READY_EXECUTION_MODE };
 
 function createEvalDb(
   selectResults: unknown[][] = [],
@@ -353,6 +358,7 @@ describe('evalRoutes', () => {
         capabilityKey: 'helm_receipts',
         evidenceRefs: ['evidence:helm-governance'],
         auditReceiptRefs: ['audit:helm-governance'],
+        metadata: realExternalMetadata,
         steps: [
           {
             stepKey: 'restricted-action-denial',
@@ -488,6 +494,7 @@ describe('evalRoutes', () => {
         status: 'passed',
         evidenceRefs: ['evidence:startup-launch'],
         auditReceiptRefs: ['audit:startup-launch'],
+        metadata: realExternalMetadata,
         completedAt: '2026-05-05T00:00:00.000Z',
       },
       wsHeader,
@@ -582,7 +589,7 @@ describe('evalRoutes', () => {
           capabilityKey: 'evidence_ledger',
           evidenceRefs: ['evidence:helm'],
           auditReceiptRefs: ['audit:helm'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
       ],
@@ -598,6 +605,7 @@ describe('evalRoutes', () => {
         capabilityKey: 'evidence_ledger',
         evidenceRefs: ['evidence:recovery'],
         auditReceiptRefs: ['audit:recovery'],
+        metadata: realExternalMetadata,
         completedAt: '2026-05-05T00:00:01.000Z',
       },
       wsHeader,
@@ -671,7 +679,7 @@ describe('evalRoutes', () => {
     });
   });
 
-  it('executes a production eval proof check and writes eligibility only when coverage is complete', async () => {
+  it('executes a control-plane proof check without writing promotion eligibility', async () => {
     const scenario = getRequiredEvalForCapability('helm_receipts');
     if (!scenario) throw new Error('helm_receipts eval missing');
     const { db, inserts } = createEvalDb();
@@ -694,20 +702,20 @@ describe('evalRoutes', () => {
     const body = await expectJson<{
       executionBlockers: string[];
       result: { passed: boolean };
+      promotionChecks: Array<{ canPromote: boolean; blockers: string[] }>;
       promotions: Array<{ capabilityKey: string; promotedState: string; status: string }>;
       productionReadyRegistryMutation: boolean;
     }>(res, 201);
 
     expect(body.executionBlockers).toEqual([]);
     expect(body.result.passed).toBe(true);
-    expect(body.promotions).toEqual([
-      expect.objectContaining({
-        capabilityKey: 'helm_receipts',
-        promotedState: 'production_ready',
-        status: 'eligible',
-      }),
-    ]);
+    expect(body.promotionChecks[0]?.canPromote).toBe(false);
+    expect(body.promotionChecks[0]?.blockers.join(' ')).toContain(
+      'executionMode real_external_eval',
+    );
+    expect(body.promotions).toEqual([]);
     expect(body.productionReadyRegistryMutation).toBe(false);
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
     expect(inserts.find((insert) => insert.table === evalEvidenceLinks)?.value).toEqual([
       expect.objectContaining({
         evidenceRef: 'evidence:helm-governance',
@@ -759,17 +767,15 @@ describe('evalRoutes', () => {
         capability: expect.objectContaining({ key: 'mission_runtime' }),
       }),
       expect.objectContaining({
-        canPromote: true,
+        canPromote: false,
         capability: expect.objectContaining({ key: 'startup_lifecycle' }),
       }),
     ]);
-    expect(body.promotions).toEqual([
-      expect.objectContaining({
-        capabilityKey: 'startup_lifecycle',
-        promotedState: 'production_ready',
-        status: 'eligible',
-      }),
-    ]);
+    expect(body.promotionChecks[1]?.blockers.join(' ')).toContain(
+      'executionMode real_external_eval',
+    );
+    expect(body.promotions).toEqual([]);
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
     expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
       evalId: 'full_startup_launch',
       status: 'passed',
@@ -862,7 +868,7 @@ describe('evalRoutes', () => {
           capabilityKey: 'startup_lifecycle',
           evidenceRefs: ['evidence:startup-launch'],
           auditReceiptRefs: ['audit:startup-launch'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
       ],
@@ -901,7 +907,10 @@ describe('evalRoutes', () => {
           capabilityKey: null,
           evidenceRefs: ['evidence:startup-launch'],
           auditReceiptRefs: ['audit:startup-launch'],
-          metadata: { capabilityKeys: ['mission_runtime', 'startup_lifecycle'] },
+          metadata: {
+            ...realExternalMetadata,
+            capabilityKeys: ['mission_runtime', 'startup_lifecycle'],
+          },
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
       ],
@@ -944,7 +953,7 @@ describe('evalRoutes', () => {
           capabilityKey: 'evidence_ledger',
           evidenceRefs: ['evidence:helm'],
           auditReceiptRefs: ['audit:helm'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
       ],
@@ -977,7 +986,7 @@ describe('evalRoutes', () => {
           capabilityKey: 'evidence_ledger',
           evidenceRefs: ['evidence:helm'],
           auditReceiptRefs: ['audit:helm'],
-          metadata: {},
+          metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
       ],
@@ -996,7 +1005,7 @@ describe('evalRoutes', () => {
             capabilityKey: 'evidence_ledger',
             evidenceRefs: ['evidence:recovery'],
             auditReceiptRefs: ['audit:recovery'],
-            metadata: {},
+            metadata: realExternalMetadata,
             completedAt: '2026-05-05T00:00:01.000Z',
           },
         ],

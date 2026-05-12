@@ -218,6 +218,8 @@ export type CapabilityEvalReadinessInventory = z.infer<
   typeof CapabilityEvalReadinessInventorySchema
 >;
 
+export const PRODUCTION_READY_EXECUTION_MODE: PilotEvalExecutionMode = 'real_external_eval';
+
 export const pilotProductionEvalSuite: readonly PilotEvalScenario[] = [
   {
     id: 'full_startup_launch',
@@ -677,6 +679,11 @@ export function checkCapabilityPromotionReadiness(params: {
     if (matchingRun.status !== 'passed') {
       blockers.push(`${requiredEval.name} run status is ${matchingRun.status}, not passed`);
     }
+    if (matchingRun.metadata['executionMode'] !== PRODUCTION_READY_EXECUTION_MODE) {
+      blockers.push(
+        `${requiredEval.name} passing run must use executionMode ${PRODUCTION_READY_EXECUTION_MODE}`,
+      );
+    }
     if (matchingRun.evidenceRefs.length === 0) {
       blockers.push(
         `${requiredEval.name} passing run must include at least one evidence reference`,
@@ -718,7 +725,7 @@ function isPassingRealExternalEval(run: PilotEvalRunRecord): boolean {
     run.evidenceRefs.length > 0 &&
     run.auditReceiptRefs.length > 0 &&
     Boolean(run.completedAt) &&
-    run.metadata['executionMode'] === 'real_external_eval'
+    run.metadata['executionMode'] === PRODUCTION_READY_EXECUTION_MODE
   );
 }
 
