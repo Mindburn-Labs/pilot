@@ -375,6 +375,268 @@ describe('a2aRoutes', () => {
     expect(body.error.code).toBe(-32004);
   });
 
+  it('tasks/cancel writes audit-linked evidence and cancels the durable thread', async () => {
+    const deps = createMockDeps();
+    const updates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+    const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+    let selectCount = 0;
+    deps.db.select = vi.fn(() => {
+      selectCount++;
+      if (selectCount === 1) {
+        return {
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn(async () => [
+                {
+                  id: 'thread-1',
+                  workspaceId: WS_ID,
+                  externalTaskId: 'durable-task-1',
+                  pilotTaskId: 'task-row-1',
+                  status: 'working',
+                  createdAt: new Date('2026-05-05T10:00:00.000Z'),
+                  updatedAt: new Date('2026-05-05T10:00:01.000Z'),
+                  completedAt: null,
+                },
+              ]),
+            })),
+          })),
+        };
+      }
+      return {
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            orderBy: vi.fn(async () => [
+              {
+                role: 'user',
+                parts: [{ type: 'text', text: 'Find AI opportunities' }],
+                sequence: 1,
+              },
+            ]),
+          })),
+        })),
+      };
+    }) as unknown as typeof deps.db.select;
+    deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedUpdates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const stagedInserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const tx = {
+        ...deps.db,
+        insert: vi.fn((table: unknown) => ({
+          values: vi.fn((value: Record<string, unknown>) => {
+            stagedInserts.push({ table, value });
+            return {};
+          }),
+        })),
+        update: vi.fn((table: unknown) => ({
+          set: vi.fn((value: Record<string, unknown>) => {
+            stagedUpdates.push({ table, value });
+            return {
+              where: vi.fn(() => ({
+                returning: vi.fn(async () => [{ pilotTaskId: 'task-row-1' }]),
+              })),
+            };
+          }),
+        })),
+      };
+      const result = await callback(tx);
+      updates.push(...stagedUpdates);
+      inserts.push(...stagedInserts);
+      return result;
+    }) as typeof deps.db.transaction;
+
+    const { fetch } = testApp(a2aRoutes, deps);
+    const res = await fetch(
+      'POST',
+      '/a2a',
+      { jsonrpc: '2.0', id: 3, method: 'tasks/cancel', params: { id: 'durable-task-1' } },
+      { authorization: `Bearer ${BEARER}` },
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      result: { task: { id: string; status: { state: string } } };
+    };
+    expect(body.result.task.id).toBe('durable-task-1');
+    expect(body.result.task.status.state).toBe('canceled');
+    expect(updates.find((update) => update.table === a2aThreads)?.value).toMatchObject({
+      status: 'canceled',
+      completedAt: expect.any(Date),
+    });
+    expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+      workspaceId: WS_ID,
+      action: 'A2A_TASK_CANCELLED',
+      target: 'task-row-1',
+      verdict: 'allow',
+    });
+    const evidenceInput = appendEvidenceItemMock.mock.calls[0]?.[1] as {
+      taskId?: string;
+      evidenceType?: string;
+      sourceType?: string;
+      metadata?: Record<string, unknown>;
+    };
+    expect(evidenceInput).toMatchObject({
+      taskId: 'task-row-1',
+      evidenceType: 'a2a_task_cancelled',
+      sourceType: 'gateway_a2a_route',
+      metadata: {
+        workspaceId: WS_ID,
+        externalTaskId: 'durable-task-1',
+        pilotTaskId: 'task-row-1',
+        evidenceContract: 'a2a_cancel_evidence_required',
+      },
+    });
+  });
+
+  it('tasks/cancel fails closed without committing cancellation when evidence cannot persist', async () => {
+    appendEvidenceItemMock.mockRejectedValueOnce(new Error('cancel evidence unavailable'));
+    const deps = createMockDeps();
+    const committedUpdates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+    let selectCount = 0;
+    deps.db.select = vi.fn(() => {
+      selectCount++;
+      if (selectCount === 1) {
+        return {
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn(async () => [
+                {
+                  id: 'thread-1',
+                  workspaceId: WS_ID,
+                  externalTaskId: 'durable-task-1',
+                  pilotTaskId: 'task-row-1',
+                  status: 'working',
+                  createdAt: new Date('2026-05-05T10:00:00.000Z'),
+                  updatedAt: new Date('2026-05-05T10:00:01.000Z'),
+                  completedAt: null,
+                },
+              ]),
+            })),
+          })),
+        };
+      }
+      return {
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            orderBy: vi.fn(async () => []),
+          })),
+        })),
+      };
+    }) as unknown as typeof deps.db.select;
+    deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedUpdates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const tx = {
+        ...deps.db,
+        insert: vi.fn((table: unknown) => ({
+          values: vi.fn(() => ({})),
+        })),
+        update: vi.fn((table: unknown) => ({
+          set: vi.fn((value: Record<string, unknown>) => {
+            stagedUpdates.push({ table, value });
+            return {
+              where: vi.fn(() => ({
+                returning: vi.fn(async () => [{ pilotTaskId: 'task-row-1' }]),
+              })),
+            };
+          }),
+        })),
+      };
+      const result = await callback(tx);
+      committedUpdates.push(...stagedUpdates);
+      return result;
+    }) as typeof deps.db.transaction;
+
+    const { fetch } = testApp(a2aRoutes, deps);
+    const res = await fetch(
+      'POST',
+      '/a2a',
+      { jsonrpc: '2.0', id: 3, method: 'tasks/cancel', params: { id: 'durable-task-1' } },
+      { authorization: `Bearer ${BEARER}` },
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: { code: number; message: string } };
+    expect(body.error).toMatchObject({
+      code: -32603,
+      message: 'A2A cancel evidence persistence failed',
+    });
+    expect(committedUpdates).toEqual([]);
+  });
+
+  it('tasks/cancel fails closed when the durable thread update matches no row', async () => {
+    const deps = createMockDeps();
+    const committedUpdates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+    let selectCount = 0;
+    deps.db.select = vi.fn(() => {
+      selectCount++;
+      if (selectCount === 1) {
+        return {
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({
+              limit: vi.fn(async () => [
+                {
+                  id: 'thread-1',
+                  workspaceId: WS_ID,
+                  externalTaskId: 'durable-task-1',
+                  pilotTaskId: 'task-row-1',
+                  status: 'working',
+                  createdAt: new Date('2026-05-05T10:00:00.000Z'),
+                  updatedAt: new Date('2026-05-05T10:00:01.000Z'),
+                  completedAt: null,
+                },
+              ]),
+            })),
+          })),
+        };
+      }
+      return {
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            orderBy: vi.fn(async () => []),
+          })),
+        })),
+      };
+    }) as unknown as typeof deps.db.select;
+    deps.db.transaction = vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedUpdates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const tx = {
+        ...deps.db,
+        insert: vi.fn((table: unknown) => ({
+          values: vi.fn(() => ({ table })),
+        })),
+        update: vi.fn((table: unknown) => ({
+          set: vi.fn((value: Record<string, unknown>) => {
+            stagedUpdates.push({ table, value });
+            return {
+              where: vi.fn(() => ({
+                returning: vi.fn(async () => []),
+              })),
+            };
+          }),
+        })),
+      };
+      const result = await callback(tx);
+      committedUpdates.push(...stagedUpdates);
+      return result;
+    }) as typeof deps.db.transaction;
+
+    const { fetch } = testApp(a2aRoutes, deps);
+    const res = await fetch(
+      'POST',
+      '/a2a',
+      { jsonrpc: '2.0', id: 3, method: 'tasks/cancel', params: { id: 'durable-task-1' } },
+      { authorization: `Bearer ${BEARER}` },
+    );
+
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: { code: number; message: string } };
+    expect(body.error).toMatchObject({
+      code: -32603,
+      message: 'A2A cancel evidence persistence failed',
+    });
+    expect(appendEvidenceItemMock).not.toHaveBeenCalled();
+    expect(committedUpdates).toEqual([]);
+  });
+
   it('malformed JSON returns -32700', async () => {
     const { app } = testApp(a2aRoutes);
     const res = await app.fetch(

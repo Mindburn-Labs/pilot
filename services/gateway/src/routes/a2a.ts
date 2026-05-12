@@ -221,15 +221,15 @@ export function a2aRoutes(deps: GatewayDeps) {
           const task = await loadA2aTask(deps, workspaceId, params.id);
           if (!task) return rpcError(c, id, -32004, 'task_not_found');
           const canceledAt = new Date();
-          await deps.db
-            .update(a2aThreads)
-            .set({ status: 'canceled', updatedAt: canceledAt, completedAt: canceledAt })
-            .where(
-              and(
-                eq(a2aThreads.workspaceId, workspaceId),
-                eq(a2aThreads.externalTaskId, params.id),
-              ),
-            );
+          const cancelProof = await persistA2aCancelProof(deps, {
+            workspaceId,
+            externalTaskId: params.id,
+            jsonrpcId: id,
+            canceledAt,
+          });
+          if (!cancelProof) {
+            return rpcError(c, id, -32603, 'A2A cancel evidence persistence failed', 500);
+          }
           return c.json({
             jsonrpc: '2.0',
             id,
@@ -338,6 +338,84 @@ async function persistA2aDispatchProof(
         .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
 
       return { pilotTaskId, auditEventId, evidenceItemId };
+    })
+    .catch(() => null);
+}
+
+type A2aCancelProofInput = {
+  workspaceId: string;
+  externalTaskId: string;
+  jsonrpcId: number | string | null;
+  canceledAt: Date;
+};
+
+async function persistA2aCancelProof(
+  deps: GatewayDeps,
+  input: A2aCancelProofInput,
+): Promise<{ auditEventId: string; evidenceItemId: string; pilotTaskId: string | null } | null> {
+  return deps.db
+    .transaction(async (tx) => {
+      const db = tx as unknown as typeof deps.db;
+      const [thread] = await db
+        .update(a2aThreads)
+        .set({
+          status: 'canceled',
+          updatedAt: input.canceledAt,
+          completedAt: input.canceledAt,
+        })
+        .where(
+          and(
+            eq(a2aThreads.workspaceId, input.workspaceId),
+            eq(a2aThreads.externalTaskId, input.externalTaskId),
+          ),
+        )
+        .returning({ pilotTaskId: a2aThreads.pilotTaskId });
+      if (!thread) {
+        throw new Error('A2A cancel thread update did not affect a durable thread');
+      }
+      const pilotTaskId = typeof thread?.pilotTaskId === 'string' ? thread.pilotTaskId : null;
+
+      const auditEventId = randomUUID();
+      const auditMetadata = {
+        workspaceId: input.workspaceId,
+        externalTaskId: input.externalTaskId,
+        pilotTaskId,
+        jsonrpcId: input.jsonrpcId,
+        canceledAt: input.canceledAt.toISOString(),
+        evidenceContract: 'a2a_cancel_evidence_required',
+      };
+
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId: input.workspaceId,
+        action: 'A2A_TASK_CANCELLED',
+        actor: 'a2a:bearer',
+        target: pilotTaskId ?? input.externalTaskId,
+        verdict: 'allow',
+        metadata: auditMetadata,
+      });
+
+      const evidenceItemId = await appendEvidenceItem(db, {
+        workspaceId: input.workspaceId,
+        ...(pilotTaskId ? { taskId: pilotTaskId } : {}),
+        auditEventId,
+        evidenceType: 'a2a_task_cancelled',
+        sourceType: 'gateway_a2a_route',
+        title: 'A2A task cancelled',
+        summary:
+          'Gateway A2A tasks/cancel updated durable thread state and persisted redacted cancel proof.',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef: `a2a:${input.externalTaskId}:cancel:${auditEventId}`,
+        metadata: auditMetadata,
+      });
+
+      await db
+        .update(auditLog)
+        .set({ metadata: { ...auditMetadata, evidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { auditEventId, evidenceItemId, pilotTaskId };
     })
     .catch(() => null);
 }
