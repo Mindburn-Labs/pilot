@@ -223,63 +223,126 @@ export function authRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Invalid or expired code' }, 401);
     }
 
-    // Delete the magic session
-    await deps.db.delete(sessions).where(eq(sessions.id, magicSession.id));
-
-    // Find or create workspace
-    let [membership] = await deps.db
-      .select()
-      .from(workspaceMembers)
-      .where(eq(workspaceMembers.userId, user.id))
-      .limit(1);
-
-    if (!membership) {
-      const name = user.name ?? email.split('@')[0] ?? 'User';
-      const [ws] = await deps.db
-        .insert(workspaces)
-        .values({ name: `${name}'s Workspace`, ownerId: user.id })
-        .returning();
-      if (ws) {
-        [membership] = await deps.db
-          .insert(workspaceMembers)
-          .values({ workspaceId: ws.id, userId: user.id, role: 'owner' })
-          .returning();
-      }
-    }
-
-    // Create real session (30-day expiry)
     const token = generateToken();
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await deps.db.insert(sessions).values({
-      userId: user.id,
-      token,
-      channel: 'email',
-      expiresAt,
-    });
+    const verified = await deps.db
+      .transaction(async (tx) => {
+        await tx.delete(sessions).where(eq(sessions.id, magicSession.id));
+
+        let [membership] = await tx
+          .select()
+          .from(workspaceMembers)
+          .where(eq(workspaceMembers.userId, user.id))
+          .limit(1);
+        let workspaceCreated = false;
+
+        if (!membership) {
+          const name = user.name ?? email.split('@')[0] ?? 'User';
+          const [ws] = await tx
+            .insert(workspaces)
+            .values({ name: `${name}'s Workspace`, ownerId: user.id })
+            .returning();
+          if (ws) {
+            workspaceCreated = true;
+            [membership] = await tx
+              .insert(workspaceMembers)
+              .values({ workspaceId: ws.id, userId: user.id, role: 'owner' })
+              .returning();
+          }
+        }
+
+        if (!membership) throw new Error('failed to resolve email verification workspace');
+
+        await tx.insert(sessions).values({
+          userId: user.id,
+          token,
+          channel: 'email',
+          expiresAt,
+        });
+
+        const auditEventId = randomUUID();
+        const replayRef = `auth-email:${membership.workspaceId}:${user.id}:verified`;
+        const evidenceMetadata = {
+          workspaceId: membership.workspaceId,
+          userId: user.id,
+          magicSessionId: magicSession.id,
+          workspaceCreated,
+          emailHash: stableAuthEvidenceHash(email),
+          emailStoredInEvidence: false,
+          magicCodeStoredInEvidence: false,
+          magicSessionTokenStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId: membership.workspaceId,
+          action: 'AUTH_EMAIL_VERIFIED',
+          actor: `user:${user.id}`,
+          target: membership.workspaceId,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'auth_email_verified',
+            replayRef,
+            evidenceItemId: null,
+            ...evidenceMetadata,
+          },
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId: membership.workspaceId,
+          auditEventId,
+          evidenceType: 'auth_email_verified',
+          sourceType: 'gateway_auth',
+          title: 'Email login verified',
+          summary:
+            'A magic-code email login was redeemed; code and session tokens were not stored in evidence.',
+          redactionState: 'redacted',
+          sensitivity: 'sensitive',
+          contentHash: `sha256:${stableAuthEvidenceHash(JSON.stringify(evidenceMetadata))}`,
+          replayRef,
+          metadata: evidenceMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'auth_email_verified',
+              replayRef,
+              evidenceItemId,
+              ...evidenceMetadata,
+            },
+          })
+          .where(
+            and(eq(auditLog.workspaceId, membership.workspaceId), eq(auditLog.id, auditEventId)),
+          );
+
+        return { membership, evidenceItemId };
+      })
+      .catch(() => null);
+
+    if (!verified) {
+      return c.json({ error: 'failed to persist email verification evidence' }, 500);
+    }
+
     const csrfToken = setSessionCookies(c, token, expiresAt);
-    await recordAuthAudit(deps, {
-      action: 'auth.email.verify',
-      actor: email,
-      verdict: 'allow',
-      reason: 'magic_code_redeemed',
-    });
 
     let workspaceName = 'Workspace';
-    if (membership) {
-      const [ws] = await deps.db
-        .select()
-        .from(workspaces)
-        .where(eq(workspaces.id, membership.workspaceId))
-        .limit(1);
-      if (ws) workspaceName = ws.name;
-    }
+    const [ws] = await deps.db
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.id, verified.membership.workspaceId))
+      .limit(1);
+    if (ws) workspaceName = ws.name;
 
     return c.json({
       token,
       csrfToken,
       user: { id: user.id, name: user.name, email },
-      workspace: membership ? { id: membership.workspaceId, name: workspaceName } : null,
+      workspace: { id: verified.membership.workspaceId, name: workspaceName },
       expiresAt: expiresAt.toISOString(),
+      evidenceItemId: verified.evidenceItemId,
     });
   });
 

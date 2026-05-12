@@ -8,6 +8,7 @@ import {
   sessions,
   users,
   workspaceMembers,
+  workspaces,
 } from '@pilot/db/schema';
 import { authenticatedAuthRoutes, authRoutes } from '../../routes/auth.js';
 import { createGateway } from '../../index.js';
@@ -148,6 +149,112 @@ function createInviteAcceptDb(
             return [];
           }),
           onConflictDoNothing: vi.fn(async () => []),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })),
+    delete: vi.fn((table: unknown) => {
+      deleteSink.push({ table });
+      return {
+        where: vi.fn(async () => []),
+      };
+    }),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates, deletes),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const stagedDeletes: Array<{ table: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates, stagedDeletes);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      deletes.push(...stagedDeletes);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, deletes };
+}
+
+function createEmailVerifyDb(
+  options: {
+    failEvidence?: boolean;
+    magicToken?: string;
+    code?: string;
+    existingMembership?: boolean;
+  } = {},
+) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const deletes: Array<{ table: unknown }> = [];
+  const user = mockUser({ id: 'user-email-1', email: 'test@example.com', name: 'Test' });
+  const workspace = mockWorkspace({ id: workspaceId, name: 'Test Workspace' });
+  const membership = mockMembership({
+    workspaceId,
+    userId: user.id,
+    role: 'owner',
+  });
+  const magicSession = mockSession({
+    id: 'pending-email-1',
+    userId: user.id,
+    token: options.magicToken ?? `magic:${options.code ?? '123456'}:opaque-token`,
+    channel: 'email_pending',
+    expiresAt: new Date(Date.now() + 60_000),
+  });
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+    deleteSink: Array<{ table: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => {
+            if (table === users) return [user];
+            if (table === workspaceMembers) {
+              return options.existingMembership === false ? [] : [membership];
+            }
+            if (table === workspaces) return [workspace];
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) => {
+            const rows = table === sessions ? [magicSession] : [];
+            return Promise.resolve(rows).then(resolve, reject);
+          },
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === workspaces) return [workspace];
+            if (table === workspaceMembers) return [membership];
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('email verification evidence unavailable');
+              return [{ id: 'evidence-email-verified-1' }];
+            }
+            return [];
+          }),
           then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
             Promise.resolve([]).then(resolve, reject),
           catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
@@ -741,6 +848,114 @@ describe('authRoutes', () => {
       expect(json).toHaveProperty('error', 'Invalid or expired code');
     });
 
+    it('writes redacted audit-linked evidence when redeeming an email magic code', async () => {
+      const { db, inserts, updates, deletes } = createEmailVerifyDb({ code: '123456' });
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/email/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'Test@Example.com', code: '123456' }),
+        }),
+      );
+
+      const json = await expectJson<{
+        token: string;
+        csrfToken: string;
+        workspace: { id: string; name: string };
+        evidenceItemId: string;
+      }>(res, 200);
+      expect(json.token).toMatch(/^[a-f0-9]{64}$/);
+      expect(json.csrfToken).toMatch(/^[a-f0-9]{64}$/);
+      expect(json.workspace).toEqual({ id: workspaceId, name: 'Test Workspace' });
+      expect(json.evidenceItemId).toBe('evidence-email-verified-1');
+      expect(res.headers.get('set-cookie') ?? '').toContain('helm_session=');
+
+      expect(deletes.map((entry) => entry.table)).toEqual([sessions]);
+      expect(inserts.map((insert) => insert.table)).toEqual([sessions, auditLog, evidenceItems]);
+      expect(inserts.find((insert) => insert.table === sessions)?.value).toMatchObject({
+        userId: 'user-email-1',
+        channel: 'email',
+      });
+
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+        metadata: Record<string, unknown>;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId,
+        action: 'AUTH_EMAIL_VERIFIED',
+        actor: 'user:user-email-1',
+        target: workspaceId,
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          evidenceType: 'auth_email_verified',
+          workspaceId,
+          userId: 'user-email-1',
+          emailStoredInEvidence: false,
+          magicCodeStoredInEvidence: false,
+          magicSessionTokenStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        }),
+      });
+
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceType: 'auth_email_verified',
+        sourceType: 'gateway_auth',
+        redactionState: 'redacted',
+        sensitivity: 'sensitive',
+        metadata: expect.objectContaining({
+          workspaceId,
+          userId: 'user-email-1',
+          emailStoredInEvidence: false,
+          magicCodeStoredInEvidence: false,
+          magicSessionTokenStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        }),
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-email-verified-1',
+        }),
+      });
+
+      const serializedProof = JSON.stringify({ auditInsert, evidenceInsert });
+      expect(serializedProof).not.toContain('Test@Example.com');
+      expect(serializedProof).not.toContain('test@example.com');
+      expect(serializedProof).not.toContain('123456');
+      expect(serializedProof).not.toContain(json.token);
+    });
+
+    it('fails closed without committing email verification rows when evidence persistence fails', async () => {
+      const { db, inserts, deletes } = createEmailVerifyDb({
+        code: '123456',
+        failEvidence: true,
+      });
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/email/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'test@example.com', code: '123456' }),
+        }),
+      );
+
+      const json = await expectJson<{ error: string }>(res, 500);
+      expect(json.error).toContain('failed to persist email verification evidence');
+      expect(inserts).toEqual([]);
+      expect(deletes).toEqual([]);
+      expect(res.headers.get('set-cookie')).toBeNull();
+    });
+
     it('redeems hashed magic codes once and deletes the pending session', async () => {
       const sendMagicLink = vi.fn(async () => {});
       const insertedValues: Array<Record<string, unknown>> = [];
@@ -780,45 +995,8 @@ describe('authRoutes', () => {
       const pending = insertedValues.find((values) => values.channel === 'email_pending');
       expect(pending?.token).toMatch(/^magic:v2:/);
 
-      let selectCallCount = 0;
-      deps.db.select = vi.fn(() => ({
-        from: vi.fn(() => ({
-          where: vi.fn(() => {
-            selectCallCount++;
-            const result =
-              selectCallCount === 1
-                ? [mockUser({ email: 'test@example.com' })]
-                : selectCallCount === 2
-                  ? [
-                      mockSession({
-                        id: 'pending-1',
-                        token: pending?.token,
-                        channel: 'email_pending',
-                        expiresAt: new Date(Date.now() + 60_000),
-                      }),
-                    ]
-                  : selectCallCount === 3
-                    ? [mockMembership()]
-                    : [mockWorkspace()];
-            return {
-              limit: vi.fn(() => ({
-                then: (r: any) => r(result),
-              })),
-              then: (r: any) => r(result),
-            };
-          }),
-        })),
-      })) as any;
-      deps.db.delete = vi.fn(() => ({
-        where: vi.fn(() => ({
-          then: (r: any) => r([]),
-        })),
-      })) as any;
-      deps.db.insert = vi.fn(() => ({
-        values: vi.fn(() => ({
-          then: (r: any) => r([]),
-        })),
-      })) as any;
+      const verifyDb = createEmailVerifyDb({ magicToken: String(pending?.token) });
+      (deps as any).db = verifyDb.db;
 
       const verifyRes = await app.fetch(
         new Request('http://localhost/email/verify', {
@@ -832,7 +1010,12 @@ describe('authRoutes', () => {
       expect(verifyJson.token).toMatch(/^[a-f0-9]{64}$/);
       expect(verifyJson.csrfToken).toMatch(/^[a-f0-9]{64}$/);
       expect(verifyRes.headers.get('set-cookie') ?? '').toContain('helm_session=');
-      expect(deps.db.delete).toHaveBeenCalled();
+      expect(verifyDb.deletes.map((entry) => entry.table)).toEqual([sessions]);
+      expect(verifyDb.inserts.map((insert) => insert.table)).toEqual([
+        sessions,
+        auditLog,
+        evidenceItems,
+      ]);
     });
 
     it('deletes pending hashed code after the final failed attempt', async () => {
