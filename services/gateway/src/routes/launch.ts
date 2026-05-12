@@ -299,6 +299,30 @@ export function launchRoutes(deps: GatewayDeps) {
     });
     if (governed instanceof Response) return governed;
 
+    const executionAudit = await persistLaunchExecutionAudit(c, deps, {
+      workspaceId,
+      action: 'DEPLOY',
+      target: `${target.provider}:${targetId}`,
+      evidenceType: 'launch_deployment_requested',
+      title: 'Launch deployment provider call requested',
+      summary:
+        'HELM-approved deployment provider call was durably recorded before dispatch; environment values were not stored in evidence.',
+      metadata: {
+        targetId,
+        provider: target.provider,
+        artifactId: artifactId ?? null,
+        version: version ?? null,
+        imageProvided: Boolean(image),
+        appNameProvided: Boolean(appName),
+        region: region ?? null,
+        envVarKeys: Object.keys(envVars ?? {}).sort(),
+        governance: governed ? launchGovernanceMetadata('DEPLOY', governed) : null,
+      },
+    }).catch(() => null);
+    if (!executionAudit) {
+      return c.json({ error: 'failed to persist launch deployment evidence' }, 500);
+    }
+
     try {
       const result = await engine.deployToTarget(
         workspaceId,
@@ -306,12 +330,35 @@ export function launchRoutes(deps: GatewayDeps) {
         provider,
         governed ? launchGovernanceMetadata('DEPLOY', governed) : undefined,
       );
-      return c.json({ ...result, helmReceipt: governed?.receipt }, 201);
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'allow', {
+        executionStatus: 'completed',
+        deploymentId: result.deployment.id,
+        providerDeploymentId: result.providerDeployment.deploymentId,
+        providerStatus: result.providerDeployment.status,
+        urlRecorded: Boolean(result.providerDeployment.url),
+      });
+      return c.json(
+        {
+          ...result,
+          helmReceipt: governed?.receipt,
+          auditEventId: executionAudit.auditEventId,
+          evidenceItemId: executionAudit.evidenceItemId,
+          replayRef: executionAudit.replayRef,
+        },
+        201,
+      );
     } catch (err) {
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'failed', {
+        executionStatus: 'failed',
+        error: err instanceof Error ? err.message : 'Deployment failed',
+      }).catch(() => undefined);
       return c.json(
         {
           error: err instanceof Error ? err.message : 'Deployment failed',
           helmReceipt: governed?.receipt,
+          auditEventId: executionAudit.auditEventId,
+          evidenceItemId: executionAudit.evidenceItemId,
+          replayRef: executionAudit.replayRef,
         },
         502,
       );
@@ -360,6 +407,25 @@ export function launchRoutes(deps: GatewayDeps) {
     });
     if (governed instanceof Response) return governed;
 
+    const executionAudit = await persistLaunchExecutionAudit(c, deps, {
+      workspaceId,
+      action: 'DEPLOY_HEALTH_CHECK',
+      target: `${target.provider}:${target.id}`,
+      evidenceType: 'launch_deployment_health_check_requested',
+      title: 'Launch deployment health check requested',
+      summary:
+        'HELM-approved deployment health check was durably recorded before provider dispatch.',
+      metadata: {
+        deploymentId: id,
+        targetId: target.id,
+        provider: target.provider,
+        governance: governed ? launchGovernanceMetadata('DEPLOY_HEALTH_CHECK', governed) : null,
+      },
+    }).catch(() => null);
+    if (!executionAudit) {
+      return c.json({ error: 'failed to persist launch health-check evidence' }, 500);
+    }
+
     try {
       const result = await engine.runDeploymentHealthCheck(
         id,
@@ -367,12 +433,36 @@ export function launchRoutes(deps: GatewayDeps) {
         workspaceId,
         governed ? launchGovernanceMetadata('DEPLOY_HEALTH_CHECK', governed) : undefined,
       );
-      return c.json({ ...result, helmReceipt: governed?.receipt }, 201);
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'allow', {
+        executionStatus: 'completed',
+        deploymentId: id,
+        healthStatus: result.check.status,
+        providerStatus: result.result.status,
+        responseTimeMs: result.result.responseTimeMs,
+      });
+      return c.json(
+        {
+          ...result,
+          helmReceipt: governed?.receipt,
+          auditEventId: executionAudit.auditEventId,
+          evidenceItemId: executionAudit.evidenceItemId,
+          replayRef: executionAudit.replayRef,
+        },
+        201,
+      );
     } catch (err) {
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'failed', {
+        executionStatus: 'failed',
+        deploymentId: id,
+        error: err instanceof Error ? err.message : 'Health check failed',
+      }).catch(() => undefined);
       return c.json(
         {
           error: err instanceof Error ? err.message : 'Health check failed',
           helmReceipt: governed?.receipt,
+          auditEventId: executionAudit.auditEventId,
+          evidenceItemId: executionAudit.evidenceItemId,
+          replayRef: executionAudit.replayRef,
         },
         502,
       );
@@ -406,6 +496,25 @@ export function launchRoutes(deps: GatewayDeps) {
     });
     if (governed instanceof Response) return governed;
 
+    const executionAudit = await persistLaunchExecutionAudit(c, deps, {
+      workspaceId,
+      action: 'DEPLOY_ROLLBACK',
+      target: `${target.provider}:${target.id}`,
+      evidenceType: 'launch_deployment_rollback_requested',
+      title: 'Launch deployment rollback requested',
+      summary: 'HELM-approved deployment rollback was durably recorded before provider dispatch.',
+      metadata: {
+        deploymentId: id,
+        targetId: target.id,
+        targetVersion,
+        provider: target.provider,
+        governance: governed ? launchGovernanceMetadata('DEPLOY_ROLLBACK', governed) : null,
+      },
+    }).catch(() => null);
+    if (!executionAudit) {
+      return c.json({ error: 'failed to persist launch rollback evidence' }, 500);
+    }
+
     try {
       const result = await engine.rollbackDeployment(
         id,
@@ -414,12 +523,34 @@ export function launchRoutes(deps: GatewayDeps) {
         workspaceId,
         governed ? launchGovernanceMetadata('DEPLOY_ROLLBACK', governed) : undefined,
       );
-      return c.json({ ...result, helmReceipt: governed?.receipt });
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'allow', {
+        executionStatus: 'completed',
+        deploymentId: id,
+        targetVersion,
+        rollbackStatus: result.result.status,
+        deploymentStatus: result.deployment?.status ?? null,
+      });
+      return c.json({
+        ...result,
+        helmReceipt: governed?.receipt,
+        auditEventId: executionAudit.auditEventId,
+        evidenceItemId: executionAudit.evidenceItemId,
+        replayRef: executionAudit.replayRef,
+      });
     } catch (err) {
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'failed', {
+        executionStatus: 'failed',
+        deploymentId: id,
+        targetVersion,
+        error: err instanceof Error ? err.message : 'Rollback failed',
+      }).catch(() => undefined);
       return c.json(
         {
           error: err instanceof Error ? err.message : 'Rollback failed',
           helmReceipt: governed?.receipt,
+          auditEventId: executionAudit.auditEventId,
+          evidenceItemId: executionAudit.evidenceItemId,
+          replayRef: executionAudit.replayRef,
         },
         502,
       );
@@ -439,6 +570,109 @@ function managedTelegramError(c: Context, err: unknown) {
     return c.json({ error: err.message, receipt: err.receipt }, err.status as never);
   }
   throw err;
+}
+
+type LaunchExecutionAudit = {
+  auditEventId: string;
+  evidenceItemId: string;
+  replayRef: string;
+  metadata: Record<string, unknown>;
+};
+
+async function persistLaunchExecutionAudit(
+  c: Context,
+  deps: GatewayDeps,
+  input: {
+    workspaceId: string;
+    action: string;
+    target: string;
+    evidenceType: string;
+    title: string;
+    summary: string;
+    metadata: Record<string, unknown>;
+  },
+): Promise<LaunchExecutionAudit> {
+  const auditEventId = randomUUID();
+  const replayRef = `launch:${input.workspaceId}:${input.action.toLowerCase()}:${auditEventId}`;
+  const actor = `user:${(c.get('userId') as string | undefined) ?? 'unknown'}`;
+  const metadata = {
+    evidenceType: input.evidenceType,
+    replayRef,
+    action: input.action,
+    executionStatus: 'pending',
+    ...input.metadata,
+  };
+
+  return deps.db.transaction(async (tx) => {
+    await tx.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId: input.workspaceId,
+      action: input.action,
+      actor,
+      target: input.target,
+      verdict: 'pending',
+      metadata,
+    });
+
+    const evidenceItemId = await appendEvidenceItem(tx, {
+      workspaceId: input.workspaceId,
+      auditEventId,
+      evidenceType: input.evidenceType,
+      sourceType: 'gateway_launch',
+      title: input.title,
+      summary: input.summary,
+      redactionState: 'redacted',
+      sensitivity: 'restricted',
+      replayRef,
+      metadata: {
+        ...metadata,
+        secretValuesStoredInEvidence: false,
+      },
+    });
+
+    await tx
+      .update(auditLog)
+      .set({
+        metadata: {
+          ...metadata,
+          evidenceItemId,
+          secretValuesStoredInEvidence: false,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+    return {
+      auditEventId,
+      evidenceItemId,
+      replayRef,
+      metadata: {
+        ...metadata,
+        evidenceItemId,
+        secretValuesStoredInEvidence: false,
+      },
+    };
+  });
+}
+
+async function markLaunchExecutionAudit(
+  deps: GatewayDeps,
+  workspaceId: string,
+  executionAudit: LaunchExecutionAudit,
+  verdict: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  await deps.db
+    .update(auditLog)
+    .set({
+      verdict,
+      metadata: {
+        ...executionAudit.metadata,
+        ...metadata,
+      },
+    })
+    .where(
+      and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, executionAudit.auditEventId)),
+    );
 }
 
 async function evaluateLaunchAction(
