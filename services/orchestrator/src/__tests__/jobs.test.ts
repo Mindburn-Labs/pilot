@@ -773,7 +773,8 @@ describe('registerJobHandlers', () => {
   });
 
   describe('task.resume', () => {
-    it('calls orchestrator.resumeTask', async () => {
+    it('persists resume dispatch evidence before calling orchestrator.resumeTask', async () => {
+      vi.mocked(appendEvidenceItem).mockResolvedValueOnce('evidence-resume-1');
       const mockOrchestrator = {
         resumeTask: vi.fn(async () => ({
           status: 'completed',
@@ -800,6 +801,46 @@ describe('registerJobHandlers', () => {
 
       await handler([{ data: { taskId: 'task-1', workspaceId: 'ws-1', context: 'test' } }]);
 
+      const auditInsert = mockDb._inserts
+        .map((entry: any) => entry.value)
+        .find((value: any) => value?.action === 'TASK_RESUME_DISPATCHED');
+      expect(auditInsert).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'TASK_RESUME_DISPATCHED',
+        actor: 'job:task.resume',
+        target: 'task-1',
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          taskId: 'task-1',
+          priorActionCount: 0,
+          contextHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+          evidenceContract: 'task_resume_dispatch_before_orchestrator_resume',
+          evidenceItemId: null,
+        }),
+      });
+      expect(appendEvidenceItem).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          workspaceId: 'ws-1',
+          auditEventId: auditInsert.id,
+          evidenceType: 'task_resume_dispatched',
+          sourceType: 'task_resume_worker',
+          metadata: expect.objectContaining({
+            credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+          }),
+        }),
+      );
+      expect(mockDb._updates.at(-1)).toMatchObject({
+        table: 'auditLog',
+        value: {
+          metadata: expect.objectContaining({
+            evidenceItemId: 'evidence-resume-1',
+          }),
+        },
+      });
+      expect(vi.mocked(appendEvidenceItem).mock.invocationCallOrder[0]).toBeLessThan(
+        mockOrchestrator.resumeTask.mock.invocationCallOrder[0],
+      );
       expect(mockOrchestrator.resumeTask).toHaveBeenCalledWith(
         expect.objectContaining({
           taskId: 'task-1',
@@ -808,6 +849,40 @@ describe('registerJobHandlers', () => {
           priorActions: [],
         }),
       );
+    });
+
+    it('fails closed before resume when resume dispatch evidence cannot be persisted', async () => {
+      vi.mocked(appendEvidenceItem).mockRejectedValueOnce(new Error('resume evidence unavailable'));
+      const mockOrchestrator = {
+        resumeTask: vi.fn(async () => ({
+          status: 'completed',
+          iterationsUsed: 1,
+          iterationBudget: 50,
+          actions: [],
+        })),
+      } as any;
+      let selectCount = 0;
+      mockDb.select = vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(async () => {
+              selectCount++;
+              return selectCount === 1 ? [{ id: 'task-1' }] : [];
+            }),
+            orderBy: vi.fn(async () => []),
+          })),
+        })),
+      }));
+
+      registerJobHandlers(mockBoss, { db: mockDb, orchestrator: mockOrchestrator });
+      const handler = handlers.get('task.resume')!;
+
+      await expect(
+        handler([{ data: { taskId: 'task-1', workspaceId: 'ws-1', context: 'test' } }]),
+      ).rejects.toThrow('resume evidence unavailable');
+
+      expect(mockDb.transaction).toHaveBeenCalledOnce();
+      expect(mockOrchestrator.resumeTask).not.toHaveBeenCalled();
     });
 
     it('skips when orchestrator not available', async () => {

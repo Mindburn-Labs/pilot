@@ -166,11 +166,17 @@ describe('auditRoutes', () => {
           evidenceItemId: 'evidence-approval-1',
         },
       });
-      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith('task.resume', {
-        taskId: 'task-1',
-        workspaceId: 'ws-1',
-        context: expect.stringContaining('deploy.production'),
-      });
+      expect(deps.orchestrator.boss.send).toHaveBeenCalledWith(
+        'task.resume',
+        expect.objectContaining({
+          taskId: 'task-1',
+          workspaceId: 'ws-1',
+          context: expect.stringContaining('deploy.production'),
+          requestAuditEventId: auditInsert.id,
+          requestEvidenceItemId: 'evidence-approval-1',
+          requestReplayRef: 'approval:appr-1:resolved:approved',
+        }),
+      );
     });
 
     it('fails closed before resume when approval evidence cannot be persisted', async () => {

@@ -65,6 +65,10 @@ export function auditRoutes(deps: GatewayDeps) {
       return c.json({ error: 'status must be approved or rejected' }, 400);
     }
 
+    let approvalResolutionProof:
+      | { auditEventId: string; evidenceItemId: string; replayRef: string }
+      | undefined;
+
     const updated = await deps.db
       .transaction(async (tx) => {
         const [row] = await tx
@@ -128,6 +132,7 @@ export function auditRoutes(deps: GatewayDeps) {
           })
           .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
 
+        approvalResolutionProof = { auditEventId, evidenceItemId, replayRef };
         return row;
       })
       .catch(() => undefined);
@@ -148,6 +153,9 @@ export function auditRoutes(deps: GatewayDeps) {
         workspaceId: updated.workspaceId,
         operatorId: task?.operatorId ?? undefined,
         context: task?.description ?? `Resumed after approval of: ${updated.action}`,
+        requestAuditEventId: approvalResolutionProof?.auditEventId,
+        requestEvidenceItemId: approvalResolutionProof?.evidenceItemId,
+        requestReplayRef: approvalResolutionProof?.replayRef,
       });
     }
 

@@ -360,6 +360,7 @@ const capabilityRecords = validateCapabilityRecords([
       'loadParentRunHistory filters task_runs to lineage_kind=parent_action, parent_task_run_id IS NULL, and action_tool IS NOT NULL',
       'Replay history orders by run_sequence, started_at, and id for deterministic approval resume',
       'task.resume pg-boss handler loads parent run history before calling orchestrator.resumeTask',
+      'task.resume now persists redacted TASK_RESUME_DISPATCHED audit/evidence after deterministic history loading and before AgentLoop.resume',
       'services/orchestrator/src/__tests__/run-history.test.ts covers cross-workspace rejection and deterministic parent-only replay query semantics',
     ],
     evalRequirement: 'Approval Resume Isolation Regression',
@@ -370,7 +371,7 @@ const capabilityRecords = validateCapabilityRecords([
     name: 'Evidence ledger',
     state: 'prototype',
     summary:
-      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, conductor dispatch, A2A inbound dispatch/cancel, task run dispatch, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, launch deployment execution, retained tenant hard-delete receipt, retained user-erasure receipt, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace knowledge memory mutation/recompile, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append durable proof. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
+      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, conductor dispatch, A2A inbound dispatch/cancel, task run dispatch/resume, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, launch deployment execution, retained tenant hard-delete receipt, retained user-erasure receipt, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace knowledge memory mutation/recompile, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append durable proof. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
     owner: 'Foundation Agent',
     blockers: [
       'Ad-hoc non-workspace ingestion jobs and non-broker legacy writers do not yet append evidence_items for every meaningful action',
@@ -400,6 +401,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gateway A2A tasks/send persists redacted a2a_task_dispatched evidence_items linked to A2A_TASK_SEND_DISPATCHED audit_log rows before starting conductor execution',
       'Gateway A2A tasks/cancel persists redacted a2a_task_cancelled evidence_items linked to A2A_TASK_CANCELLED audit_log rows in the same transaction as durable thread cancellation',
       'Gateway task run and autoRun routes persist redacted task_run_dispatched evidence_items linked to TASK_RUN_DISPATCHED audit_log rows before starting orchestrator task execution',
+      'task.resume jobs persist redacted task_resume_dispatched evidence_items linked to TASK_RESUME_DISPATCHED audit_log rows before restarting orchestrator task execution',
       'Managed Telegram approved and autonomous sends persist redacted managed_telegram_send_intent evidence_items linked to TELEGRAM_CHILD_SEND_MESSAGE audit_log rows before dispatching external Telegram messages',
       'Launch deployment, health-check, and rollback routes persist redacted gateway_launch evidence_items linked to their DEPLOY, DEPLOY_HEALTH_CHECK, and DEPLOY_ROLLBACK audit_log rows before dispatching provider calls',
       'Admin and scheduled tenant hard-delete cleanup persist retained tenant_deletion_receipts before deleting workspace-scoped audit/evidence-adjacent rows and fail closed without deletion when receipt persistence fails',
