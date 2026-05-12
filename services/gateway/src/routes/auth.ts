@@ -52,67 +52,135 @@ export function authRoutes(deps: GatewayDeps) {
     const telegramId = parsed.id.toString();
     const name = [parsed.first_name, parsed.last_name].filter(Boolean).join(' ') || 'Founder';
 
-    // Find or create user
-    let [user] = await deps.db
-      .select()
-      .from(users)
-      .where(eq(users.telegramId, telegramId))
-      .limit(1);
-
-    if (!user) {
-      [user] = await deps.db.insert(users).values({ telegramId, name }).returning();
-    }
-
-    if (!user) return c.json({ error: 'Failed to create user' }, 500);
-
-    // Find or create workspace
-    let [membership] = await deps.db
-      .select()
-      .from(workspaceMembers)
-      .where(eq(workspaceMembers.userId, user.id))
-      .limit(1);
-
-    if (!membership) {
-      const [ws] = await deps.db
-        .insert(workspaces)
-        .values({ name: `${name}'s Workspace`, ownerId: user.id })
-        .returning();
-      if (ws) {
-        [membership] = await deps.db
-          .insert(workspaceMembers)
-          .values({ workspaceId: ws.id, userId: user.id, role: 'owner' })
-          .returning();
-      }
-    }
-
-    // Create session (30-day expiry)
     const token = generateToken();
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-    await deps.db.insert(sessions).values({
-      userId: user.id,
-      token,
-      channel: 'telegram',
-      expiresAt,
-    });
+    const verified = await deps.db
+      .transaction(async (tx) => {
+        let [user] = await tx.select().from(users).where(eq(users.telegramId, telegramId)).limit(1);
+        let userCreated = false;
+
+        if (!user) {
+          [user] = await tx.insert(users).values({ telegramId, name }).returning();
+          userCreated = Boolean(user);
+        }
+
+        if (!user) throw new Error('failed to resolve telegram user');
+
+        let [membership] = await tx
+          .select()
+          .from(workspaceMembers)
+          .where(eq(workspaceMembers.userId, user.id))
+          .limit(1);
+        let workspaceCreated = false;
+
+        if (!membership) {
+          const [ws] = await tx
+            .insert(workspaces)
+            .values({ name: `${name}'s Workspace`, ownerId: user.id })
+            .returning();
+          if (ws) {
+            workspaceCreated = true;
+            [membership] = await tx
+              .insert(workspaceMembers)
+              .values({ workspaceId: ws.id, userId: user.id, role: 'owner' })
+              .returning();
+          }
+        }
+
+        if (!membership) throw new Error('failed to resolve telegram workspace');
+
+        await tx.insert(sessions).values({
+          userId: user.id,
+          token,
+          channel: 'telegram',
+          expiresAt,
+        });
+
+        const auditEventId = randomUUID();
+        const replayRef = `auth-telegram:${membership.workspaceId}:${user.id}:verified`;
+        const evidenceMetadata = {
+          workspaceId: membership.workspaceId,
+          userId: user.id,
+          userCreated,
+          workspaceCreated,
+          telegramIdHash: stableAuthEvidenceHash(telegramId),
+          telegramAuthDate: parsed.authDate,
+          initDataStoredInEvidence: false,
+          botTokenStoredInEvidence: false,
+          telegramIdStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId: membership.workspaceId,
+          action: 'AUTH_TELEGRAM_VERIFIED',
+          actor: `user:${user.id}`,
+          target: membership.workspaceId,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'auth_telegram_verified',
+            replayRef,
+            evidenceItemId: null,
+            ...evidenceMetadata,
+          },
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId: membership.workspaceId,
+          auditEventId,
+          evidenceType: 'auth_telegram_verified',
+          sourceType: 'gateway_auth',
+          title: 'Telegram login verified',
+          summary:
+            'A Telegram Web App login was verified; init data, bot token, Telegram ID, and session token were not stored in evidence.',
+          redactionState: 'redacted',
+          sensitivity: 'sensitive',
+          contentHash: `sha256:${stableAuthEvidenceHash(JSON.stringify(evidenceMetadata))}`,
+          replayRef,
+          metadata: evidenceMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'auth_telegram_verified',
+              replayRef,
+              evidenceItemId,
+              ...evidenceMetadata,
+            },
+          })
+          .where(
+            and(eq(auditLog.workspaceId, membership.workspaceId), eq(auditLog.id, auditEventId)),
+          );
+
+        return { user, membership, evidenceItemId };
+      })
+      .catch(() => null);
+
+    if (!verified) {
+      return c.json({ error: 'failed to persist telegram auth evidence' }, 500);
+    }
+
     const csrfToken = setSessionCookies(c, token, expiresAt);
 
     // Resolve workspace name for the response
     let workspaceName = 'Workspace';
-    if (membership) {
-      const [ws] = await deps.db
-        .select()
-        .from(workspaces)
-        .where(eq(workspaces.id, membership.workspaceId))
-        .limit(1);
-      if (ws) workspaceName = ws.name;
-    }
+    const [ws] = await deps.db
+      .select()
+      .from(workspaces)
+      .where(eq(workspaces.id, verified.membership.workspaceId))
+      .limit(1);
+    if (ws) workspaceName = ws.name;
 
     return c.json({
       token,
       csrfToken,
-      user: { id: user.id, name: user.name, telegramId },
-      workspace: membership ? { id: membership.workspaceId, name: workspaceName } : null,
+      user: { id: verified.user.id, name: verified.user.name, telegramId },
+      workspace: { id: verified.membership.workspaceId, name: workspaceName },
       expiresAt: expiresAt.toISOString(),
+      evidenceItemId: verified.evidenceItemId,
     });
   });
 
@@ -702,6 +770,7 @@ interface TelegramUser {
   first_name: string;
   last_name?: string;
   username?: string;
+  authDate: number;
 }
 
 function validateTelegramInitData(initData: string, botToken: string): TelegramUser | null {
@@ -737,7 +806,7 @@ function validateTelegramInitData(initData: string, botToken: string): TelegramU
     const userStr = params.get('user');
     if (!userStr) return null;
 
-    return JSON.parse(userStr) as TelegramUser;
+    return { ...(JSON.parse(userStr) as Omit<TelegramUser, 'authDate'>), authDate };
   } catch {
     return null;
   }

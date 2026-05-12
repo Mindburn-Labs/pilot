@@ -298,6 +298,109 @@ function createEmailVerifyDb(
   return { db, inserts, updates, deletes };
 }
 
+function createTelegramAuthDb(
+  options: {
+    failEvidence?: boolean;
+    userExists?: boolean;
+    existingMembership?: boolean;
+  } = {},
+) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const deletes: Array<{ table: unknown }> = [];
+  const user = mockUser({
+    id: 'user-telegram-1',
+    telegramId: '123',
+    name: 'Test',
+  });
+  const workspace = mockWorkspace({ id: workspaceId, name: 'Telegram Workspace' });
+  const membership = mockMembership({
+    workspaceId,
+    userId: user.id,
+    role: 'owner',
+  });
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+    deleteSink: Array<{ table: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => {
+            if (table === users) return options.userExists === false ? [] : [user];
+            if (table === workspaceMembers) {
+              return options.existingMembership === false ? [] : [membership];
+            }
+            if (table === workspaces) return [workspace];
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === users) {
+              return [{ ...user, telegramId: value['telegramId'], name: value['name'] }];
+            }
+            if (table === workspaces) return [workspace];
+            if (table === workspaceMembers) return [membership];
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('telegram auth evidence unavailable');
+              return [{ id: 'evidence-telegram-verified-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })),
+    delete: vi.fn((table: unknown) => {
+      deleteSink.push({ table });
+      return {
+        where: vi.fn(async () => []),
+      };
+    }),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates, deletes),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const stagedDeletes: Array<{ table: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates, stagedDeletes);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      deletes.push(...stagedDeletes);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, deletes };
+}
+
 describe('authRoutes', () => {
   let savedBotToken: string | undefined;
 
@@ -359,6 +462,112 @@ describe('authRoutes', () => {
       });
       const json = await expectJson(res, 401);
       expect(json).toHaveProperty('error', 'Invalid Telegram initData');
+    });
+
+    it('writes redacted audit-linked evidence when Telegram auth succeeds', async () => {
+      const { db, inserts, updates } = createTelegramAuthDb();
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+      const initData = signedTelegramInitData('test-token', Math.floor(Date.now() / 1000));
+
+      const res = await app.fetch(
+        new Request('http://localhost/telegram', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initData }),
+        }),
+      );
+
+      const json = await expectJson<{
+        token: string;
+        csrfToken: string;
+        workspace: { id: string; name: string };
+        evidenceItemId: string;
+      }>(res, 200);
+      expect(json.token).toMatch(/^[a-f0-9]{64}$/);
+      expect(json.csrfToken).toMatch(/^[a-f0-9]{64}$/);
+      expect(json.workspace).toEqual({ id: workspaceId, name: 'Telegram Workspace' });
+      expect(json.evidenceItemId).toBe('evidence-telegram-verified-1');
+      expect(res.headers.get('set-cookie') ?? '').toContain('helm_session=');
+
+      expect(inserts.map((insert) => insert.table)).toEqual([sessions, auditLog, evidenceItems]);
+      expect(inserts.find((insert) => insert.table === sessions)?.value).toMatchObject({
+        userId: 'user-telegram-1',
+        channel: 'telegram',
+      });
+
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+        metadata: Record<string, unknown>;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId,
+        action: 'AUTH_TELEGRAM_VERIFIED',
+        actor: 'user:user-telegram-1',
+        target: workspaceId,
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          evidenceType: 'auth_telegram_verified',
+          workspaceId,
+          userId: 'user-telegram-1',
+          initDataStoredInEvidence: false,
+          botTokenStoredInEvidence: false,
+          telegramIdStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        }),
+      });
+
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceType: 'auth_telegram_verified',
+        sourceType: 'gateway_auth',
+        redactionState: 'redacted',
+        sensitivity: 'sensitive',
+        metadata: expect.objectContaining({
+          workspaceId,
+          userId: 'user-telegram-1',
+          initDataStoredInEvidence: false,
+          botTokenStoredInEvidence: false,
+          telegramIdStoredInEvidence: false,
+          sessionTokenStoredInEvidence: false,
+        }),
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-telegram-verified-1',
+        }),
+      });
+
+      const serializedProof = JSON.stringify({ auditInsert, evidenceInsert });
+      expect(serializedProof).not.toContain(initData);
+      expect(serializedProof).not.toContain('test-token');
+      expect(serializedProof).not.toContain(json.token);
+    });
+
+    it('fails closed without committing Telegram auth rows when evidence persistence fails', async () => {
+      const { db, inserts, deletes } = createTelegramAuthDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/telegram', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            initData: signedTelegramInitData('test-token', Math.floor(Date.now() / 1000)),
+          }),
+        }),
+      );
+
+      const json = await expectJson<{ error: string }>(res, 500);
+      expect(json.error).toContain('failed to persist telegram auth evidence');
+      expect(inserts).toEqual([]);
+      expect(deletes).toEqual([]);
+      expect(res.headers.get('set-cookie')).toBeNull();
     });
   });
 
