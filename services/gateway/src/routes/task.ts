@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { and, desc, eq } from 'drizzle-orm';
 import { appendEvidenceItem } from '@pilot/db';
@@ -113,6 +113,19 @@ export function taskRoutes(deps: GatewayDeps) {
     if (!task) return c.json({ error: 'Failed to create task' }, 500);
 
     if (body.autoRun) {
+      const dispatchProof = await persistTaskRunDispatchProof(deps, {
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        operatorId: task.operatorId ?? null,
+        actor: `user:${c.get('userId') ?? 'unknown'}`,
+        trigger: 'auto',
+        previousStatus: task.status,
+        context: task.description,
+        iterationBudget: body.iterationBudget,
+      });
+      if (!dispatchProof) {
+        return c.json({ error: 'Task run dispatch evidence persistence failed', task }, 500);
+      }
       const runResult = await executeTaskRun(deps, task.id, {
         workspaceId: task.workspaceId,
         operatorId: task.operatorId ?? undefined,
@@ -239,11 +252,26 @@ export function taskRoutes(deps: GatewayDeps) {
       context?: string;
       iterationBudget?: number;
     };
+    const runContext = body.context ?? task.description;
+
+    const dispatchProof = await persistTaskRunDispatchProof(deps, {
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      operatorId: task.operatorId ?? null,
+      actor: `user:${c.get('userId') ?? 'unknown'}`,
+      trigger: 'manual',
+      previousStatus: task.status,
+      context: runContext,
+      iterationBudget: body.iterationBudget,
+    });
+    if (!dispatchProof) {
+      return c.json({ error: 'Task run dispatch evidence persistence failed' }, 500);
+    }
 
     const result = await executeTaskRun(deps, id, {
       workspaceId: task.workspaceId,
       operatorId: task.operatorId ?? undefined,
-      context: body.context ?? task.description,
+      context: runContext,
       iterationBudget: body.iterationBudget,
     });
 
@@ -280,6 +308,84 @@ export function taskRoutes(deps: GatewayDeps) {
   });
 
   return app;
+}
+
+type TaskRunDispatchProofInput = {
+  workspaceId: string;
+  taskId: string;
+  operatorId: string | null;
+  actor: string;
+  trigger: 'auto' | 'manual';
+  previousStatus: string;
+  context: string;
+  iterationBudget?: number;
+};
+
+async function persistTaskRunDispatchProof(
+  deps: GatewayDeps,
+  input: TaskRunDispatchProofInput,
+): Promise<{ auditEventId: string; evidenceItemId: string } | null> {
+  return deps.db
+    .transaction(async (tx) => {
+      const db = tx as unknown as typeof deps.db;
+      const auditEventId = randomUUID();
+      const replayRef = `task:${input.taskId}:run:${input.trigger}:${auditEventId}`;
+      const auditMetadata = {
+        workspaceId: input.workspaceId,
+        taskId: input.taskId,
+        operatorId: input.operatorId,
+        trigger: input.trigger,
+        previousStatus: input.previousStatus,
+        iterationBudget: input.iterationBudget ?? null,
+        contextHash: createHash('sha256').update(input.context).digest('hex'),
+        contextLength: input.context.length,
+        evidenceContract: 'task_run_dispatch_evidence_required',
+      };
+
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId: input.workspaceId,
+        action: 'TASK_RUN_DISPATCHED',
+        actor: input.actor,
+        target: input.taskId,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'task_run_dispatched',
+          replayRef,
+          ...auditMetadata,
+        },
+      });
+
+      const evidenceItemId = await appendEvidenceItem(db, {
+        workspaceId: input.workspaceId,
+        taskId: input.taskId,
+        auditEventId,
+        evidenceType: 'task_run_dispatched',
+        sourceType: 'gateway_task_route',
+        title: `Task run dispatched: ${input.taskId}`,
+        summary:
+          'Gateway task route accepted a run request and persisted redacted dispatch proof before orchestrator execution.',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef,
+        metadata: auditMetadata,
+      });
+
+      await db
+        .update(auditLog)
+        .set({
+          metadata: {
+            evidenceType: 'task_run_dispatched',
+            replayRef,
+            evidenceItemId,
+            ...auditMetadata,
+          },
+        })
+        .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { auditEventId, evidenceItemId };
+    })
+    .catch(() => null);
 }
 
 async function executeTaskRun(
