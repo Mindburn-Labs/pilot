@@ -423,9 +423,99 @@ export function authRoutes(deps: GatewayDeps) {
     }
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : cookieToken;
     if (!token) return c.json({ error: 'No session' }, 400);
-    await deps.db.delete(sessions).where(eq(sessions.token, token));
+
+    const [session] = await deps.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.token, token))
+      .limit(1);
+    if (!session) {
+      await deps.db.delete(sessions).where(eq(sessions.token, token));
+      clearSessionCookies(c);
+      return c.json({ ok: true });
+    }
+
+    const [membership] = await deps.db
+      .select()
+      .from(workspaceMembers)
+      .where(eq(workspaceMembers.userId, session.userId))
+      .limit(1);
+
+    if (!membership) {
+      await deps.db.delete(sessions).where(eq(sessions.id, session.id));
+      clearSessionCookies(c);
+      return c.json({ ok: true });
+    }
+
+    const evidenceItemId = await deps.db
+      .transaction(async (tx) => {
+        const auditEventId = randomUUID();
+        const replayRef = `auth-session:${membership.workspaceId}:${session.userId}:deleted`;
+        const evidenceMetadata = {
+          workspaceId: membership.workspaceId,
+          userId: session.userId,
+          sessionId: session.id,
+          channel: session.channel,
+          tokenHash: stableAuthEvidenceHash(token),
+          tokenStoredInEvidence: false,
+          cookieTokenStoredInEvidence: false,
+        };
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId: membership.workspaceId,
+          action: 'AUTH_SESSION_DELETED',
+          actor: `user:${session.userId}`,
+          target: session.id,
+          verdict: 'allow',
+          metadata: {
+            evidenceType: 'auth_session_deleted',
+            replayRef,
+            evidenceItemId: null,
+            ...evidenceMetadata,
+          },
+        });
+
+        const createdEvidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId: membership.workspaceId,
+          auditEventId,
+          evidenceType: 'auth_session_deleted',
+          sourceType: 'gateway_auth',
+          title: 'Auth session deleted',
+          summary: 'A user session was deleted; session token material was not stored in evidence.',
+          redactionState: 'redacted',
+          sensitivity: 'sensitive',
+          contentHash: `sha256:${stableAuthEvidenceHash(JSON.stringify(evidenceMetadata))}`,
+          replayRef,
+          metadata: evidenceMetadata,
+        });
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              evidenceType: 'auth_session_deleted',
+              replayRef,
+              evidenceItemId: createdEvidenceItemId,
+              ...evidenceMetadata,
+            },
+          })
+          .where(
+            and(eq(auditLog.workspaceId, membership.workspaceId), eq(auditLog.id, auditEventId)),
+          );
+
+        await tx.delete(sessions).where(eq(sessions.id, session.id));
+
+        return createdEvidenceItemId;
+      })
+      .catch(() => null);
+
+    if (!evidenceItemId) {
+      return c.json({ error: 'failed to persist session logout evidence' }, 500);
+    }
+
     clearSessionCookies(c);
-    return c.json({ ok: true });
+    return c.json({ ok: true, evidenceItemId });
   });
 
   // POST /api/auth/invite/:token — Accept workspace invite
