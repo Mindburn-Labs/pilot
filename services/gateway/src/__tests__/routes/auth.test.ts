@@ -401,6 +401,95 @@ function createTelegramAuthDb(
   return { db, inserts, updates, deletes };
 }
 
+function createSessionLogoutDb(options: { failEvidence?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const deletes: Array<{ table: unknown }> = [];
+  const session = mockSession({
+    id: 'session-logout-1',
+    userId: 'user-logout-1',
+    token: 'logout-token',
+    channel: 'email',
+  });
+  const membership = mockMembership({
+    workspaceId,
+    userId: session.userId,
+    role: 'owner',
+  });
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+    deleteSink: Array<{ table: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => {
+            if (table === sessions) return [session];
+            if (table === workspaceMembers) return [membership];
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('session logout evidence unavailable');
+              return [{ id: 'evidence-session-logout-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => {
+        updateSink.push({ table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })),
+    delete: vi.fn((table: unknown) => {
+      deleteSink.push({ table });
+      return {
+        where: vi.fn(async () => []),
+      };
+    }),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates, deletes),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const stagedDeletes: Array<{ table: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates, stagedDeletes);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      deletes.push(...stagedDeletes);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, deletes };
+}
+
 describe('authRoutes', () => {
   let savedBotToken: string | undefined;
 
@@ -1328,6 +1417,88 @@ describe('authRoutes', () => {
       });
       const json = await expectJson<{ ok: boolean }>(res, 200);
       expect(json.ok).toBe(true);
+    });
+
+    it('writes redacted audit-linked evidence when deleting a resolved session', async () => {
+      const { db, inserts, updates, deletes } = createSessionLogoutDb();
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/session', {
+          method: 'DELETE',
+          headers: { Authorization: 'Bearer logout-token' },
+        }),
+      );
+
+      const json = await expectJson<{ ok: boolean; evidenceItemId: string }>(res, 200);
+      expect(json.ok).toBe(true);
+      expect(json.evidenceItemId).toBe('evidence-session-logout-1');
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      expect(deletes.map((entry) => entry.table)).toEqual([sessions]);
+
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+        metadata: Record<string, unknown>;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId,
+        action: 'AUTH_SESSION_DELETED',
+        actor: 'user:user-logout-1',
+        target: 'session-logout-1',
+        verdict: 'allow',
+        metadata: expect.objectContaining({
+          evidenceType: 'auth_session_deleted',
+          workspaceId,
+          userId: 'user-logout-1',
+          sessionId: 'session-logout-1',
+          tokenStoredInEvidence: false,
+          cookieTokenStoredInEvidence: false,
+        }),
+      });
+
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceType: 'auth_session_deleted',
+        sourceType: 'gateway_auth',
+        redactionState: 'redacted',
+        sensitivity: 'sensitive',
+        metadata: expect.objectContaining({
+          workspaceId,
+          userId: 'user-logout-1',
+          tokenStoredInEvidence: false,
+          cookieTokenStoredInEvidence: false,
+        }),
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-session-logout-1',
+        }),
+      });
+      expect(JSON.stringify({ auditInsert, evidenceInsert })).not.toContain('logout-token');
+    });
+
+    it('fails closed without deleting a resolved session when logout evidence fails', async () => {
+      const { db, inserts, deletes } = createSessionLogoutDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as never });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/session', {
+          method: 'DELETE',
+          headers: { Authorization: 'Bearer logout-token' },
+        }),
+      );
+
+      const json = await expectJson<{ error: string }>(res, 500);
+      expect(json.error).toContain('failed to persist session logout evidence');
+      expect(inserts).toEqual([]);
+      expect(deletes).toEqual([]);
+      expect(res.headers.get('set-cookie')).toBeNull();
     });
   });
 
