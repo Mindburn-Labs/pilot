@@ -370,7 +370,7 @@ const capabilityRecords = validateCapabilityRecords([
     name: 'Evidence ledger',
     state: 'prototype',
     summary:
-      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, launch deployment execution, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append to it. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
+      'A canonical evidence_items schema exists and core HELM receipt, agent-loop receipt, subagent spawn, Tool Broker, browser session control, browser observation, computer action, managed Telegram send, launch deployment execution, retained tenant hard-delete receipt, connector lifecycle, workspace secret mutation, operator mutation, workspace control-plane mutation, approval resolution, compliance control, workspace-scoped pipeline/ingestion jobs, artifact creation, startup lifecycle, and eval writers append durable proof. Tool Broker now fails closed before elevated tool execution without HELM policy metadata and fails elevated completions closed if evidence persistence fails, but evidence coverage is still not complete for every meaningful action.',
     owner: 'Foundation Agent',
     blockers: [
       'Ad-hoc non-workspace ingestion jobs and non-broker legacy writers do not yet append evidence_items for every meaningful action',
@@ -396,6 +396,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gateway compliance framework and attestation routes persist compliance_* evidence_items linked to COMPLIANCE_* audit_log rows before returning control-plane mutation success',
       'Managed Telegram approved and autonomous sends persist redacted managed_telegram_send_intent evidence_items linked to TELEGRAM_CHILD_SEND_MESSAGE audit_log rows before dispatching external Telegram messages',
       'Launch deployment, health-check, and rollback routes persist redacted gateway_launch evidence_items linked to their DEPLOY, DEPLOY_HEALTH_CHECK, and DEPLOY_ROLLBACK audit_log rows before dispatching provider calls',
+      'Admin and scheduled tenant hard-delete cleanup persist retained tenant_deletion_receipts before deleting workspace-scoped audit/evidence-adjacent rows and fail closed without deletion when receipt persistence fails',
       'Tool Broker refuses medium, high, and restricted tool manifests before action persistence or execution unless HELM policy decision metadata is present, and marks elevated tool executions failed if evidence_items persistence fails before completion',
       'Gateway browser observation evidence_items now link to their BROWSER_OBSERVATION_CAPTURED audit_log rows through audit_event_id',
       'Safe computer action evidence_items now link to OPERATOR_COMPUTER_USE audit_log rows through audit_event_id',

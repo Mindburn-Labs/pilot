@@ -1,9 +1,11 @@
 import { Hono } from 'hono';
 import { and, eq, isNull, lt } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
-import { appendEvidenceItem } from '@pilot/db';
+import { appendEvidenceItem, appendTenantDeletionReceipt } from '@pilot/db';
 import {
   auditLog,
+  opportunities,
+  policyViolations,
   workspaces,
   workspaceMembers,
   workspaceDeletions,
@@ -345,6 +347,7 @@ export function adminRoutes(deps: GatewayDeps) {
   // runaway sweep can't spike the DB.
   app.post('/tenants/cleanup', async (c) => {
     const limit = Math.max(1, Math.min(500, Number(c.req.query('limit') ?? '50')));
+    const hardDeletedAt = new Date();
     const toHardDelete = await deps.db
       .select()
       .from(workspaceDeletions)
@@ -356,21 +359,62 @@ export function adminRoutes(deps: GatewayDeps) {
       )
       .limit(limit);
 
+    const receiptIds: string[] = [];
+    try {
+      for (const row of toHardDelete) {
+        receiptIds.push(
+          await appendTenantDeletionReceipt(deps.db, {
+            workspaceId: row.workspaceId,
+            deletionId: row.id,
+            source: 'gateway_admin',
+            actor: 'platform-admin',
+            reason: row.reason,
+            softDeletedAt: row.softDeletedAt,
+            hardDeleteAfter: row.hardDeleteAfter,
+            hardDeletedAt,
+            replayRef: `tenant-hard-delete:${row.workspaceId}:${row.id}:gateway-admin`,
+            metadata: {
+              trigger: 'manual_admin_cleanup',
+              limit,
+              retainedAfterWorkspaceDelete: true,
+              workspaceScopedLedgerRowsDeleted: true,
+            },
+          }),
+        );
+      }
+    } catch {
+      return c.json({ error: 'failed to persist tenant hard-delete receipt' }, 500);
+    }
+
     let hardDeleted = 0;
     for (const row of toHardDelete) {
-      // Cascade: workspace_id is FK'd with onDelete: cascade across every
-      // workspace-scoped table, so DELETE FROM workspaces tears down the
-      // entire tenant in one statement.
-      // lint-tenancy: ok — platform-admin hard-delete, the ONLY caller allowed
-      //   to cross-tenant-delete.
-      await deps.db.delete(workspaces).where(eq(workspaces.id, row.workspaceId));
-      // workspace_deletions FK cascades too; but stamp the time in case the
-      // caller wants an audit trail before the cascade wipes it.
+      await hardDeleteWorkspaceRows(deps.db, row.workspaceId);
       hardDeleted++;
     }
 
-    return c.json({ hardDeleted, remaining: Math.max(0, toHardDelete.length - hardDeleted) });
+    return c.json({
+      hardDeleted,
+      remaining: Math.max(0, toHardDelete.length - hardDeleted),
+      receiptIds,
+    });
   });
 
   return app;
+}
+
+async function hardDeleteWorkspaceRows(db: GatewayDeps['db'], workspaceId: string): Promise<void> {
+  // These workspace-scoped tables intentionally do not cascade in the
+  // original schema. A retained tenant_deletion_receipts row is persisted
+  // before this point so the hard-delete proof survives the tenant teardown.
+  // lint-tenancy: ok — platform-admin hard-delete after retained receipt.
+  await db.delete(auditLog).where(eq(auditLog.workspaceId, workspaceId));
+  // lint-tenancy: ok — platform-admin hard-delete after retained receipt.
+  await db.delete(policyViolations).where(eq(policyViolations.workspaceId, workspaceId));
+  // lint-tenancy: ok — platform-admin hard-delete after retained receipt.
+  await db.delete(opportunities).where(eq(opportunities.workspaceId, workspaceId));
+  // Cascade: workspace_id is FK'd with onDelete: cascade across most
+  // workspace-scoped tables, so this tears down the rest of the tenant.
+  // lint-tenancy: ok — platform-admin hard-delete, the ONLY caller allowed
+  //   to cross-tenant-delete.
+  await db.delete(workspaces).where(eq(workspaces.id, workspaceId));
 }

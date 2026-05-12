@@ -232,6 +232,13 @@
       "when": 1778040000000,
       "tag": "0031_mission_runtime_checkpoints",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1778043600000,
+      "tag": "0032_tenant_deletion_receipts",
+      "breakpoints": true
     }
   ]
 }
