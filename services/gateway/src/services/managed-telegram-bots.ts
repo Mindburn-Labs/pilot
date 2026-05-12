@@ -77,6 +77,18 @@ type ManagedTelegramSendAudit = {
   replayRef: string;
   metadata: Record<string, unknown>;
 };
+type ManagedTelegramInboundEvidenceInput = {
+  workspaceId: string;
+  managedBotId: string;
+  action: string;
+  target: string;
+  evidenceType: string;
+  title: string;
+  summary: string;
+  replayRef: string;
+  sensitivity: 'internal' | 'sensitive';
+  metadata: Record<string, unknown>;
+};
 
 export class ManagedTelegramBotError extends Error {
   constructor(
@@ -662,25 +674,61 @@ export class ManagedTelegramBotService {
       )
       .limit(1);
     if (existing) {
-      await this.opts.db
-        .update(managedTelegramBotLeads)
-        .set({ status: 'captured', updatedAt: new Date() })
-        .where(
-          and(
-            eq(managedTelegramBotLeads.id, existing.id),
-            eq(managedTelegramBotLeads.workspaceId, row.workspaceId),
-          ),
-        );
+      await this.opts.db.transaction(async (tx) => {
+        await tx
+          .update(managedTelegramBotLeads)
+          .set({ status: 'captured', updatedAt: new Date() })
+          .where(
+            and(
+              eq(managedTelegramBotLeads.id, existing.id),
+              eq(managedTelegramBotLeads.workspaceId, row.workspaceId),
+            ),
+          );
+        await appendManagedTelegramInboundEvidence(tx, {
+          workspaceId: row.workspaceId,
+          managedBotId: row.id,
+          action: 'TELEGRAM_CHILD_LEAD_CAPTURED',
+          target: existing.id,
+          evidenceType: 'managed_telegram_lead_captured',
+          title: 'Managed Telegram lead recaptured',
+          summary: 'An existing launch bot lead was recaptured from an inbound Telegram webhook.',
+          replayRef: `managed-telegram-lead:${existing.id}:recaptured`,
+          sensitivity: 'sensitive',
+          metadata: managedTelegramInboundMetadata(row, from, chat, {
+            leadId: existing.id,
+            existingLead: true,
+          }),
+        });
+      });
       return;
     }
 
-    await this.opts.db.insert(managedTelegramBotLeads).values({
-      managedBotId: row.id,
-      workspaceId: row.workspaceId,
-      telegramChatId: String(chat.id),
-      telegramUserId: String(from.id),
-      telegramUsername: from.username ?? null,
-      name: [from.first_name, from.last_name].filter(Boolean).join(' ') || null,
+    const leadId = randomUUID();
+    await this.opts.db.transaction(async (tx) => {
+      await tx.insert(managedTelegramBotLeads).values({
+        id: leadId,
+        managedBotId: row.id,
+        workspaceId: row.workspaceId,
+        telegramChatId: String(chat.id),
+        telegramUserId: String(from.id),
+        telegramUsername: from.username ?? null,
+        name: [from.first_name, from.last_name].filter(Boolean).join(' ') || null,
+      });
+      await appendManagedTelegramInboundEvidence(tx, {
+        workspaceId: row.workspaceId,
+        managedBotId: row.id,
+        action: 'TELEGRAM_CHILD_LEAD_CAPTURED',
+        target: leadId,
+        evidenceType: 'managed_telegram_lead_captured',
+        title: 'Managed Telegram lead captured',
+        summary: 'A launch bot lead was captured from an inbound Telegram webhook.',
+        replayRef: `managed-telegram-lead:${leadId}:captured`,
+        sensitivity: 'sensitive',
+        metadata: managedTelegramInboundMetadata(row, from, chat, {
+          leadId,
+          existingLead: false,
+        }),
+      });
     });
   }
 
@@ -694,22 +742,51 @@ export class ManagedTelegramBotService {
 
     const draft =
       row.responseMode === 'intake_only' ? null : await this.buildSupportDraft(row, text);
-    const [message] = await this.opts.db
-      .insert(managedTelegramBotMessages)
-      .values({
-        managedBotId: row.id,
+    const messageId = randomUUID();
+    const [message] = await this.opts.db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(managedTelegramBotMessages)
+        .values({
+          id: messageId,
+          managedBotId: row.id,
+          workspaceId: row.workspaceId,
+          telegramChatId: String(chat.id),
+          telegramUserId: String(from.id),
+          telegramUsername: from.username ?? null,
+          telegramFirstName: from.first_name ?? null,
+          inboundText: text,
+          inboundMessageId: inbound.message_id,
+          aiDraft: draft?.text ?? null,
+          replyStatus: row.responseMode === 'intake_only' ? 'none' : 'drafted',
+          governanceMetadata: draft ? { supportDraft: draft.governanceMetadata } : {},
+        })
+        .returning();
+      await appendManagedTelegramInboundEvidence(tx, {
         workspaceId: row.workspaceId,
-        telegramChatId: String(chat.id),
-        telegramUserId: String(from.id),
-        telegramUsername: from.username ?? null,
-        telegramFirstName: from.first_name ?? null,
-        inboundText: text,
-        inboundMessageId: inbound.message_id,
-        aiDraft: draft?.text ?? null,
-        replyStatus: row.responseMode === 'intake_only' ? 'none' : 'drafted',
-        governanceMetadata: draft ? { supportDraft: draft.governanceMetadata } : {},
-      })
-      .returning();
+        managedBotId: row.id,
+        action: 'TELEGRAM_CHILD_SUPPORT_MESSAGE_CAPTURED',
+        target: messageId,
+        evidenceType: 'managed_telegram_support_message_captured',
+        title: 'Managed Telegram support message captured',
+        summary: 'A support message was captured from an inbound Telegram webhook.',
+        replayRef: `managed-telegram-message:${messageId}:captured`,
+        sensitivity: 'sensitive',
+        metadata: managedTelegramInboundMetadata(row, from, chat, {
+          messageId,
+          inboundMessageId: inbound.message_id ?? null,
+          inboundTextHash: `sha256:${replyTextHash(text)}`,
+          inboundTextLength: text.length,
+          rawInboundTextStoredInEvidence: false,
+          responseMode: row.responseMode,
+          replyStatus: row.responseMode === 'intake_only' ? 'none' : 'drafted',
+          draftMethod: draft?.governanceMetadata['method'] ?? null,
+          policyDecisionId: draft?.governanceMetadata['policyDecisionId'] ?? null,
+          policyVersion: draft?.governanceMetadata['policyVersion'] ?? null,
+          helmDocumentVersionPins: draft?.governanceMetadata['helmDocumentVersionPins'] ?? {},
+        }),
+      });
+      return [created];
+    });
 
     await ctx.reply('Thanks. Your message reached the founder team.');
     if (!message) return;
@@ -1255,6 +1332,80 @@ function managedTelegramSupportDraftMetadata(result: LlmResult) {
           documentVersionPins: helmDocumentVersionPins,
         }
       : null,
+  };
+}
+
+async function appendManagedTelegramInboundEvidence(
+  db: Pick<Db, 'insert' | 'update'>,
+  input: ManagedTelegramInboundEvidenceInput,
+) {
+  const auditEventId = randomUUID();
+  const metadata = {
+    ...input.metadata,
+    surface: 'managed_telegram',
+    managedBotId: input.managedBotId,
+    evidenceContract: 'managed_telegram_inbound_audit_before_response',
+    credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+  };
+
+  await db.insert(auditLog).values({
+    id: auditEventId,
+    workspaceId: input.workspaceId,
+    action: input.action,
+    actor: `managed_telegram_bot:${input.managedBotId}`,
+    target: input.target,
+    verdict: 'allow',
+    metadata: {
+      ...metadata,
+      evidenceType: input.evidenceType,
+      replayRef: input.replayRef,
+      evidenceItemId: null,
+    },
+  });
+
+  const evidenceItemId = await appendEvidenceItem(db, {
+    workspaceId: input.workspaceId,
+    auditEventId,
+    evidenceType: input.evidenceType,
+    sourceType: 'managed_telegram_webhook',
+    title: input.title,
+    summary: input.summary,
+    redactionState: 'redacted',
+    sensitivity: input.sensitivity,
+    contentHash: `sha256:${stableHash(JSON.stringify(metadata))}`,
+    replayRef: input.replayRef,
+    metadata,
+  });
+
+  await db
+    .update(auditLog)
+    .set({
+      metadata: {
+        ...metadata,
+        evidenceType: input.evidenceType,
+        replayRef: input.replayRef,
+        evidenceItemId,
+      },
+    })
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+}
+
+function managedTelegramInboundMetadata(
+  row: ManagedBotRow,
+  from: { id: string | number; username?: string; first_name?: string; last_name?: string },
+  chat: { id: string | number },
+  extra: Record<string, unknown>,
+) {
+  const displayName = [from.first_name, from.last_name].filter(Boolean).join(' ');
+  return {
+    managedBotId: row.id,
+    telegramBotUsername: row.telegramBotUsername,
+    telegramChatIdHash: stableHash(String(chat.id)),
+    telegramUserIdHash: stableHash(String(from.id)),
+    telegramUsernameHash: from.username ? stableHash(from.username) : null,
+    nameHash: displayName ? stableHash(displayName) : null,
+    rawTelegramIdentityStoredInEvidence: false,
+    ...extra,
   };
 }
 
