@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ExecutedStartupMissionNodeSchema,
   StartupLifecycleStageValues,
   compileStartupLifecycleMission,
   getStartupLifecycleTemplates,
@@ -55,5 +56,32 @@ describe('startup lifecycle compiler', () => {
         /policy|payment|identity|signature|send|deployment|purchase|filing|sharing|public/,
       );
     }
+  });
+
+  it('accepts stalled governed runtime results without promoting the node', () => {
+    const parsed = ExecutedStartupMissionNodeSchema.parse({
+      workspaceId,
+      missionId: '00000000-0000-4000-8000-000000000002',
+      nodeId: '00000000-0000-4000-8000-000000000003',
+      nodeKey: 'market_research',
+      taskId: '00000000-0000-4000-8000-000000000004',
+      executorVersion: 'mission-node-executor.v1',
+      productionReady: false,
+      executionStarted: true,
+      status: 'failed',
+      missionStatus: 'blocked',
+      run: {
+        status: 'stalled',
+        iterationsUsed: 1,
+        iterationBudget: 10,
+        actionCount: 1,
+      },
+      advancedReadyNodes: [],
+      evidenceItemIds: ['00000000-0000-4000-8000-000000000005'],
+      blockers: ['Agent run stalled before completing node acceptance criteria'],
+    });
+
+    expect(parsed.run.status).toBe('stalled');
+    expect(parsed.productionReady).toBe(false);
   });
 });

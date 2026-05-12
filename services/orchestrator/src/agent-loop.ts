@@ -126,11 +126,19 @@ export class AgentLoop {
           await writeCheckpoint(this.db, params.taskRunId, {
             iteration: iteration - 1,
             actions,
-            runUsage: { tokensIn: this.runTokensIn, tokensOut: this.runTokensOut },
+            runUsage: this.runUsage,
             runCost: this.runCost,
-          }).catch(() => { /* fail-soft */ });
+          }).catch(() => {
+            /* fail-soft */
+          });
         }
-        return this.result('stalled', iteration - 1, maxIterations, actions, `Agent stalled: no activity for ${stallTimeoutMs}ms`);
+        return this.result(
+          'stalled',
+          iteration - 1,
+          maxIterations,
+          actions,
+          `Agent stalled: no activity for ${stallTimeoutMs}ms`,
+        );
       }
       emitConductEvent({ type: 'iteration.started', taskId: params.taskId, iteration });
 

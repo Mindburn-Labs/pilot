@@ -492,8 +492,11 @@ export class Conductor {
         .orderBy(desc(evidencePacks.receivedAt))
         .limit(1);
       return row?.id ?? null;
-    } catch {
-      return null;
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Failed to load parent evidence receipt for task run ${parentTaskRunId}: ${detail}`,
+      );
     }
   }
 

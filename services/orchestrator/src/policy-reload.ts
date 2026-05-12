@@ -63,22 +63,18 @@ export class PolicyReloader {
       const { and, eq } = await import('drizzle-orm');
 
       const [row] = await this.db
-        .select({ content: pages.content, compiledTruth: pages.compiledTruth })
+        .select({ compiledTruth: pages.compiledTruth })
         .from(pages)
-        .where(
-          and(
-            eq(pages.workspaceId, this.workspaceId),
-            eq(pages.type, 'workflow_policy'),
-          ),
-        )
+        .where(and(eq(pages.workspaceId, this.workspaceId), eq(pages.type, 'workflow_policy')))
         .limit(1);
 
-      if (!row?.content) {
+      if (!row?.compiledTruth) {
         // No WORKFLOW.md set — keep current policy (or null)
         return;
       }
 
-      const rawContent = typeof row.content === 'string' ? row.content : String(row.content);
+      const rawContent =
+        typeof row.compiledTruth === 'string' ? row.compiledTruth : String(row.compiledTruth);
       const parsed = parseWorkflow(rawContent);
 
       if (this.current && this.current.contentHash === parsed.contentHash) {
@@ -94,19 +90,25 @@ export class PolicyReloader {
         loadedAt: new Date(),
       };
 
-      logger.info('Policy reloaded', {
-        workspaceId: this.workspaceId,
-        oldHash,
-        newHash: parsed.contentHash,
-        name: parsed.config.name,
-        version: parsed.config.version,
-      });
+      logger.info(
+        {
+          workspaceId: this.workspaceId,
+          oldHash,
+          newHash: parsed.contentHash,
+          name: parsed.config.name,
+          version: parsed.config.version,
+        },
+        'Policy reloaded',
+      );
     } catch (err) {
       // Fail-soft: log and continue with current policy
-      logger.error('Policy reload check failed', {
-        workspaceId: this.workspaceId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.error(
+        {
+          workspaceId: this.workspaceId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Policy reload check failed',
+      );
     }
   }
 }

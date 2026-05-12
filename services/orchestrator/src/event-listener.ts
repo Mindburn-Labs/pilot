@@ -48,9 +48,7 @@ export class AmbientEventListener {
   private rateLimiter = new Map<string, { count: number; resetAt: number }>();
   private pgCleanup: (() => void) | null = null;
 
-  constructor(
-    private readonly config: EventListenerConfig = DEFAULT_EVENT_CONFIG,
-  ) {}
+  constructor(private readonly config: EventListenerConfig = DEFAULT_EVENT_CONFIG) {}
 
   /** Register a handler for a specific event type. */
   on(eventType: string, handler: EventHandler): void {
@@ -61,10 +59,13 @@ export class AmbientEventListener {
 
   /** Start listening for events. */
   async start(): Promise<void> {
-    logger.info('Starting ambient event listener', {
-      channels: this.config.pgChannels,
-      webhooks: this.config.enableWebhooks,
-    });
+    logger.info(
+      {
+        channels: this.config.pgChannels,
+        webhooks: this.config.enableWebhooks,
+      },
+      'Starting ambient event listener',
+    );
 
     // PostgreSQL LISTEN/NOTIFY
     if (this.config.pgChannels.length > 0) {
@@ -85,10 +86,13 @@ export class AmbientEventListener {
   async processEvent(event: AmbientEvent): Promise<boolean> {
     // Rate limiting
     if (!this.checkRateLimit(event.workspaceId)) {
-      logger.warn('Event rate limit exceeded', {
-        workspaceId: event.workspaceId,
-        eventType: event.type,
-      });
+      logger.warn(
+        {
+          workspaceId: event.workspaceId,
+          eventType: event.type,
+        },
+        'Event rate limit exceeded',
+      );
       return false;
     }
 
@@ -113,10 +117,13 @@ export class AmbientEventListener {
       try {
         await handler(event);
       } catch (err) {
-        logger.error('Event handler failed', {
-          eventType: event.type,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        logger.error(
+          {
+            eventType: event.type,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          'Event handler failed',
+        );
       }
     }
 
@@ -125,7 +132,10 @@ export class AmbientEventListener {
 
   /** Handle incoming webhook. Returns the handler for Express/Fastify. */
   createWebhookHandler() {
-    return async (req: { body: unknown }, res: { status: (code: number) => { json: (body: unknown) => void } }) => {
+    return async (
+      req: { body: unknown },
+      res: { status: (code: number) => { json: (body: unknown) => void } },
+    ) => {
       if (!this.config.enableWebhooks) {
         res.status(404).json({ error: 'Webhooks disabled' });
         return;
@@ -157,7 +167,7 @@ export class AmbientEventListener {
 
       for (const channel of this.config.pgChannels) {
         if (!VALID_CHANNEL_RE.test(channel)) {
-          logger.error('Invalid PG channel name, skipping', { channel });
+          logger.error({ channel }, 'Invalid PG channel name, skipping');
           continue;
         }
         await client.query(`LISTEN "${channel}"`);
@@ -175,10 +185,13 @@ export class AmbientEventListener {
           };
           void this.processEvent(event);
         } catch (err) {
-          logger.error('PG notification parse error', {
-            channel: msg.channel,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          logger.error(
+            {
+              channel: msg.channel,
+              error: err instanceof Error ? err.message : String(err),
+            },
+            'PG notification parse error',
+          );
         }
       });
 
@@ -187,11 +200,14 @@ export class AmbientEventListener {
         void pool.end();
       };
 
-      logger.info('PG LISTEN started', { channels: this.config.pgChannels });
+      logger.info({ channels: this.config.pgChannels }, 'PG LISTEN started');
     } catch (err) {
-      logger.error('Failed to start PG listener', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      logger.error(
+        {
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'Failed to start PG listener',
+      );
     }
   }
 

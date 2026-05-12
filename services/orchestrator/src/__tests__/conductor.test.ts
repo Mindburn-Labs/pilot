@@ -70,7 +70,9 @@ function makeSkill(overrides: Partial<SkillDefinition> = {}): SkillDefinition {
   };
 }
 
-function makeMockDb(options: { failInsertTable?: unknown; failUpdateTable?: unknown } = {}) {
+function makeMockDb(
+  options: { failInsertTable?: unknown; failSelectTable?: unknown; failUpdateTable?: unknown } = {},
+) {
   let autoId = 0;
   const db = {
     insert: vi.fn((table: unknown) => {
@@ -84,14 +86,19 @@ function makeMockDb(options: { failInsertTable?: unknown; failUpdateTable?: unkn
       };
     }),
     select: vi.fn(() => ({
-      from: vi.fn(() => ({
-        where: vi.fn(() => ({
-          orderBy: vi.fn(() => ({
+      from: vi.fn((table: unknown) => {
+        if (table === options.failSelectTable) {
+          throw new Error(`select failed for ${String(table)}`);
+        }
+        return {
+          where: vi.fn(() => ({
+            orderBy: vi.fn(() => ({
+              limit: vi.fn(async () => []),
+            })),
             limit: vi.fn(async () => []),
           })),
-          limit: vi.fn(async () => []),
-        })),
-      })),
+        };
+      }),
     })),
     update: vi.fn((table: unknown) => {
       if (table === options.failUpdateTable) {
@@ -436,6 +443,24 @@ describe('Conductor.spawn', () => {
     expect(result.verdict).toBe('failed');
     expect(result.error).toBe('subagent_persistence_failed');
     expect(result.summary).toContain('Tool Broker refused elevated tool skill.invoke');
+    expect(llm.complete).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when parent evidence receipt lookup fails before spawning', async () => {
+    const registry = new SubagentRegistry([makeDef({ name: 'scout_x' })]);
+    const db = makeMockDb({ failSelectTable: 'evidencePacks' });
+    const llm = makeLlm();
+    const tools = new ToolRegistry(db);
+    const conductor = new Conductor(db, registry, tools, makePolicy(), llm);
+
+    const result = await conductor.spawn(baseCtx, {
+      name: 'scout_x',
+      task: 'scan market',
+    });
+
+    expect(result.verdict).toBe('failed');
+    expect(result.error).toBe('subagent_persistence_failed');
+    expect(result.summary).toContain('Failed to load parent evidence receipt');
     expect(llm.complete).not.toHaveBeenCalled();
   });
 
