@@ -246,6 +246,54 @@ describe('auditRoutes', () => {
 
       expect(deps.orchestrator.boss.send).not.toHaveBeenCalled();
     });
+
+    it('surfaces approved managed Telegram send failures instead of swallowing them', async () => {
+      const managedTelegram = {
+        sendApprovedMessage: vi.fn(async () => {
+          throw new Error('telegram send failed');
+        }),
+      };
+      const deps = createMockDeps({ managedTelegram } as never);
+      const approval = {
+        id: 'appr-telegram-1',
+        taskId: null,
+        workspaceId: 'ws-1',
+        action: 'TELEGRAM_CHILD_SEND_MESSAGE',
+        status: 'approved',
+        resolvedBy: 'unknown',
+        resolvedAt: new Date().toISOString(),
+      };
+
+      deps.db.insert = vi.fn((table: unknown) => ({
+        values: vi.fn(() => ({
+          returning: vi.fn(async () =>
+            table === evidenceItems ? [{ id: 'evidence-approval-telegram-1' }] : [],
+          ),
+          then: (r: any) => r([]),
+        })),
+      })) as any;
+      deps.db.update = vi.fn((table: unknown) => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => (table === approvals ? [approval] : [])),
+            then: (r: any) => r([]),
+          })),
+        })),
+      })) as any;
+
+      const { fetch } = testApp(auditRoutes, deps);
+      const res = await fetch(
+        'PUT',
+        '/approvals/appr-telegram-1',
+        { status: 'approved' },
+        wsHeader,
+      );
+      const body = await expectJson<{ error: string }>(res, 502);
+
+      expect(body.error).toBe('Failed to send approved managed Telegram message');
+      expect(managedTelegram.sendApprovedMessage).toHaveBeenCalledWith('appr-telegram-1');
+      expect(deps.orchestrator.boss.send).not.toHaveBeenCalled();
+    });
   });
 
   // ── GET /violations ──

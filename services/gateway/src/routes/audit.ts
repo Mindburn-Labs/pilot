@@ -152,7 +152,11 @@ export function auditRoutes(deps: GatewayDeps) {
     }
 
     if (status === 'approved' && !updated.taskId && deps.managedTelegram) {
-      await deps.managedTelegram.sendApprovedMessage(updated.id).catch(() => {});
+      try {
+        await deps.managedTelegram.sendApprovedMessage(updated.id);
+      } catch {
+        return c.json({ error: 'Failed to send approved managed Telegram message' }, 502);
+      }
     }
 
     return c.json(updated);
