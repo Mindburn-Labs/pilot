@@ -2137,7 +2137,7 @@ function missionNodeExecutionContext(
 }
 
 function mapRunStatusToMissionNodeStatus(
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval',
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled',
 ) {
   if (status === 'completed') return 'completed';
   if (status === 'awaiting_approval') return 'awaiting_approval';
@@ -2146,7 +2146,7 @@ function mapRunStatusToMissionNodeStatus(
 }
 
 function mapRunStatusToTaskStatus(
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval',
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled',
 ) {
   if (status === 'completed') return 'completed';
   if (status === 'awaiting_approval') return 'awaiting_approval';
@@ -2154,7 +2154,7 @@ function mapRunStatusToTaskStatus(
 }
 
 function mapRunStatusToMissionStatus(
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval',
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled',
 ) {
   if (status === 'awaiting_approval') return 'awaiting_approval';
   return 'blocked';
@@ -2240,7 +2240,7 @@ async function advanceReadyMissionNodes(
 }
 
 function missionNodeExecutionBlockers(
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval',
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled',
 ): string[] {
   const blockers = [
     'Mission node execution uses the governed task runtime but has not passed Full Startup Launch Eval',
@@ -2250,6 +2250,8 @@ function missionNodeExecutionBlockers(
     blockers.push('Agent run blocked before completing node acceptance criteria');
   if (status === 'budget_exhausted') blockers.push('Agent run exhausted iteration budget');
   if (status === 'awaiting_approval') blockers.push('Agent run is awaiting HELM/user approval');
+  if (status === 'stalled')
+    blockers.push('Agent run stalled before completing node acceptance criteria');
   return blockers;
 }
 

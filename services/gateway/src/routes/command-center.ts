@@ -627,7 +627,7 @@ export function commandCenterRoutes(deps: GatewayDeps) {
       productionReady: false,
       capability,
       promotionRule:
-        'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, and completedAt; command-center eval status never mutates the registry.',
+        'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, completedAt, and trusted metadata.executionMode=real_external_eval; command-center eval status never mutates the registry.',
       evals: {
         scenarios,
         recentRuns: runRows.map(sanitizeEvalRow),

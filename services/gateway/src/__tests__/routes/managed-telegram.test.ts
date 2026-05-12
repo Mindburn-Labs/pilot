@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Hono } from 'hono';
 import {
   approvals,
+  auditLog,
+  evidenceItems,
   managedTelegramBotMessages,
   managedTelegramBots,
   workspaceMembers,
@@ -26,7 +28,10 @@ type ManagedTelegramActionEvaluator = {
 };
 
 type ManagedTelegramDraftBuilder = {
-  buildSupportDraft(row: Record<string, unknown>, inboundText: string): Promise<{
+  buildSupportDraft(
+    row: Record<string, unknown>,
+    inboundText: string,
+  ): Promise<{
     text: string;
     governanceMetadata: Record<string, unknown>;
   }>;
@@ -36,7 +41,9 @@ type ManagedTelegramSupportCapturer = {
   captureSupportMessage(managedBotId: string, ctx: unknown): Promise<void>;
 };
 
-function makeManagedTelegramActionDb() {
+function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } = {}) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
   const state: {
     workspace: Record<string, unknown>;
     membership: Record<string, unknown>;
@@ -100,6 +107,7 @@ function makeManagedTelegramActionDb() {
   };
 
   const updateTable = (table: unknown, values: Record<string, unknown>) => {
+    updates.push({ table, value: values });
     if (table === managedTelegramBots) {
       state.bot = { ...state.bot, ...values };
       return [state.bot];
@@ -112,6 +120,7 @@ function makeManagedTelegramActionDb() {
   };
 
   const insertTable = (table: unknown, values: Record<string, unknown>) => {
+    inserts.push({ table, value: values });
     if (table === managedTelegramBotMessages) {
       state.message = {
         ...state.message,
@@ -130,10 +139,14 @@ function makeManagedTelegramActionDb() {
         },
       ];
     }
+    if (table === evidenceItems) {
+      if (options.failEvidenceInsert) throw new Error('send evidence unavailable');
+      return [{ id: 'evidence-send-item' }];
+    }
     return [];
   };
 
-  const db = {
+  const db: any = {
     select: () => ({
       from: (table: unknown) => ({
         where: () => ({
@@ -145,6 +158,8 @@ function makeManagedTelegramActionDb() {
     insert: (table: unknown) => ({
       values: (values: Record<string, unknown>) => ({
         returning: () => Promise.resolve(insertTable(table, values)),
+        then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+          Promise.resolve(insertTable(table, values)).then(resolve, reject),
       }),
     }),
     update: (table: unknown) => ({
@@ -157,8 +172,9 @@ function makeManagedTelegramActionDb() {
       }),
     }),
   };
+  db.transaction = vi.fn(async (callback: (tx: typeof db) => Promise<unknown>) => callback(db));
 
-  return { db: db as never, state };
+  return { db: db as never, state, inserts, updates };
 }
 
 function appWithContext(routeFactory: typeof launchRoutes, deps = createMockDeps()) {
@@ -437,7 +453,7 @@ describe('managed Telegram service governance', () => {
   });
 
   it('persists HELM policy pins when sending managed Telegram messages', async () => {
-    const { db, state } = makeManagedTelegramActionDb();
+    const { db, state, inserts, updates } = makeManagedTelegramActionDb();
     const helmClient = {
       evaluate: vi.fn(async () => ({
         receipt: {
@@ -478,7 +494,87 @@ describe('managed Telegram service governance', () => {
           documentVersionPins: { managedTelegramPolicy: 'founder-ops-v1' },
         },
       },
+      sendEvidence: {
+        auditEventId: expect.any(String),
+        evidenceItemId: 'evidence-send-item',
+        replayRef: 'managed-telegram-message:msg-1:send',
+      },
     });
+    const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+      id: string;
+      metadata: Record<string, unknown>;
+    };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      action: TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+      actor: 'managed_telegram_bot:bot-1',
+      target: 'telegram-managed-message:msg-1',
+      verdict: 'pending',
+      metadata: expect.objectContaining({
+        status: 'pending',
+        messageId: 'msg-1',
+        managedBotId: 'bot-1',
+        policyDecisionId: 'dec-send',
+        credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+      }),
+    });
+    expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+      workspaceId: 'ws-1',
+      auditEventId: auditInsert.id,
+      evidenceType: 'managed_telegram_send_intent',
+      sourceType: 'managed_telegram',
+      redactionState: 'redacted',
+      sensitivity: 'confidential',
+      metadata: expect.objectContaining({
+        messageId: 'msg-1',
+        telegramChatIdHash: expect.any(String),
+        telegramUserIdHash: expect.any(String),
+        replyTextHash: expect.any(String),
+      }),
+    });
+    expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+      metadata: expect.objectContaining({
+        evidenceItemId: 'evidence-send-item',
+      }),
+    });
+    expect(updates.filter((update) => update.table === auditLog).at(-1)?.value).toMatchObject({
+      verdict: 'sent',
+      metadata: expect.objectContaining({
+        status: 'sent',
+        sentMessageId: '123',
+        evidenceItemId: 'evidence-send-item',
+      }),
+    });
+  });
+
+  it('fails closed before Telegram send when managed message evidence cannot be persisted', async () => {
+    const { db, state } = makeManagedTelegramActionDb({ failEvidenceInsert: true });
+    const helmClient = {
+      evaluate: vi.fn(async () => ({
+        receipt: {
+          decisionId: 'dec-send',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+      })),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: helmClient as never,
+    });
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: { get: vi.fn(async () => 'child-token') },
+    });
+    const fetch = vi.fn(async () => Response.json({ ok: true, result: { message_id: 123 } }));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      service.sendManualReply('ws-1', 'user-1', 'msg-1', 'Approved reply'),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(state.message['replyStatus']).toBe('drafted');
   });
 
   it('persists HELM policy pins when disabling managed Telegram bots', async () => {

@@ -413,10 +413,7 @@ export {
   type ConductEvent,
   type ConductEventType,
 } from './conduct-stream.js';
-export {
-  PolicyReloader,
-  type PolicySnapshot,
-} from './policy-reload.js';
+export { PolicyReloader, type PolicySnapshot } from './policy-reload.js';
 export {
   AmbientEventListener,
   DEFAULT_EVENT_CONFIG,

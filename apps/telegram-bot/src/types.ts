@@ -52,7 +52,7 @@ export interface OrchestratorRunParams {
 }
 
 export interface OrchestratorRunResult {
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval';
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled';
   iterationsUsed: number;
   iterationBudget: number;
   costUsd?: number;

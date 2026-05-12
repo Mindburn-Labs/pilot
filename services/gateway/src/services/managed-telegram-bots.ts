@@ -1,8 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Bot, InlineKeyboard, type Context } from 'grammy';
 import { and, desc, eq, gt, lt } from 'drizzle-orm';
+import { appendEvidenceItem } from '@pilot/db';
 import { TenantSecretStore } from '@pilot/db/tenant-secret-store';
 import {
+  auditLog,
   approvals,
   managedTelegramBotLeads,
   managedTelegramBotMessages,
@@ -68,6 +70,12 @@ type ManagedMessageRow = typeof managedTelegramBotMessages.$inferSelect;
 type ManagedTelegramSupportDraft = {
   text: string;
   governanceMetadata: Record<string, unknown>;
+};
+type ManagedTelegramSendAudit = {
+  auditEventId: string;
+  evidenceItemId: string;
+  replayRef: string;
+  metadata: Record<string, unknown>;
 };
 
 export class ManagedTelegramBotError extends Error {
@@ -711,6 +719,8 @@ export class ManagedTelegramBotService {
     }
 
     if (row.responseMode === 'autonomous_helm') {
+      let sendAudit: ManagedTelegramSendAudit | undefined;
+      let telegramSent = false;
       try {
         const governed = await this.evaluateAction({
           workspaceId: row.workspaceId,
@@ -718,17 +728,23 @@ export class ManagedTelegramBotService {
           resource: `telegram-managed-message:${message.id}`,
           context: { managedBotId: row.id, messageId: message.id, autonomous: true },
         });
+        const governance = governed
+          ? managedTelegramGovernanceMetadata(TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE, governed)
+          : undefined;
+        sendAudit = await this.persistSendAuditIntent(message, draft.text, governance);
         const sent = await ctx.reply(draft.text);
+        telegramSent = true;
         await this.markMessageSent(
           message,
           draft.text,
           String(sent.message_id),
-          governed
-            ? managedTelegramGovernanceMetadata(TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE, governed)
-            : undefined,
+          governance,
+          sendAudit,
         );
         return;
-      } catch {
+      } catch (err) {
+        if (sendAudit) await this.markSendAuditFailed(message, sendAudit, err).catch(() => {});
+        if (telegramSent) throw err;
         // Fall back to approval below.
       }
     }
@@ -867,8 +883,15 @@ export class ManagedTelegramBotService {
     if (!bot) throw new ManagedTelegramBotError('Managed bot not found', 404);
     const token = await this.secrets.get(bot.workspaceId, asSecretKind(bot.tokenSecretRef));
     if (!token) throw new ManagedTelegramBotError('Managed bot token not configured', 503);
-    const sent = await sendTelegramMessage(token, message.telegramChatId, text);
-    await this.markMessageSent(message, text, String(sent.message_id ?? ''), governance);
+    const sendAudit = await this.persistSendAuditIntent(message, text, governance);
+    let sent: { message_id?: number };
+    try {
+      sent = await sendTelegramMessage(token, message.telegramChatId, text);
+    } catch (err) {
+      await this.markSendAuditFailed(message, sendAudit, err);
+      throw err;
+    }
+    await this.markMessageSent(message, text, String(sent.message_id ?? ''), governance, sendAudit);
     return serializeMessage({
       ...message,
       replyText: text,
@@ -884,27 +907,136 @@ export class ManagedTelegramBotService {
     text: string,
     sentMessageId: string,
     governance?: ManagedTelegramGovernanceMetadata,
+    sendAudit?: ManagedTelegramSendAudit,
+  ) {
+    const sentAt = new Date();
+    await this.opts.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      await db
+        .update(managedTelegramBotMessages)
+        .set({
+          replyText: text,
+          replyStatus: 'sent',
+          sentMessageId,
+          error: null,
+          governanceMetadata: appendGovernanceMetadata(
+            appendGovernanceMetadata(message.governanceMetadata, 'sendMessage', governance),
+            'sendEvidence',
+            sendAudit
+              ? {
+                  auditEventId: sendAudit.auditEventId,
+                  evidenceItemId: sendAudit.evidenceItemId,
+                  replayRef: sendAudit.replayRef,
+                }
+              : undefined,
+          ),
+          repliedAt: sentAt,
+          updatedAt: sentAt,
+        })
+        .where(
+          and(
+            eq(managedTelegramBotMessages.id, message.id),
+            eq(managedTelegramBotMessages.workspaceId, message.workspaceId),
+          ),
+        );
+
+      if (sendAudit) {
+        await db
+          .update(auditLog)
+          .set({
+            verdict: 'sent',
+            reason: null,
+            metadata: {
+              ...sendAudit.metadata,
+              status: 'sent',
+              sentMessageId,
+              sentAt: sentAt.toISOString(),
+              evidenceItemId: sendAudit.evidenceItemId,
+            },
+          })
+          .where(
+            and(
+              eq(auditLog.workspaceId, message.workspaceId),
+              eq(auditLog.id, sendAudit.auditEventId),
+            ),
+          );
+      }
+    });
+  }
+
+  private async persistSendAuditIntent(
+    message: ManagedMessageRow,
+    text: string,
+    governance?: ManagedTelegramGovernanceMetadata,
+  ): Promise<ManagedTelegramSendAudit> {
+    const auditEventId = randomUUID();
+    const replayRef = `managed-telegram-message:${message.id}:send`;
+    const metadata = managedTelegramSendEvidenceMetadata(message, text, governance, {
+      status: 'pending',
+      replayRef,
+    });
+
+    return this.opts.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId: message.workspaceId,
+        action: TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+        actor: `managed_telegram_bot:${message.managedBotId}`,
+        target: `telegram-managed-message:${message.id}`,
+        verdict: 'pending',
+        reason: 'Managed Telegram message send intent recorded before external send.',
+        metadata,
+      });
+
+      const evidenceItemId = await appendEvidenceItem(db, {
+        workspaceId: message.workspaceId,
+        auditEventId,
+        evidenceType: 'managed_telegram_send_intent',
+        sourceType: 'managed_telegram',
+        title: 'Managed Telegram send intent',
+        summary:
+          'A governed managed Telegram message send was authorized and recorded before dispatch.',
+        redactionState: 'redacted',
+        sensitivity: 'confidential',
+        contentHash: replyTextHash(text),
+        replayRef,
+        observedAt: new Date(),
+        metadata,
+      });
+
+      await db
+        .update(auditLog)
+        .set({ metadata: { ...metadata, evidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, message.workspaceId), eq(auditLog.id, auditEventId)));
+
+      return {
+        auditEventId,
+        evidenceItemId,
+        replayRef,
+        metadata: { ...metadata, evidenceItemId },
+      };
+    });
+  }
+
+  private async markSendAuditFailed(
+    message: ManagedMessageRow,
+    sendAudit: ManagedTelegramSendAudit,
+    err: unknown,
   ) {
     await this.opts.db
-      .update(managedTelegramBotMessages)
+      .update(auditLog)
       .set({
-        replyText: text,
-        replyStatus: 'sent',
-        sentMessageId,
-        error: null,
-        governanceMetadata: appendGovernanceMetadata(
-          message.governanceMetadata,
-          'sendMessage',
-          governance,
-        ),
-        repliedAt: new Date(),
-        updatedAt: new Date(),
+        verdict: 'failed',
+        reason: errorMessage(err),
+        metadata: {
+          ...sendAudit.metadata,
+          status: 'failed',
+          error: errorMessage(err),
+        },
       })
       .where(
-        and(
-          eq(managedTelegramBotMessages.id, message.id),
-          eq(managedTelegramBotMessages.workspaceId, message.workspaceId),
-        ),
+        and(eq(auditLog.workspaceId, message.workspaceId), eq(auditLog.id, sendAudit.auditEventId)),
       );
   }
 
@@ -1126,6 +1258,30 @@ function managedTelegramSupportDraftMetadata(result: LlmResult) {
   };
 }
 
+function managedTelegramSendEvidenceMetadata(
+  message: ManagedMessageRow,
+  text: string,
+  governance: ManagedTelegramGovernanceMetadata | undefined,
+  extra: Record<string, unknown>,
+) {
+  return {
+    surface: 'managed_telegram',
+    action: TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+    managedBotId: message.managedBotId,
+    messageId: message.id,
+    telegramChatIdHash: stableHash(message.telegramChatId),
+    telegramUserIdHash: stableHash(message.telegramUserId),
+    replyTextHash: replyTextHash(text),
+    replyTextLength: text.length,
+    policyDecisionId: governance?.policyDecisionId ?? null,
+    policyVersion: governance?.policyVersion ?? null,
+    evidencePackId: governance?.evidencePackId ?? null,
+    helmDocumentVersionPins: governance?.helmDocumentVersionPins ?? {},
+    credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+    ...extra,
+  };
+}
+
 function deterministicSupportDraft(fallbackReason: string): ManagedTelegramSupportDraft {
   return {
     text: 'Thanks for reaching out. I am looking into this and will follow up shortly.',
@@ -1155,7 +1311,7 @@ function managedTelegramHelmDocumentVersionPins(policyVersion: string): Record<s
 function appendGovernanceMetadata(
   current: unknown,
   key: string,
-  governance: ManagedTelegramGovernanceMetadata | undefined,
+  governance: Record<string, unknown> | undefined,
 ) {
   const base = isRecord(current) ? current : {};
   if (!governance) return base;
@@ -1163,6 +1319,18 @@ function appendGovernanceMetadata(
     ...base,
     [key]: governance,
   };
+}
+
+function stableHash(value: string) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function replyTextHash(text: string) {
+  return stableHash(text);
+}
+
+function errorMessage(err: unknown) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
