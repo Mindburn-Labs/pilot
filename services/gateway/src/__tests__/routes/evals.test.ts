@@ -716,6 +716,202 @@ describe('evalRoutes', () => {
     ]);
   });
 
+  it('fails closed when real external eval execution is requested without a trusted runner', async () => {
+    const { db, inserts } = createEvalDb();
+    const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
+
+    const res = await fetch(
+      'POST',
+      '/execute',
+      {
+        evalId: 'full_startup_launch',
+        capabilityKey: 'startup_lifecycle',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      wsHeader,
+    );
+    const body = await expectJson<{
+      executionMode: string;
+      executionBlockers: string[];
+      result: { passed: boolean; blockers: string[] };
+      blockerTask: { id: string; title: string };
+      promotions: Array<{ capabilityKey: string }>;
+      productionReadyRegistryMutation: boolean;
+    }>(res, 201);
+
+    expect(body.executionMode).toBe(PRODUCTION_READY_EXECUTION_MODE);
+    expect(body.executionBlockers.join(' ')).toContain(
+      'no trusted production eval runner is configured',
+    );
+    expect(body.result.passed).toBe(false);
+    expect(body.blockerTask.title).toContain('Full Startup Launch Eval');
+    expect(body.promotions).toEqual([]);
+    expect(body.productionReadyRegistryMutation).toBe(false);
+    expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
+      evalId: 'full_startup_launch',
+      status: 'failed',
+      capabilityKey: 'startup_lifecycle',
+      metadata: expect.objectContaining({
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        trustedRunnerAvailable: false,
+      }),
+    });
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
+  });
+
+  it('persists trusted real external eval runner output as promotion eligibility only', async () => {
+    const { db, inserts } = createEvalDb();
+    const productionEvalRunner = {
+      execute: vi.fn(
+        async (input: {
+          workspaceId: string;
+          evalId: 'full_startup_launch';
+          capabilityKey?: 'startup_lifecycle';
+          executionMode: typeof PRODUCTION_READY_EXECUTION_MODE;
+        }) => ({
+          run: {
+            workspaceId: input.workspaceId,
+            evalId: input.evalId,
+            status: 'passed' as const,
+            capabilityKey: 'startup_lifecycle' as const,
+            evidenceRefs: ['evidence:real-startup-launch'],
+            auditReceiptRefs: ['audit:real-startup-launch'],
+            metadata: {
+              executionMode: 'control_plane_proof_check',
+              runnerRef: 'trusted-runner:test',
+            },
+            completedAt: '2026-05-05T00:00:00.000Z',
+            steps: [
+              {
+                stepKey: 'mission-dag-run',
+                status: 'passed' as const,
+                evidenceRefs: ['evidence:real-step'],
+                auditReceiptRefs: ['audit:real-step'],
+                completedAt: '2026-05-05T00:00:00.000Z',
+              },
+            ],
+          },
+        }),
+      ),
+    };
+    const { fetch } = testApp(
+      evalRoutes,
+      createMockDeps({ db: db as never, productionEvalRunner }),
+    );
+
+    const res = await fetch(
+      'POST',
+      '/execute',
+      {
+        evalId: 'full_startup_launch',
+        capabilityKey: 'startup_lifecycle',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      wsHeader,
+    );
+    const body = await expectJson<{
+      executionMode: string;
+      executionBlockers: string[];
+      result: { passed: boolean };
+      promotionChecks: Array<{ canPromote: boolean; capability: { key: string } }>;
+      promotions: Array<{ capabilityKey: string; promotedState: string; status: string }>;
+      productionReadyRegistryMutation: boolean;
+    }>(res, 201);
+
+    expect(productionEvalRunner.execute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId,
+        evalId: 'full_startup_launch',
+        capabilityKey: 'startup_lifecycle',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      }),
+    );
+    expect(body.executionMode).toBe(PRODUCTION_READY_EXECUTION_MODE);
+    expect(body.executionBlockers).toEqual([]);
+    expect(body.result.passed).toBe(true);
+    expect(body.promotionChecks).toEqual([
+      expect.objectContaining({
+        canPromote: true,
+        capability: expect.objectContaining({ key: 'startup_lifecycle' }),
+      }),
+    ]);
+    expect(body.promotions).toEqual([
+      expect.objectContaining({
+        capabilityKey: 'startup_lifecycle',
+        promotedState: 'production_ready',
+        status: 'eligible',
+      }),
+    ]);
+    expect(body.productionReadyRegistryMutation).toBe(false);
+    expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
+      evalId: 'full_startup_launch',
+      status: 'passed',
+      capabilityKey: 'startup_lifecycle',
+      metadata: {
+        runnerRef: 'trusted-runner:test',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)?.value).toMatchObject({
+      capabilityKey: 'startup_lifecycle',
+      promotedState: 'production_ready',
+      status: 'eligible',
+      evidenceRefs: ['evidence:real-startup-launch'],
+      auditReceiptRefs: ['audit:real-startup-launch'],
+    });
+  });
+
+  it('does not promote when the trusted real external runner reports blockers', async () => {
+    const { db, inserts } = createEvalDb();
+    const productionEvalRunner = {
+      execute: vi.fn(async () => ({
+        run: {
+          workspaceId,
+          evalId: 'full_startup_launch' as const,
+          status: 'passed' as const,
+          capabilityKey: 'startup_lifecycle' as const,
+          evidenceRefs: ['evidence:real-startup-launch'],
+          auditReceiptRefs: ['audit:real-startup-launch'],
+          completedAt: '2026-05-05T00:00:00.000Z',
+        },
+        blockers: ['external browser evidence pack was incomplete'],
+      })),
+    };
+    const { fetch } = testApp(
+      evalRoutes,
+      createMockDeps({ db: db as never, productionEvalRunner }),
+    );
+
+    const res = await fetch(
+      'POST',
+      '/execute',
+      {
+        evalId: 'full_startup_launch',
+        capabilityKey: 'startup_lifecycle',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      wsHeader,
+    );
+    const body = await expectJson<{
+      executionMode: string;
+      executionBlockers: string[];
+      result: { passed: boolean; blockers: string[] };
+      promotions: Array<{ capabilityKey: string }>;
+    }>(res, 201);
+
+    expect(body.executionMode).toBe(PRODUCTION_READY_EXECUTION_MODE);
+    expect(body.executionBlockers).toEqual(['external browser evidence pack was incomplete']);
+    expect(body.result.passed).toBe(false);
+    expect(body.result.blockers.join(' ')).toContain('external browser evidence pack');
+    expect(body.promotions).toEqual([]);
+    expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
+      evalId: 'full_startup_launch',
+      status: 'failed',
+      capabilityKey: 'startup_lifecycle',
+    });
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
+  });
+
   it('executes scenario-wide eval proof checks without pinning them to the first capability', async () => {
     const { db, inserts } = createEvalDb();
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));

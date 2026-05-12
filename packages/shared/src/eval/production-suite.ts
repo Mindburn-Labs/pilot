@@ -151,6 +151,7 @@ export const ExecutePilotEvalInputSchema = z.object({
   workspaceId: z.string().uuid().optional(),
   evalId: PilotEvalIdSchema,
   capabilityKey: CapabilityKeySchema.optional(),
+  executionMode: PilotEvalExecutionModeSchema.default('control_plane_proof_check'),
   evidenceRefs: z.array(z.string().min(1)).default([]),
   auditReceiptRefs: z.array(z.string().min(1)).default([]),
   evidenceCoverage: z.array(z.string().min(1)).default([]),
@@ -218,7 +219,7 @@ export type CapabilityEvalReadinessInventory = z.infer<
   typeof CapabilityEvalReadinessInventorySchema
 >;
 
-export const PRODUCTION_READY_EXECUTION_MODE: PilotEvalExecutionMode = 'real_external_eval';
+export const PRODUCTION_READY_EXECUTION_MODE = 'real_external_eval' as const satisfies PilotEvalExecutionMode;
 
 export const pilotProductionEvalSuite: readonly PilotEvalScenario[] = [
   {
@@ -810,6 +811,12 @@ export function executePilotProductionEval(input: ExecutePilotEvalInput): {
   const parsed = ExecutePilotEvalInputSchema.parse(input);
   const scenario = pilotProductionEvalSuite.find((item) => item.id === parsed.evalId);
   const blockers: string[] = [];
+
+  if (parsed.executionMode !== 'control_plane_proof_check') {
+    blockers.push(
+      'executePilotProductionEval only runs control_plane_proof_check; real_external_eval requires a trusted runtime runner',
+    );
+  }
 
   if (!scenario) {
     blockers.push(`No production eval scenario is registered for ${parsed.evalId}`);
