@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { test, expect, type APIRequestContext } from '@playwright/test';
 
 /**
@@ -14,9 +15,8 @@ function uniqueEmail(): string {
   return `e2e-${rand}@pilot.test`;
 }
 
-let ipCounter = 1;
 function uniqueClientIp(): string {
-  return `198.51.100.${ipCounter++}`;
+  return `e2e-${randomUUID()}`;
 }
 
 async function magicAuth(
@@ -62,7 +62,9 @@ test.describe('Magic Link Authentication', () => {
     expect([200, 400]).toContain(tasksResp.status());
 
     // Step 3: Unauthenticated request is blocked
-    const unauthResp = await request.get('/api/tasks');
+    const unauthResp = await request.get('/api/tasks', {
+      headers: { Authorization: `Bearer invalid-${randomUUID()}` },
+    });
     expect(unauthResp.status()).toBe(401);
 
     // Step 4: Logout
@@ -107,9 +109,9 @@ test.describe('Magic Link Authentication', () => {
 
   test('auth endpoints are rate limited', async ({ request }) => {
     // /api/auth/* has max 5 req/min
-    const email = 'rate-limit-test@pilot.test';
+    const email = `rate-limit-${randomUUID()}@pilot.test`;
     const results: number[] = [];
-    const headers = { 'x-forwarded-for': '198.51.100.250' };
+    const headers = { 'x-forwarded-for': uniqueClientIp() };
     for (let i = 0; i < 8; i++) {
       const resp = await request.post('/api/auth/email/request', { headers, data: { email } });
       results.push(resp.status());

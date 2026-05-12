@@ -322,7 +322,7 @@ async function executeTaskRun(
 }
 
 function mapRunStatusToTaskStatus(
-  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval',
+  status: 'completed' | 'budget_exhausted' | 'blocked' | 'awaiting_approval' | 'stalled',
 ) {
   if (status === 'completed') return 'completed';
   if (status === 'awaiting_approval') return 'awaiting_approval';
