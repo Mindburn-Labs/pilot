@@ -345,7 +345,7 @@ describe('evalRoutes', () => {
     });
   });
 
-  it('records a passed eval pack and writes promotion eligibility, not registry state', async () => {
+  it('records a passed manual eval pack without trusting client-supplied promotion mode', async () => {
     const { db, inserts } = createEvalDb();
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
 
@@ -372,7 +372,11 @@ describe('evalRoutes', () => {
       wsHeader,
     );
     const body = await expectJson<{
-      promotionChecks: Array<{ canPromote: boolean; capability: { key: string } }>;
+      promotionChecks: Array<{
+        canPromote: boolean;
+        capability: { key: string };
+        blockers: string[];
+      }>;
       promotions: Array<{ capabilityKey: string; promotedState: string; status: string }>;
       evidenceItemIds: string[];
       productionReadyRegistryMutation: boolean;
@@ -380,19 +384,19 @@ describe('evalRoutes', () => {
 
     expect(body.promotionChecks).toEqual([
       expect.objectContaining({
-        canPromote: true,
+        canPromote: false,
         capability: expect.objectContaining({ key: 'helm_receipts' }),
       }),
     ]);
-    expect(body.promotions).toEqual([
-      expect.objectContaining({
-        capabilityKey: 'helm_receipts',
-        promotedState: 'production_ready',
-        status: 'eligible',
-      }),
-    ]);
+    expect(body.promotionChecks[0]?.blockers.join(' ')).toContain(
+      'executionMode real_external_eval',
+    );
+    expect(body.promotions).toEqual([]);
     expect(body.productionReadyRegistryMutation).toBe(false);
     expect(body.evidenceItemIds).toEqual(['evidence-item-1', 'evidence-item-2', 'evidence-item-3']);
+    expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
+      metadata: {},
+    });
     expect(inserts.find((insert) => insert.table === evalSteps)?.value).toEqual([
       expect.objectContaining({ stepKey: 'restricted-action-denial', status: 'passed' }),
     ]);
@@ -426,11 +430,7 @@ describe('evalRoutes', () => {
         replayRef: 'eval-result:eval-result-1',
       }),
     ]);
-    expect(inserts.find((insert) => insert.table === capabilityPromotions)?.value).toMatchObject({
-      capabilityKey: 'helm_receipts',
-      promotedState: 'production_ready',
-      status: 'eligible',
-    });
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
   });
 
   it('rejects passed eval runs with failed or incomplete proof steps', async () => {
@@ -518,24 +518,23 @@ describe('evalRoutes', () => {
         capability: expect.objectContaining({ key: 'mission_runtime' }),
       }),
       expect.objectContaining({
-        canPromote: true,
+        canPromote: false,
         capability: expect.objectContaining({ key: 'startup_lifecycle' }),
       }),
     ]);
     expect(body.promotionChecks[0]?.blockers.join(' ')).toContain(
       'Multi-Agent Parallel Build Eval',
     );
-    expect(body.promotions).toEqual([
-      expect.objectContaining({
-        capabilityKey: 'startup_lifecycle',
-        promotedState: 'production_ready',
-        status: 'eligible',
-      }),
-    ]);
+    expect(body.promotionChecks[1]?.blockers.join(' ')).toContain(
+      'executionMode real_external_eval',
+    );
+    expect(body.promotions).toEqual([]);
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
     expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
       evalId: 'full_startup_launch',
       status: 'passed',
       capabilityKey: null,
+      metadata: {},
     });
     expect(inserts.find((insert) => insert.table === evalResults)?.value).toMatchObject({
       evalId: 'full_startup_launch',
@@ -579,7 +578,7 @@ describe('evalRoutes', () => {
     expect(inserts).toEqual([]);
   });
 
-  it('records multi-eval promotion eligibility only after all required evals pass', async () => {
+  it('does not record multi-eval promotion eligibility from client-supplied execution mode', async () => {
     const { db, inserts } = createEvalDb([
       [
         {
@@ -615,6 +614,7 @@ describe('evalRoutes', () => {
         canPromote: boolean;
         matchedEvalIds: string[];
         evidenceRefs: string[];
+        blockers: string[];
       }>;
       promotions: Array<{ capabilityKey: string; promotedState: string; status: string }>;
       productionReadyRegistryMutation: boolean;
@@ -622,25 +622,17 @@ describe('evalRoutes', () => {
 
     expect(body.promotionChecks).toEqual([
       expect.objectContaining({
-        canPromote: true,
+        canPromote: false,
         matchedEvalIds: ['helm_governance', 'recovery'],
         evidenceRefs: ['evidence:helm', 'evidence:recovery'],
       }),
     ]);
-    expect(body.promotions).toEqual([
-      expect.objectContaining({
-        capabilityKey: 'evidence_ledger',
-        promotedState: 'production_ready',
-        status: 'eligible',
-      }),
-    ]);
+    expect(body.promotionChecks[0]?.blockers.join(' ')).toContain(
+      'Recovery Eval passing run must use executionMode real_external_eval',
+    );
+    expect(body.promotions).toEqual([]);
     expect(body.productionReadyRegistryMutation).toBe(false);
-    expect(inserts.find((insert) => insert.table === capabilityPromotions)?.value).toMatchObject({
-      capabilityKey: 'evidence_ledger',
-      evidenceRefs: ['evidence:helm', 'evidence:recovery'],
-      auditReceiptRefs: ['audit:helm', 'audit:recovery'],
-      status: 'eligible',
-    });
+    expect(inserts.find((insert) => insert.table === capabilityPromotions)).toBeUndefined();
   });
 
   it('executes a production eval proof check and fails closed when proof is missing', async () => {
@@ -897,6 +889,40 @@ describe('evalRoutes', () => {
     expect(body.check.auditReceiptRefs).toEqual(['audit:startup-launch']);
   });
 
+  it('ignores submitted eval runs for production promotion checks', async () => {
+    const { fetch } = testApp(evalRoutes, createMockDeps());
+    const res = await fetch(
+      'POST',
+      '/promotion-check',
+      {
+        capabilityKey: 'startup_lifecycle',
+        runs: [
+          {
+            evalId: 'full_startup_launch',
+            workspaceId,
+            status: 'passed',
+            capabilityKey: 'startup_lifecycle',
+            evidenceRefs: ['evidence:startup-launch'],
+            auditReceiptRefs: ['audit:startup-launch'],
+            metadata: realExternalMetadata,
+            completedAt: '2026-05-05T00:00:00.000Z',
+          },
+        ],
+      },
+      wsHeader,
+    );
+    const body = await expectJson<{
+      check: { canPromote: boolean; blockers: string[] };
+      submittedRunsIgnored: number;
+      productionReadyRegistryMutation: boolean;
+    }>(res, 200);
+
+    expect(body.check.canPromote).toBe(false);
+    expect(body.check.blockers.join(' ')).toContain('No eval run submitted');
+    expect(body.submittedRunsIgnored).toBe(1);
+    expect(body.productionReadyRegistryMutation).toBe(false);
+  });
+
   it('uses persisted scenario-wide eval runs for every covered capability', async () => {
     const { db } = createEvalDb([
       [
@@ -989,6 +1015,16 @@ describe('evalRoutes', () => {
           metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
+        {
+          evalId: 'recovery',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: 'evidence_ledger',
+          evidenceRefs: ['evidence:recovery'],
+          auditReceiptRefs: ['audit:recovery'],
+          metadata: realExternalMetadata,
+          completedAt: new Date('2026-05-05T00:00:01.000Z'),
+        },
       ],
     ]);
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
@@ -997,18 +1033,6 @@ describe('evalRoutes', () => {
       '/promotion-check',
       {
         capabilityKey: 'evidence_ledger',
-        runs: [
-          {
-            evalId: 'recovery',
-            workspaceId,
-            status: 'passed',
-            capabilityKey: 'evidence_ledger',
-            evidenceRefs: ['evidence:recovery'],
-            auditReceiptRefs: ['audit:recovery'],
-            metadata: realExternalMetadata,
-            completedAt: '2026-05-05T00:00:01.000Z',
-          },
-        ],
       },
       wsHeader,
     );

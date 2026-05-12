@@ -22,8 +22,10 @@ import {
 import {
   ExecutePilotEvalInputSchema,
   PilotEvalIdSchema,
+  PilotEvalExecutionModeSchema,
   PilotEvalRunRecordSchema,
   PilotEvalStatusSchema,
+  PRODUCTION_READY_EXECUTION_MODE,
   RecordPilotEvalRunInputSchema,
   buildCapabilityEvalReadinessInventory,
   checkCapabilityPromotionReadiness,
@@ -62,6 +64,20 @@ function toIso(value: Date | string | null | undefined): string | undefined {
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function trustedExecutionMode(extraResponse: Record<string, unknown>) {
+  const parsed = PilotEvalExecutionModeSchema.safeParse(extraResponse['executionMode']);
+  return parsed.success ? parsed.data : undefined;
+}
+
+function trustedEvalMetadata(
+  metadata: Record<string, unknown> | undefined,
+  extraResponse: Record<string, unknown>,
+) {
+  const { executionMode: _clientExecutionMode, ...rest } = metadata ?? {};
+  const executionMode = trustedExecutionMode(extraResponse);
+  return executionMode ? { ...rest, executionMode } : rest;
 }
 
 function toPilotEvalRunRecord(row: typeof evalRuns.$inferSelect): PilotEvalRunRecord {
@@ -126,6 +142,8 @@ async function persistEvalRun(
   const completedAt =
     input.completedAt ??
     (input.status === 'passed' || input.status === 'failed' ? new Date().toISOString() : undefined);
+  const metadata = trustedEvalMetadata(input.metadata, extraResponse);
+  const executionMode = trustedExecutionMode(extraResponse) ?? null;
 
   return await deps.db.transaction(async (tx) => {
     const db = tx as unknown as typeof deps.db;
@@ -160,7 +178,7 @@ async function persistEvalRun(
         failureReason: input.failureReason ?? input.summary ?? null,
         evidenceRefs: input.evidenceRefs,
         auditReceiptRefs: input.auditReceiptRefs,
-        metadata: input.metadata,
+        metadata,
         completedAt: completedAt ? new Date(completedAt) : null,
       })
       .returning();
@@ -214,7 +232,7 @@ async function persistEvalRun(
       evidenceRefs: input.evidenceRefs,
       auditReceiptRefs: input.auditReceiptRefs,
       runRef: input.runRef ?? `eval:${created.id}`,
-      executionMode: extraResponse['executionMode'] ?? null,
+      executionMode,
       promotionRule:
         'production_ready promotion eligibility only; capability registry remains immutable here',
     };
@@ -250,7 +268,7 @@ async function persistEvalRun(
           capabilityKeys: scenario?.capabilityKeys ?? [],
           evidenceRefs: input.evidenceRefs,
           auditReceiptRefs: input.auditReceiptRefs,
-          executionMode: extraResponse['executionMode'] ?? null,
+          executionMode,
         },
       }),
     );
@@ -445,8 +463,7 @@ export function evalRoutes(deps: GatewayDeps) {
 
     return c.json({
       workspaceId,
-      productionReadyPromotionRule:
-        'A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, completedAt, and metadata.executionMode=real_external_eval.',
+      productionReadyPromotionRule: `A capability cannot be promoted to production_ready unless every required eval run passed with evidenceRefs, auditReceiptRefs, completedAt, and trusted metadata.executionMode=${PRODUCTION_READY_EXECUTION_MODE}.`,
       scenarios: getPilotProductionEvalSuite(),
     });
   });
@@ -595,9 +612,17 @@ export function evalRoutes(deps: GatewayDeps) {
     const persistedRuns = persistedRows.map(toPilotEvalRunRecord);
     const check = checkCapabilityPromotionReadiness({
       capability,
-      runs: [...parsed.data.runs, ...persistedRuns],
+      runs: persistedRuns,
     });
-    return c.json({ workspaceId, check }, 200);
+    return c.json(
+      {
+        workspaceId,
+        check,
+        submittedRunsIgnored: parsed.data.runs.length,
+        productionReadyRegistryMutation: false,
+      },
+      200,
+    );
   });
 
   return app;
