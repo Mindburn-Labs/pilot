@@ -4,10 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { appendEvidenceItem } from '@pilot/db';
 import { auditLog } from '@pilot/db/schema';
 import { type Connector, listReauthRequired } from '@pilot/connectors';
-import {
-  SaveConnectorSessionInput,
-  ValidateConnectorSessionInput,
-} from '@pilot/shared/schemas';
+import { SaveConnectorSessionInput, ValidateConnectorSessionInput } from '@pilot/shared/schemas';
 import { type GatewayDeps } from '../index.js';
 import { getWorkspaceId, requireWorkspaceRole, workspaceIdMismatch } from '../lib/workspace.js';
 
@@ -327,22 +324,25 @@ export function connectorRoutes(deps: GatewayDeps) {
     const ownership = await requireOwnedGrant(deps, c, name, grantId);
     if (ownership instanceof Response) return ownership;
 
-    await deps.connectors.deleteSession(grantId);
     const evidenceItemId = await appendConnectorEvidence(deps, {
       workspaceId: ownership.workspaceId,
       connector,
-      evidenceType: 'connector_session_deleted',
-      title: `Connector session deleted: ${connector.name}`,
-      summary: `Stored browser session was deleted for ${name}`,
-      replayRef: `connector:${name}:session-deleted:${grantId}`,
+      evidenceType: 'connector_session_delete_intent',
+      title: `Connector session delete requested: ${connector.name}`,
+      summary: `Stored browser session deletion was requested for ${name}`,
+      replayRef: `connector:${name}:session-delete-intent:${grantId}`,
       hashContent: {
         connectorId: name,
         grantId,
+        requestedAction: 'delete_session',
       },
       metadata: {
         grantId,
+        effectOrder: 'before_session_delete',
+        requestedAction: 'delete_session',
       },
     });
+    await deps.connectors.deleteSession(grantId);
     return c.json({ deleted: true, evidenceItemId });
   });
 

@@ -530,13 +530,28 @@ describe('connectorRoutes', () => {
       expect(connectors.deleteSession).toHaveBeenCalledWith('grant-1');
       expect(evidence[0]).toMatchObject({
         workspaceId: 'ws-1',
-        evidenceType: 'connector_session_deleted',
-        replayRef: 'connector:yc:session-deleted:grant-1',
+        evidenceType: 'connector_session_delete_intent',
+        replayRef: 'connector:yc:session-delete-intent:grant-1',
         metadata: expect.objectContaining({
           connectorId: 'yc',
+          effectOrder: 'before_session_delete',
           grantId: 'grant-1',
+          requestedAction: 'delete_session',
         }),
       });
+    });
+
+    it('fails closed without deleting the session when evidence persistence fails', async () => {
+      const connectors = createConnectorsMock();
+      connectors.getGrantByWorkspaceConnector.mockResolvedValue(ownedGrant);
+      const deps = createMockDeps({ connectors: connectors as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch('DELETE', '/yc/session?grantId=grant-1', undefined, wsHeader);
+
+      expect(res.status).toBe(500);
+      expect(connectors.deleteSession).not.toHaveBeenCalled();
     });
   });
 
