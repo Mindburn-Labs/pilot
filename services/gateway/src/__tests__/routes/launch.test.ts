@@ -43,6 +43,7 @@ const mockEngine = {
     id: 'dep-1',
     workspaceId: 'ws-1',
     targetId: 'target-1',
+    status: 'pending',
     metadata: { providerId: 'do-app-1', providerDeploymentId: 'do-deploy-1' },
   })),
   updateDeploymentStatus: vi.fn(async () => null),
@@ -564,7 +565,7 @@ describe('launchRoutes', () => {
 
   describe('PUT /deployments/:id/status', () => {
     it('returns 404 when deployment not found', async () => {
-      mockEngine.updateDeploymentStatus.mockResolvedValueOnce(null);
+      mockEngine.getDeployment.mockResolvedValueOnce(null);
 
       const { fetch } = testApp(launchRoutes);
       const res = await fetch(
@@ -575,13 +576,16 @@ describe('launchRoutes', () => {
       );
       const json = await expectJson(res, 404);
       expect(json).toHaveProperty('error', 'Deployment not found');
+      expect(mockEngine.updateDeploymentStatus).not.toHaveBeenCalled();
     });
 
-    it('returns 200 when updated', async () => {
+    it('returns 200 with audit-linked evidence when updated', async () => {
       const updated = { id: 'dep-1', status: 'running', url: 'https://app.ondigitalocean.app' };
       mockEngine.updateDeploymentStatus.mockResolvedValueOnce(updated);
 
-      const { fetch } = testApp(launchRoutes);
+      const { db, inserts, updates } = createDeployTargetDb();
+      const deps = createMockDeps({ db: db as never });
+      const { fetch } = testApp(launchRoutes, deps);
       const res = await fetch(
         'PUT',
         '/deployments/dep-1/status',
@@ -591,7 +595,7 @@ describe('launchRoutes', () => {
         },
         wsHeader,
       );
-      const json = await expectJson(res, 200);
+      const json = await expectJson<Record<string, unknown>>(res, 200);
 
       expect(mockEngine.updateDeploymentStatus).toHaveBeenCalledWith(
         'dep-1',
@@ -600,7 +604,71 @@ describe('launchRoutes', () => {
         undefined,
         'ws-1',
       );
-      expect(json).toEqual(updated);
+      expect(json).toMatchObject({
+        ...updated,
+        evidenceItemId: 'evidence-deploy-target-1',
+        auditEventId: expect.any(String),
+      });
+      expect(String(json.replayRef)).toContain('launch:ws-1:deploy_status_update:');
+      expect(inserts.map((insert) => insert.table)).toEqual([auditLog, evidenceItems]);
+      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        action: 'DEPLOY_STATUS_UPDATE',
+        target: 'deployment:dep-1',
+        verdict: 'pending',
+        metadata: {
+          evidenceType: 'launch_deployment_status_update_requested',
+          executionStatus: 'pending',
+          deploymentId: 'dep-1',
+          targetId: 'target-1',
+          previousStatus: 'pending',
+          status: 'running',
+          urlProvided: true,
+        },
+      });
+      expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'launch_deployment_status_update_requested',
+        sourceType: 'gateway_launch',
+        redactionState: 'redacted',
+        sensitivity: 'restricted',
+        metadata: {
+          action: 'DEPLOY_STATUS_UPDATE',
+          executionStatus: 'pending',
+          deploymentId: 'dep-1',
+          status: 'running',
+          secretValuesStoredInEvidence: false,
+        },
+      });
+      expect(updates.at(-1)?.value).toMatchObject({
+        verdict: 'allow',
+        metadata: {
+          executionStatus: 'completed',
+          deploymentId: 'dep-1',
+          status: 'running',
+          urlRecorded: true,
+        },
+      });
+    });
+
+    it('fails closed before deployment status mutation when evidence persistence fails', async () => {
+      const { db, inserts } = createDeployTargetDb({ failEvidence: true });
+      const deps = createMockDeps({ db: db as never });
+      const { fetch } = testApp(launchRoutes, deps);
+      const res = await fetch(
+        'PUT',
+        '/deployments/dep-1/status',
+        {
+          status: 'running',
+          url: 'https://app.ondigitalocean.app',
+        },
+        wsHeader,
+      );
+      const json = await expectJson<{ error: string }>(res, 500);
+
+      expect(json.error).toBe('failed to persist launch status update evidence');
+      expect(mockEngine.updateDeploymentStatus).not.toHaveBeenCalled();
+      expect(inserts).toEqual([]);
     });
   });
 
