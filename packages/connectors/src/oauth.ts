@@ -40,14 +40,21 @@ export class OAuthFlowManager {
    */
   validateProviders(): void {
     const enabledRaw = process.env['ENABLED_CONNECTORS'] ?? '';
-    const enabled = new Set(enabledRaw.split(',').map((s) => s.trim()).filter(Boolean));
+    const enabled = new Set(
+      enabledRaw
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
     const isProd = process.env['NODE_ENV'] === 'production';
 
     const issues: string[] = [];
     for (const [connectorId, provider] of this.providers) {
       const hasCreds = !!provider.clientId && !!provider.clientSecret;
       if (enabled.has(connectorId) && !hasCreds) {
-        issues.push(`${connectorId} (enabled but missing ${provider.clientIdEnv ?? 'client_id/secret'})`);
+        issues.push(
+          `${connectorId} (enabled but missing ${provider.clientIdEnv ?? 'client_id/secret'})`,
+        );
       } else if (!hasCreds) {
         log.warn({ connectorId }, `Connector registered without credentials — OAuth disabled`);
       }
@@ -72,6 +79,15 @@ export class OAuthFlowManager {
     return this.providers.get(connectorId);
   }
 
+  /** Inspect verified callback state without consuming it. */
+  inspectCallbackState(state: string): OAuthCallbackStateInspection {
+    const pending = this.getVerifiedPendingState(state);
+    return {
+      connectorId: pending.connectorId,
+      workspaceId: pending.workspaceId,
+    };
+  }
+
   /**
    * Initiate OAuth flow — returns the authorization URL to redirect the user to.
    */
@@ -87,7 +103,9 @@ export class OAuthFlowManager {
     }
 
     if (!provider.clientId) {
-      throw new OAuthError(`OAuth client ID not configured for ${params.connectorId}. Set ${provider.clientIdEnv ?? 'CLIENT_ID'} in .env`);
+      throw new OAuthError(
+        `OAuth client ID not configured for ${params.connectorId}. Set ${provider.clientIdEnv ?? 'CLIENT_ID'} in .env`,
+      );
     }
 
     // Generate state with HMAC signature for CSRF protection
@@ -98,9 +116,7 @@ export class OAuthFlowManager {
 
     // Generate PKCE code_verifier + code_challenge
     const codeVerifier = randomBytes(32).toString('base64url');
-    const codeChallenge = createHash('sha256')
-      .update(codeVerifier)
-      .digest('base64url');
+    const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
 
     // Store pending state for callback verification
     this.pendingStates.set(state, {
@@ -140,7 +156,10 @@ export class OAuthFlowManager {
     }
 
     const authUrl = `${provider.authorizationUrl}?${authParams.toString()}`;
-    log.info({ connectorId: params.connectorId, workspaceId: params.workspaceId }, 'OAuth flow initiated');
+    log.info(
+      { connectorId: params.connectorId, workspaceId: params.workspaceId },
+      'OAuth flow initiated',
+    );
 
     return { authUrl, state };
   }
@@ -148,27 +167,8 @@ export class OAuthFlowManager {
   /**
    * Handle OAuth callback — exchanges code for tokens and stores them.
    */
-  async handleCallback(params: {
-    code: string;
-    state: string;
-  }): Promise<OAuthCallbackResult> {
-    // Verify state HMAC
-    const pending = this.pendingStates.get(params.state);
-    if (!pending) {
-      throw new OAuthError('Invalid or expired OAuth state. Please try again.');
-    }
-
-    // Verify HMAC signature
-    const parts = params.state.split(':');
-    if (parts.length < 4) {
-      throw new OAuthError('Malformed OAuth state');
-    }
-    const payload = parts.slice(0, 3).join(':');
-    const receivedHmac = parts[3];
-    const expectedHmac = createHmac('sha256', this.stateSecret).update(payload).digest('hex');
-    if (receivedHmac !== expectedHmac) {
-      throw new OAuthError('OAuth state HMAC verification failed (possible CSRF)');
-    }
+  async handleCallback(params: { code: string; state: string }): Promise<OAuthCallbackResult> {
+    const pending = this.getVerifiedPendingState(params.state);
 
     // Clean up the used state
     this.pendingStates.delete(params.state);
@@ -199,7 +199,10 @@ export class OAuthFlowManager {
 
     if (!tokenResponse.ok) {
       const errorBody = await tokenResponse.text().catch(() => '');
-      log.error({ status: tokenResponse.status, errorBody, connectorId: pending.connectorId }, 'Token exchange failed');
+      log.error(
+        { status: tokenResponse.status, errorBody, connectorId: pending.connectorId },
+        'Token exchange failed',
+      );
       throw new OAuthError(`Token exchange failed: ${tokenResponse.status}`);
     }
 
@@ -225,7 +228,11 @@ export class OAuthFlowManager {
     );
 
     log.info(
-      { connectorId: pending.connectorId, workspaceId: pending.workspaceId, hasRefresh: !!tokenData.refresh_token },
+      {
+        connectorId: pending.connectorId,
+        workspaceId: pending.workspaceId,
+        hasRefresh: !!tokenData.refresh_token,
+      },
       'OAuth tokens stored',
     );
 
@@ -301,9 +308,7 @@ export class OAuthFlowManager {
     }
 
     const data = (await response.json()) as OAuthTokenResponse;
-    const expiresAt = data.expires_in
-      ? new Date(Date.now() + data.expires_in * 1000)
-      : undefined;
+    const expiresAt = data.expires_in ? new Date(Date.now() + data.expires_in * 1000) : undefined;
 
     await this.registry.storeToken(
       grantId,
@@ -342,7 +347,8 @@ export class OAuthFlowManager {
       clientId: process.env['GOOGLE_CLIENT_ID'] ?? '',
       clientSecret: process.env['GOOGLE_CLIENT_SECRET'] ?? '',
       clientIdEnv: 'GOOGLE_CLIENT_ID',
-      redirectUri: process.env['GOOGLE_REDIRECT_URI'] ?? `${baseUrl}/api/connectors/gmail/oauth/callback`,
+      redirectUri:
+        process.env['GOOGLE_REDIRECT_URI'] ?? `${baseUrl}/api/connectors/gmail/oauth/callback`,
       defaultScopes: [
         'https://www.googleapis.com/auth/gmail.send',
         'https://www.googleapis.com/auth/gmail.readonly',
@@ -357,7 +363,8 @@ export class OAuthFlowManager {
       clientId: process.env['GOOGLE_CLIENT_ID'] ?? '',
       clientSecret: process.env['GOOGLE_CLIENT_SECRET'] ?? '',
       clientIdEnv: 'GOOGLE_CLIENT_ID',
-      redirectUri: process.env['GOOGLE_REDIRECT_URI'] ?? `${baseUrl}/api/connectors/gdrive/oauth/callback`,
+      redirectUri:
+        process.env['GOOGLE_REDIRECT_URI'] ?? `${baseUrl}/api/connectors/gdrive/oauth/callback`,
       defaultScopes: ['https://www.googleapis.com/auth/drive.file'],
       supportsPkce: true,
     });
@@ -370,6 +377,28 @@ export class OAuthFlowManager {
         this.pendingStates.delete(state);
       }
     }
+  }
+
+  private getVerifiedPendingState(state: string): PendingOAuthState {
+    this.cleanupExpiredStates();
+
+    const pending = this.pendingStates.get(state);
+    if (!pending) {
+      throw new OAuthError('Invalid or expired OAuth state. Please try again.');
+    }
+
+    const parts = state.split(':');
+    if (parts.length < 4) {
+      throw new OAuthError('Malformed OAuth state');
+    }
+    const payload = parts.slice(0, 3).join(':');
+    const receivedHmac = parts[3];
+    const expectedHmac = createHmac('sha256', this.stateSecret).update(payload).digest('hex');
+    if (receivedHmac !== expectedHmac) {
+      throw new OAuthError('OAuth state HMAC verification failed (possible CSRF)');
+    }
+
+    return pending;
   }
 }
 
@@ -409,6 +438,11 @@ export interface OAuthCallbackResult {
   workspaceId: string;
   grantId: string;
   scopes: string[];
+}
+
+export interface OAuthCallbackStateInspection {
+  connectorId: string;
+  workspaceId: string;
 }
 
 export class OAuthError extends Error {
