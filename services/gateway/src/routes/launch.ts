@@ -379,9 +379,47 @@ export function launchRoutes(deps: GatewayDeps) {
     if (!deployment) {
       return c.json({ error: 'Deployment not found' }, 404);
     }
+    const executionAudit = await persistLaunchExecutionAudit(c, deps, {
+      workspaceId,
+      action: 'DEPLOY_STATUS_UPDATE',
+      target: `deployment:${id}`,
+      evidenceType: 'launch_deployment_status_update_requested',
+      title: 'Launch deployment status update requested',
+      summary: 'Workspace deployment status mutation was durably recorded before state update.',
+      metadata: {
+        deploymentId: id,
+        targetId: deployment.targetId,
+        previousStatus: deployment.status ?? null,
+        status,
+        urlProvided: Boolean(url),
+      },
+    }).catch(() => null);
+    if (!executionAudit) {
+      return c.json({ error: 'failed to persist launch status update evidence' }, 500);
+    }
+
     const updated = await engine.updateDeploymentStatus(id, status, url, undefined, workspaceId);
-    if (!updated) return c.json({ error: 'Deployment not found' }, 404);
-    return c.json(updated);
+    if (!updated) {
+      await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'failed', {
+        executionStatus: 'failed',
+        deploymentId: id,
+        status,
+        reason: 'deployment_not_found_during_status_update',
+      }).catch(() => undefined);
+      return c.json({ error: 'Deployment not found' }, 404);
+    }
+    await markLaunchExecutionAudit(deps, workspaceId, executionAudit, 'allow', {
+      executionStatus: 'completed',
+      deploymentId: id,
+      status,
+      urlRecorded: Boolean(url),
+    });
+    return c.json({
+      ...updated,
+      auditEventId: executionAudit.auditEventId,
+      evidenceItemId: executionAudit.evidenceItemId,
+      replayRef: executionAudit.replayRef,
+    });
   });
 
   // POST /api/launch/deployments/:id/health — Run a provider health check
