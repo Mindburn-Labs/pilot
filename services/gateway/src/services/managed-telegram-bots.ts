@@ -37,6 +37,7 @@ export const TELEGRAM_MANAGED_ACTIONS = {
   CLAIM: 'TELEGRAM_MANAGED_BOT_CLAIM',
   SET_WEBHOOK: 'TELEGRAM_CHILD_SET_WEBHOOK',
   DRAFT_SUPPORT: 'TELEGRAM_SUPPORT_DRAFT',
+  REQUEST_SEND_APPROVAL: 'TELEGRAM_CHILD_SEND_MESSAGE_APPROVAL_REQUESTED',
   SEND_MESSAGE: 'TELEGRAM_CHILD_SEND_MESSAGE',
   ROTATE_TOKEN: 'TELEGRAM_CHILD_ROTATE_TOKEN',
   DISABLE: 'TELEGRAM_CHILD_DISABLE',
@@ -1051,37 +1052,60 @@ export class ManagedTelegramBotService {
 
   private async requestReplyApproval(message: ManagedMessageRow, draft: string) {
     const reason = `Support reply draft for Telegram user ${message.telegramUserId}`;
-    const [approval] = await this.opts.db
-      .insert(approvals)
-      .values({
+    let approvalId: string | undefined;
+    await this.opts.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      const approvalEvidence = await appendManagedTelegramControlEvidence(db, {
         workspaceId: message.workspaceId,
-        action: TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
-        reason,
-        status: 'pending',
-        requestedBy: `managed_telegram_bot:${message.managedBotId}`,
-        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
-      })
-      .returning();
+        actor: `managed_telegram_bot:${message.managedBotId}`,
+        action: TELEGRAM_MANAGED_ACTIONS.REQUEST_SEND_APPROVAL,
+        target: message.id,
+        evidenceType: 'managed_telegram_send_approval_requested',
+        title: 'Managed Telegram send approval requested',
+        summary:
+          'A managed Telegram support reply was drafted and queued for founder approval before notification side effects.',
+        replayRef: `managed-telegram-message:${message.id}:approval-requested`,
+        sensitivity: 'restricted',
+        metadata: managedTelegramApprovalRequestMetadata(message, draft),
+      });
+      const [approval] = await db
+        .insert(approvals)
+        .values({
+          workspaceId: message.workspaceId,
+          action: TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+          reason,
+          status: 'pending',
+          requestedBy: `managed_telegram_bot:${message.managedBotId}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+        })
+        .returning();
+      approvalId = approval?.id;
 
-    await this.opts.db
-      .update(managedTelegramBotMessages)
-      .set({
-        approvalId: approval?.id,
-        replyText: draft,
-        replyStatus: 'awaiting_approval',
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(managedTelegramBotMessages.id, message.id),
-          eq(managedTelegramBotMessages.workspaceId, message.workspaceId),
-        ),
-      );
+      await db
+        .update(managedTelegramBotMessages)
+        .set({
+          approvalId,
+          replyText: draft,
+          replyStatus: 'awaiting_approval',
+          governanceMetadata: appendGovernanceMetadata(
+            message.governanceMetadata,
+            'approvalRequestEvidence',
+            managedTelegramControlEvidenceMetadata(approvalEvidence),
+          ),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(managedTelegramBotMessages.id, message.id),
+            eq(managedTelegramBotMessages.workspaceId, message.workspaceId),
+          ),
+        );
+    });
 
-    if (approval?.id && this.approvalNotifier) {
+    if (approvalId && this.approvalNotifier) {
       await this.approvalNotifier(
         message.workspaceId,
-        approval.id,
+        approvalId,
         TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
         reason,
       ).catch(() => {});
@@ -1724,6 +1748,21 @@ function managedTelegramWebhookGovernanceMetadata(
       policyPin: null,
     }),
     evidence: managedTelegramControlEvidenceMetadata(evidence),
+  };
+}
+
+function managedTelegramApprovalRequestMetadata(message: ManagedMessageRow, draft: string) {
+  return {
+    managedBotId: message.managedBotId,
+    messageId: message.id,
+    telegramChatIdHash: stableHash(message.telegramChatId),
+    telegramUserIdHash: stableHash(message.telegramUserId),
+    inboundMessageIdHash: stableHash(String(message.inboundMessageId)),
+    draftHash: replyTextHash(draft),
+    rawTelegramChatIdStoredInEvidence: false,
+    rawTelegramUserIdStoredInEvidence: false,
+    rawInboundTextStoredInEvidence: false,
+    rawDraftStoredInEvidence: false,
   };
 }
 

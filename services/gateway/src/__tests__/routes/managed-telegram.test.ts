@@ -45,6 +45,9 @@ type ManagedTelegramSupportCapturer = {
 type ManagedTelegramLeadCapturer = {
   captureLead(managedBotId: string, ctx: unknown): Promise<void>;
 };
+type ManagedTelegramApprovalRequester = {
+  requestReplyApproval(message: Record<string, unknown>, draft: string): Promise<void>;
+};
 
 function makeManagedTelegramActionDb(
   options: { failEvidenceInsert?: boolean; failEvidenceType?: string; activeBot?: boolean } = {},
@@ -484,6 +487,121 @@ describe('managed Telegram service governance', () => {
         },
       },
     });
+  });
+
+  it('persists audit-linked evidence before requesting managed Telegram send approval', async () => {
+    const { db, state, inserts, operations } = makeManagedTelegramActionDb();
+    const service = new ManagedTelegramBotService({ db });
+    const notifier = vi.fn(async () => {});
+    service.setApprovalNotifier(notifier);
+
+    await (service as unknown as ManagedTelegramApprovalRequester).requestReplyApproval(
+      state.message,
+      'Draft approval reply',
+    );
+
+    expect(state.message).toMatchObject({
+      approvalId: 'approval-1',
+      replyText: 'Draft approval reply',
+      replyStatus: 'awaiting_approval',
+      governanceMetadata: {
+        approvalRequestEvidence: {
+          auditEventId: expect.any(String),
+          evidenceItemId: 'evidence-send-item',
+        },
+      },
+    });
+    expect(notifier).toHaveBeenCalledWith(
+      'ws-1',
+      'approval-1',
+      TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+      'Support reply draft for Telegram user tg-user-1',
+    );
+
+    const auditInsert = inserts.find(
+      (insert) =>
+        insert.table === auditLog &&
+        (insert.value as { action?: string }).action ===
+          TELEGRAM_MANAGED_ACTIONS.REQUEST_SEND_APPROVAL,
+    )?.value as { id: string; metadata: Record<string, unknown> };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      actor: 'managed_telegram_bot:bot-1',
+      target: 'msg-1',
+      verdict: 'pending',
+    });
+
+    const evidenceInsert = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_send_approval_requested',
+    )?.value as { auditEventId: string; metadata: Record<string, unknown> };
+    expect(evidenceInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      auditEventId: auditInsert.id,
+      evidenceType: 'managed_telegram_send_approval_requested',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'restricted',
+      metadata: expect.objectContaining({
+        managedBotId: 'bot-1',
+        messageId: 'msg-1',
+        rawTelegramChatIdStoredInEvidence: false,
+        rawTelegramUserIdStoredInEvidence: false,
+        rawInboundTextStoredInEvidence: false,
+        rawDraftStoredInEvidence: false,
+      }),
+    });
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('Draft approval reply');
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('Need help');
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('tg-user-1');
+
+    const evidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_send_approval_requested',
+    );
+    const approvalIndex = operations.findIndex(
+      (operation) => operation.kind === 'insert' && operation.table === approvals,
+    );
+    const messageUpdateIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBotMessages &&
+        (operation.value as { replyStatus?: string }).replyStatus === 'awaiting_approval',
+    );
+    expect(evidenceIndex).toBeGreaterThanOrEqual(0);
+    expect(approvalIndex).toBeGreaterThan(evidenceIndex);
+    expect(messageUpdateIndex).toBeGreaterThan(approvalIndex);
+  });
+
+  it('fails closed before requesting managed Telegram send approval when evidence fails', async () => {
+    const { db, state, inserts, updates } = makeManagedTelegramActionDb({
+      failEvidenceType: 'managed_telegram_send_approval_requested',
+    });
+    const service = new ManagedTelegramBotService({ db });
+    const notifier = vi.fn(async () => {});
+    service.setApprovalNotifier(notifier);
+
+    await expect(
+      (service as unknown as ManagedTelegramApprovalRequester).requestReplyApproval(
+        state.message,
+        'Draft approval reply',
+      ),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(inserts.some((insert) => insert.table === approvals)).toBe(false);
+    expect(
+      updates.some(
+        (update) =>
+          update.table === managedTelegramBotMessages &&
+          (update.value as { replyStatus?: string }).replyStatus === 'awaiting_approval',
+      ),
+    ).toBe(false);
+    expect(notifier).not.toHaveBeenCalled();
+    expect(state.message['replyStatus']).toBe('drafted');
   });
 
   it('persists audit-linked evidence for managed Telegram lead capture', async () => {
