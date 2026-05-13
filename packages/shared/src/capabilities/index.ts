@@ -215,6 +215,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Conductor validates explicit skills are loaded and blocks declared skills whose tools exceed the subagent scope',
       'Conductor activates matched skills through the Tool Broker via skill.invoke before subagent execution; action, tool_execution, evidence, audit, and brokered invocation metadata are attached to the subagent run and handoff',
       'task_runs.skill_invocations and agent_handoffs.skill_invocations record skill version, risk, permissions, eval status, declared tools, and source path',
+      'Gateway real_external_eval runner for Skill Invocation Governance verifies brokered skill.invoke execution, task_run and handoff skill metadata, linked Tool Broker evidence, policy pins, and TOOL_EXECUTION audit rows before creating promotion eligibility',
     ],
     evalRequirement: 'Skill Invocation Governance Eval',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,
