@@ -33,7 +33,7 @@ This checklist is operational. It does not make production autonomy claims. A ca
 | `command_center`             | `prototype`   | Command Center Real-State UX Eval proving durable state surfaces answer what Pilot is doing, why allowed, evidence, outcome, and founder requirements                                       |
 | `startup_lifecycle`          | `prototype`   | Full Startup Launch Eval, Stripe Setup Prep Eval, and Company Formation Prep Eval over compiled lifecycle DAGs, escalation contracts, recovery, payment/legal prep, and acceptance criteria |
 | `founder_off_grid`           | `blocked`     | Controlled Founder-Off-Grid Eval with budget/risk limits, escalation inbox, recovery, emergency stop, evidence, and receipts                                                                |
-| `polsia_outperformance`      | `blocked`     | Polsia Outperformance Proof plus external-world autonomy eval results                                                                                                                       |
+| `polsia_outperformance`      | `blocked`     | Polsia Outperformance Proof verifying sourced MIN-301 benchmark matrix, prior real eval run pack, external outcome proof, and audit receipts                                                |
 
 ## Required Real Eval Scenarios
 
@@ -87,4 +87,5 @@ Medium, high, and restricted actions must not execute if any of these fail:
 - Mission runtime has explicit bounded execution and recovery controls, but not a production long-running founder-off-grid loop.
 - Evidence ledger coverage still has non-broker legacy writer gaps.
 - Command center surfaces real state, but mission autonomy is still prototype-only.
-- Founder-off-grid now has a server-owned durable-proof runner for controlled founder-absent evidence packs, but the capability remains blocked until a real eval run passes and long-running off-grid runtime controls are complete. Polsia outperformance remains blocked.
+- Founder-off-grid now has a server-owned durable-proof runner for controlled founder-absent evidence packs, but the capability remains blocked until a real eval run passes and long-running off-grid runtime controls are complete.
+- Polsia outperformance now has a server-owned proof runner for sourced MIN-301 benchmark, prior eval pack, external outcome proof, and audit receipts, but the registry remains blocked until persisted proof passes and a source-controlled promotion PR updates the capability truth record.
