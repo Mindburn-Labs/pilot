@@ -10,6 +10,7 @@ import {
 } from '@pilot/db/schema';
 import { getCapabilityRecord } from '@pilot/shared/capabilities';
 import { SkillRegistry, type SkillDefinition } from '@pilot/shared/skills';
+import { SandboxError, type SandboxHandle, type SandboxProvider } from '@pilot/sandbox';
 import {
   markBrokeredToolContext,
   ToolRegistry,
@@ -23,25 +24,37 @@ import {
 const mockDb = {} as any;
 
 function createRegistry(
-  opts: { memory?: unknown; helmClient?: unknown; skillRegistry?: SkillRegistry } = {},
+  opts: {
+    memory?: unknown;
+    helmClient?: unknown;
+    skillRegistry?: SkillRegistry;
+    sandboxProvider?: SandboxProvider;
+  } = {},
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new ToolRegistry(mockDb as any, opts.memory as any, {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     helmClient: opts.helmClient as any,
     skillRegistry: opts.skillRegistry,
+    sandboxProvider: opts.sandboxProvider,
   });
 }
 
 function createRegistryWithDb(
   db: unknown,
-  opts: { memory?: unknown; helmClient?: unknown; skillRegistry?: SkillRegistry } = {},
+  opts: {
+    memory?: unknown;
+    helmClient?: unknown;
+    skillRegistry?: SkillRegistry;
+    sandboxProvider?: SandboxProvider;
+  } = {},
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new ToolRegistry(db as any, opts.memory as any, {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     helmClient: opts.helmClient as any,
     skillRegistry: opts.skillRegistry,
+    sandboxProvider: opts.sandboxProvider,
   });
 }
 
@@ -155,6 +168,37 @@ function createComputerActionDb(options: { failEvidenceInsert?: boolean } = {}) 
     updatedComputerActions,
     updatedAudit,
     transactionInsertOrder,
+  };
+}
+
+function createFakeSandboxProvider(overrides: Partial<SandboxProvider> = {}): SandboxProvider & {
+  provision: ReturnType<typeof vi.fn<SandboxProvider['provision']>>;
+  exec: ReturnType<typeof vi.fn<SandboxProvider['exec']>>;
+  writeFile: ReturnType<typeof vi.fn<SandboxProvider['writeFile']>>;
+  readFile: ReturnType<typeof vi.fn<SandboxProvider['readFile']>>;
+  destroy: ReturnType<typeof vi.fn<SandboxProvider['destroy']>>;
+} {
+  const handle: SandboxHandle = {
+    id: 'sandbox-1',
+    provider: 'e2b',
+    image: 'test-image',
+    createdAt: '2026-05-12T00:00:00.000Z',
+    expiresAt: '2026-05-12T00:15:00.000Z',
+    workspaceId: '00000000-0000-4000-8000-000000000001',
+  };
+  return {
+    name: 'e2b',
+    provision: vi.fn(async () => handle),
+    exec: vi.fn(async () => ({
+      stdout: 'sandbox cwd\n',
+      stderr: '',
+      exitCode: 0,
+      durationMs: 7,
+    })),
+    writeFile: vi.fn(async () => undefined),
+    readFile: vi.fn(async () => new TextEncoder().encode('before')),
+    destroy: vi.fn(async () => undefined),
+    ...overrides,
   };
 }
 
@@ -1157,6 +1201,273 @@ describe('ToolRegistry', () => {
           '00000000-0000-4000-8000-000000000011',
           evidencePackId,
         ],
+        capability: getCapabilityRecord('computer_use'),
+      });
+    });
+
+    it('uses a configured sandbox provider for sandbox terminal commands and persists evidence', async () => {
+      const { db, insertedComputerActions, updatedComputerActions } = createComputerActionDb();
+      const sandboxProvider = createFakeSandboxProvider();
+      const helmClient = {
+        evaluateOperatorComputerUse: vi.fn(async () => ({
+          status: 'approved_for_execution',
+          evidencePackId,
+          receipt: {
+            decisionId: 'dec-sandbox',
+            policyVersion: 'founder-ops-v1',
+            verdict: 'ALLOW',
+            receivedAt: new Date(),
+            action: 'OPERATOR_COMPUTER_USE',
+            resource: 'pwd',
+            principal: `workspace:${workspaceId}/operator:${operatorId}`,
+          },
+          request: {
+            workspaceId,
+            objective: 'Check sandbox repository path',
+            environment: 'sandbox',
+            operation: 'terminal_command',
+            maxSteps: 12,
+          },
+        })),
+      };
+      const registry = createRegistryWithDb(db, { helmClient, sandboxProvider });
+
+      const result = await registry.execute(
+        'operator.computer_use',
+        {
+          operation: 'terminal_command',
+          environment: 'sandbox',
+          objective: 'Check sandbox repository path',
+          command: 'pwd',
+          cwd: '.',
+        },
+        brokeredToolContext({ workspaceId, taskId, operatorId, actionId }),
+      );
+
+      expect(sandboxProvider.provision).toHaveBeenCalledWith({
+        workspaceId,
+        timeoutMs: 10_000,
+      });
+      expect(sandboxProvider.exec).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sandbox-1' }),
+        expect.objectContaining({
+          cmd: 'pwd',
+          language: 'bash',
+          cwd: '/workspace',
+          timeoutMs: 10_000,
+        }),
+      );
+      expect(sandboxProvider.destroy).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sandbox-1' }),
+      );
+      expect(insertedComputerActions[0]).toMatchObject({
+        workspaceId,
+        taskId,
+        toolActionId: actionId,
+        operatorId,
+        actionType: 'terminal_command',
+        environment: 'sandbox',
+        status: 'running',
+      });
+      expect(updatedComputerActions[0]).toMatchObject({
+        status: 'completed',
+        stdout: 'sandbox cwd\n',
+        exitCode: 0,
+        durationMs: 7,
+        metadata: expect.objectContaining({
+          sandboxProvider: 'e2b',
+          sandboxId: 'sandbox-1',
+          commandPolicy: 'allowlisted_sandbox_provider_no_destructive_shell',
+        }),
+      });
+      expect(result).toMatchObject({
+        execution: {
+          operation: 'terminal_command',
+          environment: 'sandbox',
+          status: 'completed',
+          command: 'pwd',
+          stdout: 'sandbox cwd\n',
+        },
+        capability: getCapabilityRecord('computer_use'),
+      });
+    });
+
+    it('uses a configured sandbox provider for sandbox file writes and persists diff evidence', async () => {
+      const { db, updatedComputerActions } = createComputerActionDb();
+      const sandboxProvider = createFakeSandboxProvider();
+      const helmClient = {
+        evaluateOperatorComputerUse: vi.fn(async () => ({
+          status: 'approved_for_execution',
+          evidencePackId,
+          receipt: {
+            decisionId: 'dec-sandbox-write',
+            policyVersion: 'founder-ops-v1',
+            verdict: 'ALLOW',
+            receivedAt: new Date(),
+            action: 'OPERATOR_COMPUTER_USE',
+            resource: 'tmp/result.txt',
+            principal: `workspace:${workspaceId}/operator:${operatorId}`,
+          },
+          request: {
+            workspaceId,
+            objective: 'Write sandbox result',
+            environment: 'sandbox',
+            operation: 'file_write',
+            maxSteps: 12,
+          },
+        })),
+      };
+      const registry = createRegistryWithDb(db, { helmClient, sandboxProvider });
+
+      const result = await registry.execute(
+        'operator.computer_use',
+        {
+          operation: 'file_write',
+          environment: 'sandbox',
+          objective: 'Write sandbox result',
+          path: 'tmp/result.txt',
+          content: 'after',
+        },
+        brokeredToolContext({ workspaceId, taskId, operatorId, actionId }),
+      );
+
+      expect(sandboxProvider.readFile).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sandbox-1' }),
+        '/workspace/tmp/result.txt',
+      );
+      expect(sandboxProvider.writeFile).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'sandbox-1' }),
+        '/workspace/tmp/result.txt',
+        new TextEncoder().encode('after'),
+      );
+      expect(updatedComputerActions[0]).toMatchObject({
+        status: 'completed',
+        stdout: 'sandbox file_write completed',
+        fileDiff: expect.stringContaining('+after'),
+        outputHash: expect.stringMatching(/^sha256:/u),
+        metadata: expect.objectContaining({
+          sandboxProvider: 'e2b',
+          sandboxId: 'sandbox-1',
+          bytesWritten: 5,
+        }),
+      });
+      expect(result).toMatchObject({
+        execution: {
+          operation: 'file_write',
+          environment: 'sandbox',
+          status: 'completed',
+          path: 'tmp/result.txt',
+          stdout: 'sandbox file_write completed',
+        },
+        capability: getCapabilityRecord('computer_use'),
+      });
+    });
+
+    it('persists denied evidence when sandbox provider is not configured', async () => {
+      const { db, updatedComputerActions } = createComputerActionDb();
+      const sandboxProvider = createFakeSandboxProvider({
+        name: 'noop',
+        provision: vi.fn(async () => {
+          throw new SandboxError('No sandbox provider configured', 'noop', 'not_configured');
+        }),
+      });
+      const helmClient = {
+        evaluateOperatorComputerUse: vi.fn(async () => ({
+          status: 'approved_for_execution',
+          evidencePackId,
+          receipt: {
+            decisionId: 'dec-sandbox-deny',
+            policyVersion: 'founder-ops-v1',
+            verdict: 'ALLOW',
+            receivedAt: new Date(),
+            action: 'OPERATOR_COMPUTER_USE',
+            resource: 'pwd',
+            principal: `workspace:${workspaceId}/operator:${operatorId}`,
+          },
+          request: {
+            workspaceId,
+            objective: 'Check sandbox repository path',
+            environment: 'sandbox',
+            operation: 'terminal_command',
+            maxSteps: 12,
+          },
+        })),
+      };
+      const registry = createRegistryWithDb(db, { helmClient, sandboxProvider });
+
+      const result = await registry.execute(
+        'operator.computer_use',
+        {
+          operation: 'terminal_command',
+          environment: 'sandbox',
+          objective: 'Check sandbox repository path',
+          command: 'pwd',
+          cwd: '.',
+        },
+        brokeredToolContext({ workspaceId, taskId, operatorId, actionId }),
+      );
+
+      expect(updatedComputerActions[0]).toMatchObject({
+        status: 'denied',
+        stderr: 'No sandbox provider configured',
+        metadata: expect.objectContaining({
+          sandboxProvider: 'noop',
+          sandboxErrorCode: 'not_configured',
+        }),
+      });
+      expect(result).toMatchObject({
+        error: 'No sandbox provider configured',
+        execution: { environment: 'sandbox', status: 'denied' },
+        capability: getCapabilityRecord('computer_use'),
+      });
+    });
+
+    it('denies restricted sandbox paths before provider provisioning', async () => {
+      const { db, updatedComputerActions } = createComputerActionDb();
+      const sandboxProvider = createFakeSandboxProvider();
+      const helmClient = {
+        evaluateOperatorComputerUse: vi.fn(async () => ({
+          status: 'approved_for_execution',
+          evidencePackId,
+          receipt: {
+            decisionId: 'dec-sandbox-path-deny',
+            policyVersion: 'founder-ops-v1',
+            verdict: 'ALLOW',
+            receivedAt: new Date(),
+            action: 'OPERATOR_COMPUTER_USE',
+            resource: '../.env',
+            principal: `workspace:${workspaceId}/operator:${operatorId}`,
+          },
+          request: {
+            workspaceId,
+            objective: 'Read sandbox env',
+            environment: 'sandbox',
+            operation: 'file_read',
+            maxSteps: 12,
+          },
+        })),
+      };
+      const registry = createRegistryWithDb(db, { helmClient, sandboxProvider });
+
+      const result = await registry.execute(
+        'operator.computer_use',
+        {
+          operation: 'file_read',
+          environment: 'sandbox',
+          objective: 'Read sandbox env',
+          path: '../.env',
+        },
+        brokeredToolContext({ workspaceId, taskId, operatorId, actionId }),
+      );
+
+      expect(sandboxProvider.provision).not.toHaveBeenCalled();
+      expect(updatedComputerActions[0]).toMatchObject({
+        status: 'denied',
+        stderr: 'sandbox path is outside the allowed project scope: ../.env',
+      });
+      expect(result).toMatchObject({
+        error: 'sandbox path is outside the allowed project scope: ../.env',
+        execution: { environment: 'sandbox', status: 'denied' },
         capability: getCapabilityRecord('computer_use'),
       });
     });

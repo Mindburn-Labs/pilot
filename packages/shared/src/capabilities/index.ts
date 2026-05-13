@@ -283,16 +283,17 @@ const capabilityRecords = validateCapabilityRecords([
     name: 'Computer and sandbox use',
     state: 'prototype',
     summary:
-      'operator.computer_use now supports narrow HELM-governed local safe actions for allowlisted terminal commands, project-scoped file reads/writes, and local dev-server status checks with replayable evidence rows.',
+      'operator.computer_use now supports narrow HELM-governed local safe actions for allowlisted terminal commands, project-scoped file reads/writes, local dev-server status checks, and provider-backed sandbox terminal/file actions with replayable evidence rows.',
     owner: 'Computer Agent',
     blockers: [
       'Safe Computer/Sandbox Action Eval has not promoted the capability to production_ready',
-      'Sandbox provider execution remains unavailable unless a future provider bridge is wired',
+      'Sandbox dev-server status, unrestricted desktop automation, and eval promotion remain incomplete',
       'No unrestricted desktop, IDE, browser clicking, external posting, payment, or destructive computer operation is allowed',
     ],
     evidence: [
       'Gate 7 adds computer_actions evidence rows for terminal_command, file_read, file_write, and dev_server_status operations',
       'operator.computer_use requires Tool Broker action lineage, HELM OPERATOR_COMPUTER_USE approval, restricted path deny rules, and command allowlisting before execution',
+      'operator.computer_use can execute sandbox terminal_command, file_read, and file_write through the @pilot/sandbox provider abstraction when a provider is configured, and records provider failure as denied evidence when unavailable',
       'operator.computer_use safe action evidence_items now link to OPERATOR_COMPUTER_USE audit_log rows through audit_event_id with audit-before-evidence FK ordering',
     ],
     evalRequirement: 'Safe Computer/Sandbox Action Eval',

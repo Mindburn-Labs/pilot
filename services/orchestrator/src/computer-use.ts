@@ -2,18 +2,20 @@ import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { access, readFile, realpath, stat, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, posix, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { appendEvidenceItem } from '@pilot/db';
 import { auditLog, computerActions } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import type { OperatorComputerUse } from '@pilot/shared/schemas';
 import type { OperatorComputerUseResult } from '@pilot/helm-client';
+import { createSandbox, SandboxError, type SandboxProvider } from '@pilot/sandbox';
 import { and, eq } from 'drizzle-orm';
 
 const execFileAsync = promisify(execFile);
 const MAX_CAPTURE_BYTES = 256_000;
 const DEFAULT_PATH = '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin';
+const SANDBOX_ROOT = '/workspace';
 
 const ALLOWED_COMMANDS = new Set([
   'pwd',
@@ -63,6 +65,10 @@ interface Completion {
   metadata?: Record<string, unknown>;
 }
 
+export interface SafeComputerUseOptions {
+  sandboxProvider?: SandboxProvider;
+}
+
 export interface SafeComputerUseResult {
   computerAction: {
     id: string;
@@ -100,6 +106,7 @@ export async function executeSafeComputerUse(
   db: ComputerUseDb,
   req: OperatorComputerUse,
   governance: OperatorComputerUseResult,
+  options: SafeComputerUseOptions = {},
 ): Promise<SafeComputerUseResult> {
   const actionBase = await buildActionBase(req, governance);
   const [record] = await db
@@ -122,7 +129,7 @@ export async function executeSafeComputerUse(
     throw new Error('operator.computer_use could not persist initial computer action evidence');
   }
 
-  const completion = await completeComputerUse(req);
+  const completion = await completeComputerUse(req, options);
   const auditEventId = randomUUID();
   const evidenceItemId = await db.transaction(async (tx) => {
     const txDb = tx as unknown as ComputerUseTx;
@@ -311,10 +318,13 @@ async function buildActionBase(req: OperatorComputerUse, governance: OperatorCom
   };
 }
 
-async function completeComputerUse(req: OperatorComputerUse): Promise<Completion> {
+async function completeComputerUse(
+  req: OperatorComputerUse,
+  options: SafeComputerUseOptions,
+): Promise<Completion> {
   const started = Date.now();
   if (req.environment === 'sandbox') {
-    return denied('sandbox execution provider is not configured for operator.computer_use yet');
+    return completeSandboxComputerUse(req, options, started);
   }
 
   try {
@@ -444,6 +454,159 @@ async function completeComputerUse(req: OperatorComputerUse): Promise<Completion
   }
 }
 
+function sandboxPreflight(
+  req: OperatorComputerUse,
+): { target: { cwd?: string; filePath?: string } } | { denial: string } {
+  if (req.operation === 'dev_server_status') {
+    return {
+      denial:
+        'sandbox dev_server_status is not supported for operator.computer_use; use local environment for localhost checks',
+    };
+  }
+
+  if (req.operation === 'terminal_command') {
+    const cwd = resolveSandboxPath(req.cwd);
+    if (cwd instanceof Error) return { denial: cwd.message };
+    const commandDenial = validateCommand(req.command, req.args, cwd, SANDBOX_ROOT);
+    if (commandDenial) return { denial: commandDenial };
+    return { target: { cwd } };
+  }
+
+  const filePath = resolveSandboxPath(req.path);
+  if (filePath instanceof Error) return { denial: filePath.message };
+  return { target: { filePath } };
+}
+
+async function completeSandboxComputerUse(
+  req: OperatorComputerUse,
+  options: SafeComputerUseOptions,
+  started: number,
+): Promise<Completion> {
+  const preflight = sandboxPreflight(req);
+  if ('denial' in preflight) return denied(preflight.denial, Date.now() - started);
+
+  const provider = options.sandboxProvider ?? createSandbox();
+  let handle: Awaited<ReturnType<SandboxProvider['provision']>> | undefined;
+  try {
+    handle = await provider.provision({
+      workspaceId: req.workspaceId,
+      timeoutMs: req.operation === 'terminal_command' ? req.timeoutMs : undefined,
+    });
+    const providerMetadata = {
+      sandboxProvider: provider.name,
+      sandboxId: handle.id,
+      sandboxImage: handle.image,
+      sandboxExpiresAt: handle.expiresAt,
+    };
+
+    if (req.operation === 'terminal_command') {
+      const cwd = preflight.target.cwd;
+      if (!cwd)
+        return denied('sandbox terminal_command cwd preflight failed', Date.now() - started);
+      const result = await provider.exec(handle, {
+        cmd: buildSandboxCommand(req.command, req.args),
+        language: 'bash',
+        cwd,
+        timeoutMs: req.timeoutMs,
+      });
+      const stdout = redactAndLimit(result.stdout);
+      const stderr = redactAndLimit(result.stderr);
+      return {
+        status: result.exitCode === 0 ? 'completed' : 'failed',
+        stdout,
+        stderr,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        outputHash: hashText(`${stdout}\n${stderr}`),
+        metadata: {
+          ...providerMetadata,
+          commandPolicy: 'allowlisted_sandbox_provider_no_destructive_shell',
+          sandboxTruncated: result.truncated ?? false,
+        },
+      };
+    }
+
+    if (req.operation === 'file_read') {
+      const filePath = preflight.target.filePath;
+      if (!filePath) return denied('sandbox file_read path preflight failed', Date.now() - started);
+      const bytes = await provider.readFile(handle, filePath);
+      if (bytes.byteLength > req.maxBytes) {
+        return denied(
+          `sandbox file_read target exceeds maxBytes (${bytes.byteLength} > ${req.maxBytes})`,
+          Date.now() - started,
+        );
+      }
+      const content = Buffer.from(bytes).toString('utf8');
+      const stdout = redactAndLimit(content, req.maxBytes);
+      return {
+        status: 'completed',
+        stdout,
+        exitCode: 0,
+        durationMs: Date.now() - started,
+        outputHash: hashText(content),
+        metadata: {
+          ...providerMetadata,
+          bytes: bytes.byteLength,
+          fileHash: hashText(content),
+        },
+      };
+    }
+
+    if (req.operation !== 'file_write') {
+      return denied(`sandbox operation is unsupported: ${req.operation}`, Date.now() - started);
+    }
+
+    const filePath = preflight.target.filePath;
+    if (!filePath) return denied('sandbox file_write path preflight failed', Date.now() - started);
+    const before = await provider
+      .readFile(handle, filePath)
+      .then((bytes) => Buffer.from(bytes).toString('utf8'))
+      .catch(() => null);
+    const beforeHash = before === null ? null : hashText(before);
+    if (req.expectedCurrentHash && beforeHash !== req.expectedCurrentHash) {
+      return denied(
+        'sandbox file_write expectedCurrentHash did not match current file hash',
+        Date.now() - started,
+      );
+    }
+    await provider.writeFile(handle, filePath, new TextEncoder().encode(req.content));
+    const diff = redactAndLimit(buildSimpleDiff(filePath, before ?? '', req.content));
+    return {
+      status: 'completed',
+      stdout: 'sandbox file_write completed',
+      exitCode: 0,
+      durationMs: Date.now() - started,
+      fileDiff: diff,
+      outputHash: hashText(req.content),
+      metadata: {
+        ...providerMetadata,
+        beforeHash,
+        afterHash: hashText(req.content),
+        bytesWritten: Buffer.byteLength(req.content),
+      },
+    };
+  } catch (err) {
+    const stderr = err instanceof Error ? err.message : String(err);
+    const status =
+      err instanceof SandboxError && err.code === 'not_configured' ? 'denied' : 'failed';
+    return {
+      status,
+      stderr,
+      exitCode: 1,
+      durationMs: Date.now() - started,
+      outputHash: hashText(stderr),
+      metadata: {
+        sandboxProvider: provider.name,
+        sandboxErrorCode: err instanceof SandboxError ? err.code : 'unknown',
+      },
+    };
+  } finally {
+    if (handle) {
+      await provider.destroy(handle).catch(() => undefined);
+    }
+  }
+}
+
 function denied(reason: string, durationMs = 0): Completion {
   return {
     status: 'denied',
@@ -521,6 +684,9 @@ function validateCommand(
   if (/[;&|`$<>]/u.test(joined)) {
     return 'terminal_command denied shell metacharacter';
   }
+  if (/["'\\\r\n]/u.test(joined)) {
+    return 'terminal_command denied unsafe quoting or control character';
+  }
   if (command === 'git' && isDeniedGitInvocation(args)) {
     return 'terminal_command denied mutating git invocation';
   }
@@ -536,6 +702,34 @@ function validateCommand(
     if (argReason) return argReason;
   }
   return null;
+}
+
+function resolveSandboxPath(inputPath: string): string | Error {
+  const candidate = posix.normalize(
+    posix.isAbsolute(inputPath)
+      ? inputPath
+      : posix.join(SANDBOX_ROOT, inputPath === '.' ? '' : inputPath),
+  );
+  if (!isInsidePosix(candidate, SANDBOX_ROOT)) {
+    return new Error(`sandbox path is outside the allowed project scope: ${inputPath}`);
+  }
+  const restricted = restrictedPathReason(candidate);
+  if (restricted) return new Error(restricted);
+  return candidate;
+}
+
+function isInsidePosix(path: string, root: string): boolean {
+  const rel = posix.relative(root, path);
+  return rel === '' || (!rel.startsWith('..') && !posix.isAbsolute(rel));
+}
+
+function buildSandboxCommand(command: string, args: string[]): string {
+  return [command, ...args.map(shellQuote)].join(' ');
+}
+
+function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)) return value;
+  return `'${value.replace(/'/gu, "'\\''")}'`;
 }
 
 function isDeniedGitInvocation(args: string[]): boolean {

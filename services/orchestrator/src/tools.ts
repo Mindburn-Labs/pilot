@@ -16,6 +16,7 @@ import type { HelmClient } from '@pilot/helm-client';
 import { withToolSpan } from '@pilot/shared/otel';
 import type { McpClient } from '@pilot/shared/mcp';
 import { scoreOpportunityEvidence } from '@pilot/shared/scoring';
+import type { SandboxProvider } from '@pilot/sandbox';
 import type { ToolDef } from './agent-loop.js';
 import type { Conductor, ParentContext } from './conductor.js';
 import { executeSafeComputerUse } from './computer-use.js';
@@ -43,6 +44,7 @@ export class ToolRegistry {
       skipBuiltins?: boolean;
       helmClient?: HelmClient;
       skillRegistry?: SkillRegistry;
+      sandboxProvider?: SandboxProvider;
     },
   ) {
     this.skillRegistry = options?.skillRegistry;
@@ -70,6 +72,7 @@ export class ToolRegistry {
       skipBuiltins: true,
       helmClient: this.options?.helmClient,
       skillRegistry: this.skillRegistry,
+      sandboxProvider: this.options?.sandboxProvider,
     });
     for (const [name, tool] of this.tools) {
       if (allowed.has(name)) {
@@ -534,7 +537,9 @@ export class ToolRegistry {
             : {}),
           ...(devServerUrl ? { targetUrl: devServerUrl, devServerUrl } : {}),
         });
-        const result = await executeSafeComputerUse(this.db, req, evaluation);
+        const result = await executeSafeComputerUse(this.db, req, evaluation, {
+          sandboxProvider: this.options?.sandboxProvider,
+        });
         return { ...result, capability };
       },
     });
