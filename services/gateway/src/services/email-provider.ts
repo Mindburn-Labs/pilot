@@ -1,4 +1,5 @@
 import { createLogger } from '@pilot/shared/logger';
+import { createHash } from 'node:crypto';
 
 const log = createLogger('email');
 
@@ -61,7 +62,10 @@ class ResendProvider implements EmailProvider {
   readonly kind = 'resend';
   private clientPromise: Promise<unknown> | null = null;
 
-  constructor(private readonly apiKey: string, private readonly from: string) {}
+  constructor(
+    private readonly apiKey: string,
+    private readonly from: string,
+  ) {}
 
   private async getClient() {
     if (!this.clientPromise) {
@@ -72,7 +76,9 @@ class ResendProvider implements EmailProvider {
 
   async sendMagicLink(params: { to: string; code: string; linkUrl: string }): Promise<void> {
     const client = (await this.getClient()) as {
-      emails: { send: (args: Record<string, unknown>) => Promise<{ error: { message?: string } | null }> };
+      emails: {
+        send: (args: Record<string, unknown>) => Promise<{ error: { message?: string } | null }>;
+      };
     };
     const { subject, html, text } = buildMagicLinkContent(params.code, params.linkUrl);
     const result = await client.emails.send({
@@ -85,7 +91,7 @@ class ResendProvider implements EmailProvider {
     if (result.error) {
       throw new Error(`Resend send failed: ${result.error.message ?? 'unknown'}`);
     }
-    log.info({ to: params.to }, 'Magic link email sent via Resend');
+    log.info(emailLogMetadata(params), 'Magic link email sent via Resend');
   }
 }
 
@@ -107,9 +113,10 @@ class SmtpProvider implements EmailProvider {
           host: this.config.host,
           port: this.config.port,
           secure: this.config.secure ?? this.config.port === 465,
-          auth: this.config.user && this.config.pass
-            ? { user: this.config.user, pass: this.config.pass }
-            : undefined,
+          auth:
+            this.config.user && this.config.pass
+              ? { user: this.config.user, pass: this.config.pass }
+              : undefined,
         }),
       );
     }
@@ -128,7 +135,7 @@ class SmtpProvider implements EmailProvider {
       html,
       text,
     });
-    log.info({ to: params.to }, 'Magic link email sent via SMTP');
+    log.info(emailLogMetadata(params), 'Magic link email sent via SMTP');
   }
 }
 
@@ -139,15 +146,27 @@ class NoopProvider implements EmailProvider {
 
   async sendMagicLink(params: { to: string; code: string; linkUrl: string }): Promise<void> {
     log.warn(
-      { to: params.to, code: params.code, linkUrl: params.linkUrl },
-      'EMAIL_PROVIDER=noop — email not actually sent. Use the code directly in development.',
+      emailLogMetadata(params),
+      'EMAIL_PROVIDER=noop — email not actually sent. Use the dev response code directly in development.',
     );
   }
 }
 
+function emailLogMetadata(params: { to: string; code: string; linkUrl: string }) {
+  return {
+    toHash: createHash('sha256').update(params.to.trim().toLowerCase()).digest('hex'),
+    toStoredInLogs: false,
+    codeStoredInLogs: false,
+    linkUrlStoredInLogs: false,
+  };
+}
+
 // ─── Content Builder ───
 
-function buildMagicLinkContent(code: string, linkUrl: string): {
+function buildMagicLinkContent(
+  code: string,
+  linkUrl: string,
+): {
   subject: string;
   html: string;
   text: string;
