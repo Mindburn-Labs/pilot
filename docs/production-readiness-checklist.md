@@ -81,7 +81,7 @@ Medium, high, and restricted actions must not execute if any of these fail:
 
 ## Current Non-Production Reasons
 
-- Real external eval adapters are not complete for the required production scenarios.
+- Server-owned real_external_eval adapters now exist for every registered production scenario, but persisted passing proof packs have not promoted any capability to `production_ready`.
 - Browser execution is limited to governed read-only observation and lacks a productized bridge/eval pass.
 - Computer use is limited to safe local actions plus provider-backed sandbox command/file actions and lacks sandbox dev-server eval promotion.
 - Mission runtime has explicit bounded execution and recovery controls, but not a production long-running founder-off-grid loop.
