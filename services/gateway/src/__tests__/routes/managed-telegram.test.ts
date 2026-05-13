@@ -47,7 +47,7 @@ type ManagedTelegramLeadCapturer = {
 };
 
 function makeManagedTelegramActionDb(
-  options: { failEvidenceInsert?: boolean; activeBot?: boolean } = {},
+  options: { failEvidenceInsert?: boolean; failEvidenceType?: string; activeBot?: boolean } = {},
 ) {
   const inserts: Array<{ table: unknown; value: unknown }> = [];
   const updates: Array<{ table: unknown; value: unknown }> = [];
@@ -174,6 +174,17 @@ function makeManagedTelegramActionDb(
       };
       return [state.provisioningRequest];
     }
+    if (table === managedTelegramBots) {
+      state.bot = {
+        ...values,
+        id: values['id'] ?? 'bot-1',
+        createdAt: new Date('2026-05-05T00:00:00Z'),
+        updatedAt: new Date('2026-05-05T00:00:00Z'),
+        disabledAt: null,
+        lastError: values['lastError'] ?? null,
+      };
+      return [state.bot];
+    }
     if (table === approvals) {
       return [
         {
@@ -185,7 +196,12 @@ function makeManagedTelegramActionDb(
       ];
     }
     if (table === evidenceItems) {
-      if (options.failEvidenceInsert) throw new Error('send evidence unavailable');
+      if (
+        options.failEvidenceInsert ||
+        options.failEvidenceType === (values as { evidenceType?: string }).evidenceType
+      ) {
+        throw new Error('send evidence unavailable');
+      }
       return [{ id: 'evidence-send-item' }];
     }
     return [];
@@ -710,6 +726,258 @@ describe('managed Telegram service governance', () => {
     expect(inserts.some((insert) => insert.table === managedTelegramBotProvisioningRequests)).toBe(
       false,
     );
+  });
+
+  it('persists redacted claim and webhook evidence before managed Telegram activation', async () => {
+    const { db, state, inserts, operations } = makeManagedTelegramActionDb({ activeBot: false });
+    state.provisioningRequest = {
+      id: 'request-1',
+      workspaceId: 'ws-1',
+      requestedByUserId: 'user-1',
+      creatorTelegramId: '999',
+      suggestedName: 'Acme Launch Support',
+      suggestedUsername: 'acme_launch_bot',
+      managerBotUsername: 'Manager',
+      creationUrl: 'https://t.me/newbot/Manager/acme_launch_bot?name=Acme',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + 60_000),
+      createdAt: new Date('2026-05-05T00:00:00Z'),
+      updatedAt: new Date('2026-05-05T00:00:00Z'),
+    };
+    const helmClient = {
+      evaluate: vi.fn(async (input: { action: string }) => ({
+        receipt: {
+          decisionId: input.action === TELEGRAM_MANAGED_ACTIONS.CLAIM ? 'dec-claim' : 'dec-webhook',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+      })),
+    };
+    const secrets = {
+      set: vi.fn(async () => true),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: helmClient as never,
+      managerBotToken: 'manager-token',
+      appUrl: 'https://pilot.example.com/',
+    });
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async (url: URL | RequestInfo) => {
+      const target = String(url);
+      if (target.includes('/getManagedBotToken')) {
+        return Response.json({ ok: true, result: 'child-token' });
+      }
+      return Response.json({ ok: true, result: true });
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const bot = await service.claimManagedBot({
+      creatorTelegramId: '999',
+      bot: { id: 123, username: 'pilot_launch_bot', firstName: 'Pilot Launch Bot' },
+    });
+
+    expect(bot.status).toBe('active');
+    expect(secrets.set).toHaveBeenCalledWith(
+      'ws-1',
+      expect.stringMatching(/^custom_telegram_managed_bot_token_/),
+      'child-token',
+    );
+    expect(state.bot['governanceMetadata']).toMatchObject({
+      claim: expect.objectContaining({ policyDecisionId: 'dec-claim' }),
+      claimEvidence: {
+        auditEventId: expect.any(String),
+        evidenceItemId: 'evidence-send-item',
+      },
+      setWebhook: expect.objectContaining({
+        policyDecisionId: 'dec-webhook',
+        evidence: {
+          auditEventId: expect.any(String),
+          evidenceItemId: 'evidence-send-item',
+        },
+      }),
+    });
+
+    const claimEvidence = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_claim_requested',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(claimEvidence).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_claim_requested',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'restricted',
+      metadata: expect.objectContaining({
+        requestId: 'request-1',
+        policyDecisionId: 'dec-claim',
+        rawTelegramBotIdStoredInEvidence: false,
+        rawTelegramBotUsernameStoredInEvidence: false,
+        rawTokenSecretRefStoredInEvidence: false,
+      }),
+    });
+    const webhookEvidence = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_webhook_config_requested',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(webhookEvidence).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_webhook_config_requested',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'restricted',
+      metadata: expect.objectContaining({
+        policyDecisionId: 'dec-webhook',
+        rawTelegramBotIdStoredInEvidence: false,
+        rawTokenSecretRefStoredInEvidence: false,
+        rawWebhookUrlStoredInEvidence: false,
+        rawWebhookSecretStoredInEvidence: false,
+      }),
+    });
+    expect(JSON.stringify(claimEvidence.metadata)).not.toContain('123');
+    expect(JSON.stringify(claimEvidence.metadata)).not.toContain('pilot_launch_bot');
+    expect(JSON.stringify(webhookEvidence.metadata)).not.toContain('123');
+    expect(JSON.stringify(webhookEvidence.metadata)).not.toContain('pilot.example.com');
+
+    const claimEvidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_claim_requested',
+    );
+    const botInsertIndex = operations.findIndex(
+      (operation) => operation.kind === 'insert' && operation.table === managedTelegramBots,
+    );
+    const webhookEvidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_webhook_config_requested',
+    );
+    const activeIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBots &&
+        (operation.value as { status?: string }).status === 'active',
+    );
+    expect(claimEvidenceIndex).toBeGreaterThanOrEqual(0);
+    expect(botInsertIndex).toBeGreaterThan(claimEvidenceIndex);
+    expect(webhookEvidenceIndex).toBeGreaterThan(botInsertIndex);
+    expect(activeIndex).toBeGreaterThan(webhookEvidenceIndex);
+  });
+
+  it('fails closed before claiming managed Telegram bots when claim evidence fails', async () => {
+    const { db, state, inserts } = makeManagedTelegramActionDb({
+      activeBot: false,
+      failEvidenceType: 'managed_telegram_claim_requested',
+    });
+    state.provisioningRequest = {
+      id: 'request-1',
+      workspaceId: 'ws-1',
+      requestedByUserId: 'user-1',
+      creatorTelegramId: '999',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: {
+        evaluate: vi.fn(async () => ({
+          receipt: {
+            decisionId: 'dec-claim',
+            verdict: 'ALLOW',
+            reason: 'allowed',
+            policyVersion: 'founder-ops-v1',
+          },
+        })),
+      } as never,
+      managerBotToken: 'manager-token',
+      appUrl: 'https://pilot.example.com',
+    });
+    const secrets = {
+      set: vi.fn(async () => true),
+    };
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async () => Response.json({ ok: true, result: 'child-token' }));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      service.claimManagedBot({
+        creatorTelegramId: '999',
+        bot: { id: 123, username: 'pilot_launch_bot' },
+      }),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(secrets.set).not.toHaveBeenCalled();
+    expect(inserts.some((insert) => insert.table === managedTelegramBots)).toBe(false);
+  });
+
+  it('fails closed before external Telegram webhook setup when webhook evidence fails', async () => {
+    const { db, state } = makeManagedTelegramActionDb({
+      activeBot: false,
+      failEvidenceType: 'managed_telegram_webhook_config_requested',
+    });
+    state.provisioningRequest = {
+      id: 'request-1',
+      workspaceId: 'ws-1',
+      requestedByUserId: 'user-1',
+      creatorTelegramId: '999',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + 60_000),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: {
+        evaluate: vi.fn(async (input: { action: string }) => ({
+          receipt: {
+            decisionId:
+              input.action === TELEGRAM_MANAGED_ACTIONS.CLAIM ? 'dec-claim' : 'dec-webhook',
+            verdict: 'ALLOW',
+            reason: 'allowed',
+            policyVersion: 'founder-ops-v1',
+          },
+        })),
+      } as never,
+      managerBotToken: 'manager-token',
+      appUrl: 'https://pilot.example.com',
+    });
+    const secrets = {
+      set: vi.fn(async () => true),
+    };
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async (url: URL | RequestInfo) => {
+      const target = String(url);
+      if (target.includes('/getManagedBotToken')) {
+        return Response.json({ ok: true, result: 'child-token' });
+      }
+      return Response.json({ ok: true, result: true });
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(
+      service.claimManagedBot({
+        creatorTelegramId: '999',
+        bot: { id: 123, username: 'pilot_launch_bot' },
+      }),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(String(fetch.mock.calls[0]?.[0])).toContain('/getManagedBotToken');
+    expect(fetch.mock.calls.some((call) => String(call[0]).includes('/setWebhook'))).toBe(false);
+    expect(fetch.mock.calls.some((call) => String(call[0]).includes('/setMyCommands'))).toBe(false);
+    expect(state.bot['status']).toBe('error');
   });
 
   it('persists audit-linked evidence before managed Telegram settings updates', async () => {
