@@ -6,6 +6,9 @@ import {
   computerActions,
   evidenceItems,
   evidencePacks,
+  opportunities,
+  opportunityScores,
+  toolExecutions,
 } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import {
@@ -31,6 +34,9 @@ type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type OpportunityRow = typeof opportunities.$inferSelect;
+type OpportunityScoreRow = typeof opportunityScores.$inferSelect;
+type ToolExecutionRow = typeof toolExecutions.$inferSelect;
 
 const SAFE_COMPUTER_ACTIONS = new Set([
   'terminal_command',
@@ -55,10 +61,158 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'decision_court_governed_model') {
         return executeDecisionCourtGovernedModelEval(db, input);
       }
+      if (input.evalId === 'pmf_discovery') {
+        return executePmfDiscoveryEval(db, input);
+      }
       return failedRun(
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
       );
+    },
+  };
+}
+
+async function executePmfDiscoveryEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  if (input.capabilityKey && input.capabilityKey !== 'opportunity_scoring') {
+    return failedRun(
+      input,
+      'PMF Discovery real eval runner currently verifies the opportunity_scoring slice only; startup_lifecycle still requires Full Startup Launch Eval coverage',
+    );
+  }
+
+  const opportunityRows = await db
+    .select()
+    .from(opportunities)
+    .where(eq(opportunities.workspaceId, input.workspaceId))
+    .orderBy(desc(opportunities.createdAt))
+    .limit(100);
+
+  const opportunityById = new Map(
+    opportunityRows
+      .filter((row) => row.workspaceId === input.workspaceId)
+      .map((row) => [row.id, row]),
+  );
+  if (opportunityById.size === 0) {
+    return failedRun(
+      input,
+      'PMF Discovery Eval requires a workspace-scoped opportunity candidate before scoring can be verified',
+    );
+  }
+
+  const scoreRows = await db
+    .select()
+    .from(opportunityScores)
+    .where(inArray(opportunityScores.opportunityId, [...opportunityById.keys()]))
+    .orderBy(desc(opportunityScores.scoredAt))
+    .limit(100);
+  const score = scoreRows.find((row) =>
+    isProductionPmfOpportunityScore(row, opportunityById.get(row.opportunityId)),
+  );
+  if (!score) {
+    return failedRun(
+      input,
+      'PMF Discovery Eval requires a non-heuristic, policy-pinned opportunity_scores row with 0-100 score dimensions for a scored workspace opportunity',
+    );
+  }
+
+  const executionRows = await db
+    .select()
+    .from(toolExecutions)
+    .where(
+      and(
+        eq(toolExecutions.workspaceId, input.workspaceId),
+        eq(toolExecutions.toolKey, 'score_opportunity'),
+      ),
+    )
+    .orderBy(desc(toolExecutions.completedAt))
+    .limit(100);
+  const execution = executionRows.find((row) =>
+    isProductionPmfScoreToolExecution(row, score.opportunityId),
+  );
+  if (!execution) {
+    return failedRun(
+      input,
+      `PMF Discovery Eval requires a completed Tool Broker score_opportunity execution with citations, assumptions, scorecard output, evidence ids, and policy pins for opportunity ${score.opportunityId}`,
+    );
+  }
+
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(
+      and(
+        eq(evidenceItems.workspaceId, input.workspaceId),
+        eq(evidenceItems.toolExecutionId, execution.id),
+      ),
+    )
+    .orderBy(desc(evidenceItems.observedAt))
+    .limit(25);
+  const evidence = evidenceRows.find((row) => isPmfToolExecutionEvidence(row, execution));
+  if (!evidence) {
+    return failedRun(
+      input,
+      `score_opportunity tool execution ${execution.id} has no linked tool_execution_completed evidence_items row`,
+    );
+  }
+  if (!evidence.auditEventId) {
+    return failedRun(input, `score_opportunity evidence ${evidence.id} is missing audit_event_id`);
+  }
+
+  const audits = await db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, evidence.auditEventId)))
+    .limit(1);
+  const audit = audits.find((row) => isPmfToolExecutionAudit(row, evidence, execution));
+  if (!audit) {
+    return failedRun(
+      input,
+      `score_opportunity evidence ${evidence.id} has no matching TOOL_EXECUTION audit row`,
+    );
+  }
+
+  const output = execution.sanitizedOutput as Record<string, unknown>;
+  const evidenceReference = evidenceRef(evidence);
+  const auditReference = auditRef(audit);
+  const completedAt = new Date().toISOString();
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'pmf_discovery',
+      status: 'passed',
+      capabilityKey: 'opportunity_scoring',
+      runRef: input.runRef ?? `real-external-eval:pmf-discovery:${randomUUID()}`,
+      summary:
+        'PMF Discovery opportunity-scoring eval verified a scored workspace opportunity, non-heuristic policy-pinned score row, brokered score_opportunity execution, citations, assumptions, evidence, and audit ledger entry.',
+      evidenceRefs: [evidenceReference],
+      auditReceiptRefs: [auditReference],
+      metadata: {
+        runnerRef: 'gateway:pmf_discovery:opportunity_scoring:v1',
+        verifiedOpportunityId: score.opportunityId,
+        verifiedScoreId: score.id,
+        verifiedToolExecutionId: execution.id,
+        verifiedEvidenceItemId: evidence.id,
+        verifiedAuditEventId: audit.id,
+        scoreOverall: score.overallScore,
+        scoringMethod: score.scoringMethod,
+        citationCount: getArrayLength(output, 'citations'),
+        assumptionCount: getArrayLength(output, 'assumptions'),
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'evidence-backed-opportunity-score',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: pmfDiscoveryStepMetadata(score, execution),
+        },
+      ],
     },
   };
 }
@@ -730,6 +884,130 @@ function isCompletedGovernedDecisionCourtModelCall(
   );
 }
 
+function isProductionPmfOpportunityScore(
+  row: OpportunityScoreRow,
+  opportunity: OpportunityRow | undefined,
+): boolean {
+  return Boolean(
+    opportunity &&
+      row.opportunityId === opportunity.id &&
+      (opportunity.status === 'scored' || opportunity.status === 'selected') &&
+      row.scoringMethod !== 'heuristic' &&
+      row.scoringMethod.trim().length > 0 &&
+      isScoreNumber(row.overallScore) &&
+      isScoreNumber(row.founderFitScore) &&
+      isScoreNumber(row.marketSignal) &&
+      isScoreNumber(row.feasibility) &&
+      isScoreNumber(row.timing) &&
+      hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins),
+  );
+}
+
+function isProductionPmfScoreToolExecution(
+  row: ToolExecutionRow,
+  opportunityId: string,
+): boolean {
+  return Boolean(
+    row.toolKey === 'score_opportunity' &&
+      row.status === 'completed' &&
+      row.completedAt &&
+      row.outputHash &&
+      row.idempotencyKey &&
+      Array.isArray(row.evidenceIds) &&
+      row.evidenceIds.length > 0 &&
+      hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
+      isEvidenceBackedScoreOutput(row.sanitizedOutput, opportunityId),
+  );
+}
+
+function isEvidenceBackedScoreOutput(value: unknown, opportunityId: string): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    value['opportunityId'] === opportunityId &&
+    value['method'] !== 'heuristic' &&
+    typeof value['method'] === 'string' &&
+    isScoreNumber(value['overall']) &&
+    hasCompleteOpportunityScoreDimensions(value['dimensions']) &&
+    hasEvidenceCitations(value['citations']) &&
+    isNonEmptyArray(value['assumptions']) &&
+    typeof value['rationale'] === 'string' &&
+    value['rationale'].trim().length > 0
+  );
+}
+
+function hasCompleteOpportunityScoreDimensions(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return [
+    'marketPain',
+    'urgency',
+    'icpClarity',
+    'monetization',
+    'channelAccessibility',
+    'competition',
+    'founderFit',
+    'technicalFeasibility',
+    'evidenceQuality',
+    'confidence',
+  ].every((key) => isScoreNumber(value[key]));
+}
+
+function hasEvidenceCitations(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length === 0) return false;
+  return value.every((citation) => {
+    if (!isRecord(citation) || typeof citation['url'] !== 'string') return false;
+    try {
+      const parsed = new URL(citation['url']);
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    } catch {
+      return false;
+    }
+  });
+}
+
+function isPmfToolExecutionEvidence(
+  row: EvidenceItemRow,
+  execution: ToolExecutionRow,
+): boolean {
+  return Boolean(
+    row.toolExecutionId === execution.id &&
+      row.actionId === execution.actionId &&
+      row.evidenceType === 'tool_execution_completed' &&
+      row.sourceType === 'tool_broker' &&
+      row.auditEventId &&
+      row.replayRef === `tool:${execution.id}` &&
+      row.contentHash === execution.outputHash &&
+      Array.isArray(execution.evidenceIds) &&
+      execution.evidenceIds.includes(row.id) &&
+      hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+      hasMetadataValue(row.metadata, 'toolKey', 'score_opportunity') &&
+      hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+      hasMetadataValue(row.metadata, 'status', 'completed') &&
+      hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+      hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+      metadataArrayIncludes(row.metadata, 'requiredEvidence', 'opportunity_score') &&
+      metadataArrayIncludes(row.metadata, 'requiredEvidence', 'citations'),
+  );
+}
+
+function isPmfToolExecutionAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  execution: ToolExecutionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+      row.action === 'TOOL_EXECUTION' &&
+      row.target === 'score_opportunity' &&
+      row.verdict === 'allow' &&
+      hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+      hasMetadataValue(row.metadata, 'toolKey', 'score_opportunity') &&
+      hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+      hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+      hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+  );
+}
+
 function isYcUrl(url: string, origin: string): boolean {
   return [url, origin].some((value) => {
     try {
@@ -841,8 +1119,29 @@ function hasMetadataValue(metadata: unknown, key: string, expected: string): boo
   return isRecord(metadata) && metadata[key] === expected;
 }
 
+function metadataArrayIncludes(metadata: unknown, key: string, expected: string): boolean {
+  return isRecord(metadata) && Array.isArray(metadata[key]) && metadata[key].includes(expected);
+}
+
 function normalizeVerdict(verdict: string): string {
   return verdict.trim().toLowerCase();
+}
+
+function isScoreNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
+}
+
+function hasPolicyPin(
+  policyDecisionId: string | null,
+  policyVersion: string | null,
+  helmDocumentVersionPins: unknown,
+): boolean {
+  return Boolean(
+    policyDecisionId &&
+      policyVersion &&
+      isRecord(helmDocumentVersionPins) &&
+      Object.keys(helmDocumentVersionPins).length > 0,
+  );
 }
 
 function isDecisionHash(value: string | null): boolean {
@@ -862,6 +1161,11 @@ function getStringArray(metadata: Record<string, unknown>, key: string): string[
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === 'string')
     : [];
+}
+
+function getArrayLength(metadata: Record<string, unknown>, key: string): number {
+  const value = metadata[key];
+  return Array.isArray(value) ? value.length : 0;
 }
 
 function helmReceiptStepMetadata(pack: EvidencePackRow): Record<string, string | null> {
@@ -892,5 +1196,27 @@ function decisionCourtStepMetadata(metadata: Record<string, unknown>): Record<st
     modelCallCount: calls.length,
     policyDecisionIds: getStringArray(metadata, 'policyDecisionIds'),
     policyVersions: getStringArray(metadata, 'policyVersions'),
+  };
+}
+
+function pmfDiscoveryStepMetadata(
+  score: OpportunityScoreRow,
+  execution: ToolExecutionRow,
+): Record<string, unknown> {
+  const output = isRecord(execution.sanitizedOutput) ? execution.sanitizedOutput : {};
+  return {
+    opportunityId: score.opportunityId,
+    scoreId: score.id,
+    toolExecutionId: execution.id,
+    scoringMethod: score.scoringMethod,
+    overallScore: score.overallScore,
+    founderFitScore: score.founderFitScore,
+    marketSignal: score.marketSignal,
+    feasibility: score.feasibility,
+    timing: score.timing,
+    citationCount: getArrayLength(output, 'citations'),
+    assumptionCount: getArrayLength(output, 'assumptions'),
+    policyDecisionId: execution.policyDecisionId,
+    policyVersion: execution.policyVersion,
   };
 }

@@ -227,7 +227,7 @@ const capabilityRecords = validateCapabilityRecords([
       'score_opportunity returns an evidence-backed startup scorecard across pain, urgency, ICP, monetization, channel, competition, founder fit, feasibility, evidence quality, confidence, assumptions, and citations.',
     owner: 'Tooling Agent',
     blockers: [
-      'PMF Discovery Eval has not promoted the capability to production_ready',
+      'PMF Discovery Eval has not promoted the capability to production_ready; the server-owned runner currently verifies the opportunity_scoring slice only',
       'Scoring rationale and citations are persisted through tool_executions/audit metadata and background worker evidence items, but not yet a full Evidence Center artifact pack',
       'Scoring remains deterministic evidence scoring until governed LLM scorer promotion has eval coverage',
     ],
@@ -236,6 +236,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Tool Broker records action/tool_execution/audit metadata for autonomous score_opportunity calls',
       'Background opportunity.score jobs no longer silently downgrade configured LLM/HELM failures into heuristic scores and persist policy/model metadata on score rows',
       'opportunity_scout tool scope includes create_opportunity and score_opportunity so scraped candidates can be persisted before scoring',
+      'The PMF Discovery trusted eval runner verifies a scored workspace opportunity, policy-pinned score row, brokered score_opportunity output with citations and assumptions, linked evidence, and TOOL_EXECUTION audit receipt for opportunity_scoring only',
     ],
     evalRequirement: 'PMF Discovery Eval',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,
