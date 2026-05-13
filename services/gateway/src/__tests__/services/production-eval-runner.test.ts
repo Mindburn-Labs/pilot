@@ -5,6 +5,9 @@ import {
   computerActions,
   evidenceItems,
   evidencePacks,
+  opportunities,
+  opportunityScores,
+  toolExecutions,
 } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import { PRODUCTION_READY_EXECUTION_MODE } from '@pilot/shared/eval';
@@ -18,6 +21,9 @@ type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type OpportunityRow = typeof opportunities.$inferSelect;
+type OpportunityScoreRow = typeof opportunityScores.$inferSelect;
+type ToolExecutionRow = typeof toolExecutions.$inferSelect;
 
 function createRunnerDb({
   actions = [],
@@ -25,12 +31,18 @@ function createRunnerDb({
   packs = [],
   evidence = [],
   audits = [],
+  opportunityRows = [],
+  scoreRows = [],
+  toolExecutionRows = [],
 }: {
   actions?: ComputerActionRow[];
   browser?: BrowserObservationRow[];
   packs?: EvidencePackRow[];
   evidence?: EvidenceItemRow[];
   audits?: AuditRow[];
+  opportunityRows?: OpportunityRow[];
+  scoreRows?: OpportunityScoreRow[];
+  toolExecutionRows?: ToolExecutionRow[];
 }) {
   const db = {
     select: vi.fn(() => ({
@@ -44,7 +56,15 @@ function createRunnerDb({
                 ? packs
                 : table === evidenceItems
                   ? evidence
-                  : audits;
+                  : table === auditLog
+                    ? audits
+                    : table === opportunities
+                      ? opportunityRows
+                      : table === opportunityScores
+                        ? scoreRows
+                        : table === toolExecutions
+                          ? toolExecutionRows
+                          : [];
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -56,6 +76,98 @@ function createRunnerDb({
     })),
   };
   return db as unknown as Db;
+}
+
+function opportunity(overrides: Partial<OpportunityRow>): OpportunityRow {
+  return {
+    id: 'opp-pmf-1',
+    workspaceId,
+    source: 'manual',
+    sourceUrl: 'https://example.com/customer-discovery',
+    title: 'Compliance teams need urgent workflow automation',
+    description:
+      'Compliance operators have painful manual workflows, deadlines, budgets, and expensive errors.',
+    status: 'scored',
+    rawData: { quote: 'manual workflow is too slow' },
+    aiFriendlyOk: true,
+    discoveredAt: new Date('2026-05-12T00:00:00.000Z'),
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function opportunityScore(overrides: Partial<OpportunityScoreRow>): OpportunityScoreRow {
+  return {
+    id: 'score-pmf-1',
+    opportunityId: 'opp-pmf-1',
+    overallScore: 82,
+    founderFitScore: 86,
+    marketSignal: 80,
+    feasibility: 77,
+    timing: 84,
+    scoringMethod: 'evidence_v1',
+    policyDecisionId: 'score-decision-1',
+    policyVersion: 'founder-ops-v1',
+    helmDocumentVersionPins: { opportunityScorePrompt: 'opportunity-score.v1' },
+    modelUsage: {},
+    scoredAt: new Date('2026-05-12T00:02:00.000Z'),
+    ...overrides,
+  };
+}
+
+function opportunityScoreOutput(opportunityId = 'opp-pmf-1'): Record<string, unknown> {
+  return {
+    opportunityId,
+    method: 'evidence_v1',
+    overall: 82,
+    dimensions: {
+      marketPain: 84,
+      urgency: 76,
+      icpClarity: 80,
+      monetization: 74,
+      channelAccessibility: 70,
+      competition: 68,
+      founderFit: 86,
+      technicalFeasibility: 77,
+      evidenceQuality: 90,
+      confidence: 84,
+    },
+    assumptions: ['Scores are directional until validated with customer discovery evidence.'],
+    citations: [
+      {
+        url: 'https://example.com/customer-discovery',
+        title: 'Customer discovery notes',
+        note: 'Founder interview evidence.',
+      },
+    ],
+    rationale: 'Evidence-backed score 82/100.',
+  };
+}
+
+function toolExecution(overrides: Partial<ToolExecutionRow>): ToolExecutionRow {
+  return {
+    id: 'tool-execution-pmf-1',
+    workspaceId,
+    ventureId: null,
+    missionId: null,
+    actionId: 'action-pmf-score-1',
+    taskRunId: null,
+    toolKey: 'score_opportunity',
+    inputHash: 'sha256:input',
+    sanitizedInput: { opportunityId: 'opp-pmf-1' },
+    outputHash: 'sha256:score-output',
+    sanitizedOutput: opportunityScoreOutput(),
+    status: 'completed',
+    idempotencyKey: 'tool-broker-v1:workspace:task:score_opportunity',
+    evidenceIds: ['evidence-pmf-score-tool'],
+    policyDecisionId: 'score-decision-1',
+    policyVersion: 'founder-ops-v1',
+    helmDocumentVersionPins: { toolAccessPolicy: 'founder-ops-v1' },
+    error: null,
+    createdAt: new Date('2026-05-12T00:01:00.000Z'),
+    completedAt: new Date('2026-05-12T00:02:00.000Z'),
+    ...overrides,
+  };
 }
 
 function browserObservation(overrides: Partial<BrowserObservationRow>): BrowserObservationRow {
@@ -293,6 +405,156 @@ function decisionCourtMetadata(overrides: Record<string, unknown> = {}) {
 }
 
 describe('createProductionEvalRunner', () => {
+  it('passes pmf_discovery opportunity_scoring only from brokered score evidence and audit rows', async () => {
+    const opp = opportunity({ id: 'opp-pmf-1' });
+    const score = opportunityScore({ id: 'score-pmf-1', opportunityId: opp.id });
+    const execution = toolExecution({
+      id: 'tool-execution-pmf-1',
+      actionId: 'action-pmf-score-1',
+      sanitizedInput: { opportunityId: opp.id },
+      sanitizedOutput: opportunityScoreOutput(opp.id),
+      evidenceIds: ['evidence-pmf-score-tool'],
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        opportunityRows: [opp],
+        scoreRows: [score],
+        toolExecutionRows: [execution],
+        evidence: [
+          evidenceItem({
+            id: 'evidence-pmf-score-tool',
+            computerActionId: null,
+            actionId: execution.actionId,
+            toolExecutionId: execution.id,
+            evidenceType: 'tool_execution_completed',
+            sourceType: 'tool_broker',
+            auditEventId: 'audit-pmf-score-tool',
+            contentHash: execution.outputHash,
+            replayRef: `tool:${execution.id}`,
+            metadata: {
+              broker: 'tool_broker_v1',
+              toolKey: 'score_opportunity',
+              actionId: execution.actionId,
+              toolExecutionId: execution.id,
+              status: 'completed',
+              requiredEvidence: ['opportunity_score', 'citations'],
+              policyDecisionId: execution.policyDecisionId,
+              policyVersion: execution.policyVersion,
+            },
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-pmf-score-tool',
+            action: 'TOOL_EXECUTION',
+            target: 'score_opportunity',
+            verdict: 'allow',
+            metadata: {
+              broker: 'tool_broker_v1',
+              toolKey: 'score_opportunity',
+              toolExecutionId: execution.id,
+              evidenceItemId: 'evidence-pmf-score-tool',
+              policyDecisionId: execution.policyDecisionId,
+              policyVersion: execution.policyVersion,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'pmf_discovery',
+      capabilityKey: 'opportunity_scoring',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'pmf_discovery',
+      status: 'passed',
+      capabilityKey: 'opportunity_scoring',
+      evidenceRefs: ['tool:tool-execution-pmf-1'],
+      auditReceiptRefs: ['audit:audit-pmf-score-tool'],
+      metadata: {
+        runnerRef: 'gateway:pmf_discovery:opportunity_scoring:v1',
+        verifiedOpportunityId: 'opp-pmf-1',
+        verifiedScoreId: 'score-pmf-1',
+        verifiedToolExecutionId: 'tool-execution-pmf-1',
+        citationCount: 1,
+        assumptionCount: 1,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'evidence-backed-opportunity-score',
+        status: 'passed',
+        metadata: expect.objectContaining({
+          opportunityId: 'opp-pmf-1',
+          scoringMethod: 'evidence_v1',
+          citationCount: 1,
+          policyDecisionId: 'score-decision-1',
+        }),
+      }),
+    ]);
+  });
+
+  it('fails pmf_discovery when citations are missing from score_opportunity output', async () => {
+    const opp = opportunity({ id: 'opp-pmf-1' });
+    const execution = toolExecution({
+      sanitizedOutput: {
+        ...opportunityScoreOutput(opp.id),
+        citations: [],
+      },
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        opportunityRows: [opp],
+        scoreRows: [opportunityScore({ opportunityId: opp.id })],
+        toolExecutionRows: [execution],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'pmf_discovery',
+      capabilityKey: 'opportunity_scoring',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('citations');
+  });
+
+  it('fails pmf_discovery startup_lifecycle requests instead of overclaiming lifecycle coverage', async () => {
+    const runner = createProductionEvalRunner(createRunnerDb({}));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'pmf_discovery',
+      capabilityKey: 'startup_lifecycle',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('opportunity_scoring slice only');
+  });
+
   it('passes helm_governance only from allow and restricted durable receipt evidence with audits', async () => {
     const allowed = helmReceiptPack({
       id: 'pack-allow',
