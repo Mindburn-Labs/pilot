@@ -76,6 +76,25 @@ export function connectorRoutes(deps: GatewayDeps) {
     const connector = deps.connectors.getConnector(name);
     if (!connector) return c.json({ error: `Unknown connector: ${name}` }, 404);
 
+    const scopes = body.scopes ?? [];
+    const grantIntent = await appendConnectorEvidenceProof(deps, {
+      workspaceId,
+      connector,
+      evidenceType: 'connector_grant_requested',
+      title: `Connector grant requested: ${connector.name}`,
+      summary: `Workspace connector ${name} grant was requested`,
+      replayRef: `connector:${name}:grant-requested:${hashJson({ connectorId: name, scopes }).slice(7, 23)}`,
+      hashContent: {
+        connectorId: name,
+        scopes,
+        requestedAction: 'grant_connector',
+      },
+      metadata: {
+        scopes,
+        effectOrder: 'before_connector_grant',
+        requestedAction: 'grant_connector',
+      },
+    });
     const grantId = await deps.connectors.grantConnector(workspaceId, name, body.scopes);
     const status = await getConnectorStatus(deps, connector, workspaceId);
     const evidenceItemId = await appendConnectorEvidence(deps, {
@@ -95,7 +114,17 @@ export function connectorRoutes(deps: GatewayDeps) {
         scopes: body.scopes ?? [],
       },
     });
-    return c.json({ grantId, connector: name, workspaceId, status, evidenceItemId }, 201);
+    return c.json(
+      {
+        grantId,
+        connector: name,
+        workspaceId,
+        status,
+        evidenceItemId,
+        requestEvidenceItemId: grantIntent.evidenceItemId,
+      },
+      201,
+    );
   });
 
   app.delete('/:name/grant', async (c) => {
@@ -106,8 +135,24 @@ export function connectorRoutes(deps: GatewayDeps) {
     const roleDenied = requireWorkspaceRole(c, 'owner', 'revoke workspace connectors');
     if (roleDenied) return roleDenied;
 
-    await deps.connectors.revokeConnector(workspaceId, name);
     const connector = deps.connectors.getConnector(name);
+    const revokeIntent = await appendConnectorEvidenceProof(deps, {
+      workspaceId,
+      connector,
+      evidenceType: 'connector_revoke_requested',
+      title: `Connector revoke requested: ${connector?.name ?? name}`,
+      summary: `Workspace connector ${name} revoke was requested`,
+      replayRef: `connector:${name}:grant-revoke-requested`,
+      hashContent: {
+        connectorId: name,
+        requestedAction: 'revoke_connector',
+      },
+      metadata: {
+        effectOrder: 'before_connector_revoke',
+        requestedAction: 'revoke_connector',
+      },
+    });
+    await deps.connectors.revokeConnector(workspaceId, name);
     const evidenceItemId = await appendConnectorEvidence(deps, {
       workspaceId,
       connector,
@@ -118,7 +163,11 @@ export function connectorRoutes(deps: GatewayDeps) {
       hashContent: { connectorId: name },
       metadata: {},
     });
-    return c.json({ revoked: true, evidenceItemId });
+    return c.json({
+      revoked: true,
+      evidenceItemId,
+      requestEvidenceItemId: revokeIntent.evidenceItemId,
+    });
   });
 
   app.post('/:name/token', async (c) => {

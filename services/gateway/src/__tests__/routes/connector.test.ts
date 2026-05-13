@@ -92,6 +92,17 @@ function insertedValue(deps: ReturnType<typeof createMockDeps>, table: unknown) 
   return builder.values.mock.calls[0]?.[0] as Record<string, unknown>;
 }
 
+function insertedValues(deps: ReturnType<typeof createMockDeps>, table: unknown) {
+  const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+  return insertMock.mock.calls
+    .map((call, index) => ({ table: call[0], result: insertMock.mock.results[index] }))
+    .filter((entry) => entry.table === table)
+    .map((entry) => {
+      const builder = entry.result?.value as { values: ReturnType<typeof vi.fn> };
+      return builder.values.mock.calls[0]?.[0] as Record<string, unknown>;
+    });
+}
+
 function updatedValue(deps: ReturnType<typeof createMockDeps>, table: unknown) {
   const updateMock = deps.db.update as unknown as ReturnType<typeof vi.fn>;
   const index = updateMock.mock.calls.findIndex((call) => call[0] === table);
@@ -216,19 +227,42 @@ describe('connectorRoutes', () => {
         grantId: string;
         status: { connectionState: string };
         evidenceItemId: string;
+        requestEvidenceItemId: string;
       }>(res, 201);
       expect(body.grantId).toBe('grant-1');
       expect(body.status.connectionState).toBe('granted');
-      expect(body.evidenceItemId).toBe('evidence-item-1');
-      expect(evidence).toHaveLength(1);
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
+      expect(evidence).toHaveLength(2);
       const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
       expect(insertMock.mock.calls.findIndex((call) => call[0] === auditLog)).toBeLessThan(
         insertMock.mock.calls.findIndex((call) => call[0] === evidenceItems),
       );
-      const auditValue = insertedValue(deps, auditLog);
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        connectors.grantConnector.mock.invocationCallOrder[0]!,
+      );
+      const auditValues = insertedValues(deps, auditLog);
       expect(evidence[0]).toMatchObject({
         workspaceId: 'ws-1',
-        auditEventId: auditValue['id'],
+        auditEventId: auditValues[0]?.['id'],
+        evidenceType: 'connector_grant_requested',
+        sourceType: 'gateway_connector',
+        redactionState: 'redacted',
+        sensitivity: 'sensitive',
+        replayRef: expect.stringMatching(/^connector:github:grant-requested:/),
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          effectOrder: 'before_connector_grant',
+          requestedAction: 'grant_connector',
+          productionReady: false,
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
+        workspaceId: 'ws-1',
+        auditEventId: auditValues[1]?.['id'],
         evidenceType: 'connector_granted',
         sourceType: 'gateway_connector',
         redactionState: 'redacted',
@@ -240,7 +274,7 @@ describe('connectorRoutes', () => {
           productionReady: false,
         }),
       });
-      expect(auditValue).toMatchObject({
+      expect(auditValues[1]).toMatchObject({
         id: expect.any(String),
         workspaceId: 'ws-1',
         action: 'CONNECTOR_GRANTED',
@@ -248,7 +282,7 @@ describe('connectorRoutes', () => {
         target: 'github',
         verdict: 'recorded',
       });
-      expect(auditValue['metadata']).toMatchObject({
+      expect(auditValues[1]?.['metadata']).toMatchObject({
         evidenceType: 'connector_granted',
         replayRef: 'connector:github:grant:grant-1',
         connectorId: 'github',
@@ -258,6 +292,18 @@ describe('connectorRoutes', () => {
       expect(updatedValue(deps, auditLog)['metadata']).toMatchObject({
         evidenceItemId: 'evidence-item-1',
       });
+    });
+
+    it('does not grant connector when request evidence persistence fails', async () => {
+      const connectors = createConnectorsMock();
+      const deps = createMockDeps({ connectors: connectors as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch('POST', '/github/grant', { workspaceId: 'ws-1' }, wsHeader);
+
+      expect(res.status).toBe(500);
+      expect(connectors.grantConnector).not.toHaveBeenCalled();
     });
   });
 
@@ -269,11 +315,34 @@ describe('connectorRoutes', () => {
       const { fetch } = testApp(connectorRoutes, deps);
 
       const res = await fetch('DELETE', '/github/grant', undefined, wsHeader);
-      const body = await expectJson<{ revoked: boolean; evidenceItemId: string }>(res, 200);
+      const body = await expectJson<{
+        revoked: boolean;
+        evidenceItemId: string;
+        requestEvidenceItemId: string;
+      }>(res, 200);
       expect(body.revoked).toBe(true);
-      expect(body.evidenceItemId).toBe('evidence-item-1');
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
+      const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        connectors.revokeConnector.mock.invocationCallOrder[0]!,
+      );
       expect(connectors.revokeConnector).toHaveBeenCalledWith('ws-1', 'github');
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_revoke_requested',
+        replayRef: 'connector:github:grant-revoke-requested',
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          effectOrder: 'before_connector_revoke',
+          requestedAction: 'revoke_connector',
+          productionReady: false,
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_revoked',
         replayRef: 'connector:github:grant:revoked',
@@ -282,6 +351,18 @@ describe('connectorRoutes', () => {
           productionReady: false,
         }),
       });
+    });
+
+    it('does not revoke grant when request evidence persistence fails', async () => {
+      const connectors = createConnectorsMock();
+      const deps = createMockDeps({ connectors: connectors as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch('DELETE', '/github/grant', undefined, wsHeader);
+
+      expect(res.status).toBe(500);
+      expect(connectors.revokeConnector).not.toHaveBeenCalled();
     });
   });
 
