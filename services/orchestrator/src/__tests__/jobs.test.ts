@@ -1062,8 +1062,18 @@ describe('registerJobHandlers', () => {
         '--workspace-id',
         'ws-1',
       ]);
-      expect(mockDb._inserts).toHaveLength(1);
+      expect(mockDb._inserts).toHaveLength(2);
       expect(mockDb._inserts[0]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          workspaceId: 'ws-1',
+          action: 'PIPELINE_JOB_STARTED',
+          actor: 'job:pipeline.yc-scrape',
+          target: 'job-1',
+          verdict: 'pending',
+        },
+      });
+      expect(mockDb._inserts[1]).toMatchObject({
         table: 'auditLog',
         value: {
           workspaceId: 'ws-1',
@@ -1073,11 +1083,24 @@ describe('registerJobHandlers', () => {
           verdict: 'allow',
         },
       });
+      expect(appendEvidenceItem).toHaveBeenCalledTimes(2);
       expect(appendEvidenceItem).toHaveBeenCalledWith(
         mockDb,
         expect.objectContaining({
           workspaceId: 'ws-1',
           auditEventId: mockDb._inserts[0].value.id,
+          evidenceType: 'pipeline_job_started',
+          sourceType: 'pipeline_worker',
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          replayRef: 'pipeline:pipeline.yc-scrape:job-1:pipeline_job_started',
+        }),
+      );
+      expect(appendEvidenceItem).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          workspaceId: 'ws-1',
+          auditEventId: mockDb._inserts[1].value.id,
           evidenceType: 'pipeline_job_succeeded',
           sourceType: 'pipeline_worker',
           redactionState: 'redacted',
@@ -1085,7 +1108,10 @@ describe('registerJobHandlers', () => {
           replayRef: 'pipeline:pipeline.yc-scrape:job-1:pipeline_job_succeeded',
         }),
       );
-      const metadata = vi.mocked(appendEvidenceItem).mock.calls[0]?.[1].metadata;
+      const startEvidenceCallOrder = vi.mocked(appendEvidenceItem).mock.invocationCallOrder[0];
+      const runnerCallOrder = pipelineRunner.mock.invocationCallOrder[0];
+      expect(startEvidenceCallOrder).toBeLessThan(runnerCallOrder);
+      const metadata = vi.mocked(appendEvidenceItem).mock.calls[1]?.[1].metadata;
       expect(metadata).toMatchObject({
         pipeline: 'pipeline.yc-scrape',
         jobId: 'job-1',
@@ -1097,6 +1123,15 @@ describe('registerJobHandlers', () => {
       });
       expect(JSON.stringify(metadata)).not.toContain('/tmp/raw-captures/private.html');
       expect(mockDb._updates[0]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          metadata: expect.objectContaining({
+            evidenceItemId: 'evidence-item-1',
+            replayRef: 'pipeline:pipeline.yc-scrape:job-1:pipeline_job_started',
+          }),
+        },
+      });
+      expect(mockDb._updates[1]).toMatchObject({
         table: 'auditLog',
         value: {
           metadata: expect.objectContaining({
@@ -1136,17 +1171,28 @@ describe('registerJobHandlers', () => {
         table: 'auditLog',
         value: {
           workspaceId: 'ws-2',
+          action: 'PIPELINE_JOB_STARTED',
+          actor: 'job:pipeline.yc-private',
+          target: 'job-2',
+          verdict: 'pending',
+        },
+      });
+      expect(mockDb._inserts[1]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          workspaceId: 'ws-2',
           action: 'PIPELINE_JOB_FAILED',
           actor: 'job:pipeline.yc-private',
           target: 'job-2',
           verdict: 'error',
         },
       });
+      expect(appendEvidenceItem).toHaveBeenCalledTimes(2);
       expect(appendEvidenceItem).toHaveBeenCalledWith(
         mockDb,
         expect.objectContaining({
           workspaceId: 'ws-2',
-          auditEventId: mockDb._inserts[0].value.id,
+          auditEventId: mockDb._inserts[1].value.id,
           evidenceType: 'pipeline_job_failed',
           sourceType: 'pipeline_worker',
           redactionState: 'redacted',
@@ -1154,7 +1200,10 @@ describe('registerJobHandlers', () => {
           replayRef: 'pipeline:pipeline.yc-private:job-2:pipeline_job_failed',
         }),
       );
-      const metadata = vi.mocked(appendEvidenceItem).mock.calls[0]?.[1].metadata;
+      const startEvidenceCallOrder = vi.mocked(appendEvidenceItem).mock.invocationCallOrder[0];
+      const runnerCallOrder = pipelineRunner.mock.invocationCallOrder[0];
+      expect(startEvidenceCallOrder).toBeLessThan(runnerCallOrder);
+      const metadata = vi.mocked(appendEvidenceItem).mock.calls[1]?.[1].metadata;
       expect(metadata).toMatchObject({
         pipeline: 'pipeline.yc-private',
         jobId: 'job-2',
@@ -1204,22 +1253,30 @@ describe('registerJobHandlers', () => {
         '--workspace-id',
         'ws-2',
       ]);
-      expect(appendEvidenceItem).toHaveBeenCalledTimes(2);
-      expect(mockDb._inserts).toHaveLength(2);
+      expect(appendEvidenceItem).toHaveBeenCalledTimes(4);
+      expect(mockDb._inserts).toHaveLength(4);
       expect(mockDb._inserts.map((insert: any) => insert.value.workspaceId)).toEqual([
         'ws-1',
+        'ws-1',
+        'ws-2',
         'ws-2',
       ]);
       expect(mockDb._inserts.map((insert: any) => insert.value.action)).toEqual([
+        'PIPELINE_JOB_STARTED',
         'PIPELINE_JOB_SUCCEEDED',
+        'PIPELINE_JOB_STARTED',
         'PIPELINE_JOB_SUCCEEDED',
       ]);
       expect(vi.mocked(appendEvidenceItem).mock.calls.map((call) => call[1].workspaceId)).toEqual([
         'ws-1',
+        'ws-1',
+        'ws-2',
         'ws-2',
       ]);
       expect(vi.mocked(appendEvidenceItem).mock.calls.map((call) => call[1].replayRef)).toEqual([
+        'pipeline:pipeline.yc-scrape:job-cron:pipeline_job_started',
         'pipeline:pipeline.yc-scrape:job-cron:pipeline_job_succeeded',
+        'pipeline:pipeline.yc-scrape:job-cron:pipeline_job_started',
         'pipeline:pipeline.yc-scrape:job-cron:pipeline_job_succeeded',
       ]);
     });
@@ -1255,6 +1312,15 @@ describe('registerJobHandlers', () => {
         table: 'auditLog',
         value: {
           workspaceId: 'ws-3',
+          action: 'PIPELINE_JOB_STARTED',
+          actor: 'job:pipeline.ingest-knowledge',
+          target: 'job-3',
+        },
+      });
+      expect(mockDb._inserts[1]).toMatchObject({
+        table: 'auditLog',
+        value: {
+          workspaceId: 'ws-3',
           action: 'PIPELINE_JOB_SUCCEEDED',
           actor: 'job:pipeline.ingest-knowledge',
           target: 'job-3',
@@ -1269,13 +1335,52 @@ describe('registerJobHandlers', () => {
           replayRef: 'pipeline:pipeline.ingest-knowledge:job-3:pipeline_job_succeeded',
         }),
       );
-      const metadata = vi.mocked(appendEvidenceItem).mock.calls[0]?.[1].metadata;
+      const metadata = vi.mocked(appendEvidenceItem).mock.calls[1]?.[1].metadata;
       expect(metadata).toMatchObject({
         pipeline: 'pipeline.ingest-knowledge',
         requestAuditEventId: 'request-audit-3',
         requestEvidenceItemId: 'request-evidence-3',
         requestReplayRef: 'knowledge-ingestion:ws-3:request',
       });
+    });
+
+    it('fails closed before pipeline execution when start evidence cannot be persisted', async () => {
+      const pipelineRunner = vi.fn(async (name: string, extraArgs: string[]) => ({
+        scriptPath: `pipelines/${name}.py`,
+        args: [`/repo/pipelines/${name}.py`, ...extraArgs],
+        stdoutPreview: 'completed',
+        stderrPreview: null,
+      }));
+      vi.mocked(appendEvidenceItem).mockRejectedValueOnce(
+        new Error('pipeline start evidence unavailable'),
+      );
+
+      registerJobHandlers(mockBoss, { db: mockDb, pipelineRunner });
+      const handler = handlers.get('pipeline.yc-scrape')!;
+
+      await expect(
+        handler([
+          {
+            id: 'job-start-evidence-fails',
+            data: {
+              workspaceId: 'ws-start-fail',
+              batch: 'W24',
+              limit: 1,
+            },
+          },
+        ]),
+      ).rejects.toThrow('pipeline start evidence unavailable');
+
+      expect(pipelineRunner).not.toHaveBeenCalled();
+      expect(appendEvidenceItem).toHaveBeenCalledTimes(1);
+      expect(appendEvidenceItem).toHaveBeenCalledWith(
+        mockDb,
+        expect.objectContaining({
+          workspaceId: 'ws-start-fail',
+          evidenceType: 'pipeline_job_started',
+          replayRef: 'pipeline:pipeline.yc-scrape:job-start-evidence-fails:pipeline_job_started',
+        }),
+      );
     });
 
     it('fails closed before knowledge ingestion without a workspace scope', async () => {

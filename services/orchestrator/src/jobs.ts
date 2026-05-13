@@ -417,56 +417,53 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
   }
 
   // ─── Task Resume (after approval) ───
-  boss.work(
-    'task.resume',
-    async (jobs: PgBoss.Job<TaskResumeJobData>[]) => {
-      for (const job of jobs) {
-        const { taskId, workspaceId, operatorId, context } = job.data;
-        log.info({ taskId }, 'Resuming task after approval');
+  boss.work('task.resume', async (jobs: PgBoss.Job<TaskResumeJobData>[]) => {
+    for (const job of jobs) {
+      const { taskId, workspaceId, operatorId, context } = job.data;
+      log.info({ taskId }, 'Resuming task after approval');
 
-        if (!deps.orchestrator) {
-          log.warn('Orchestrator not available for task resume');
+      if (!deps.orchestrator) {
+        log.warn('Orchestrator not available for task resume');
+        continue;
+      }
+
+      try {
+        if (!workspaceId) {
+          throw new Error('task.resume requires workspaceId for durable evidence');
+        }
+
+        const history = await loadParentRunHistory(deps.db, { taskId, workspaceId });
+        if (!history.taskFound) {
+          log.warn({ taskId, workspaceId }, 'Skipping resume for task outside workspace');
           continue;
         }
 
-        try {
-          if (!workspaceId) {
-            throw new Error('task.resume requires workspaceId for durable evidence');
-          }
-
-          const history = await loadParentRunHistory(deps.db, { taskId, workspaceId });
-          if (!history.taskFound) {
-            log.warn({ taskId, workspaceId }, 'Skipping resume for task outside workspace');
-            continue;
-          }
-
-          await deps.db.transaction(async (tx) => {
-            await appendTaskResumeDispatchEvidence({
-              db: tx,
-              job,
-              priorActionCount: history.priorActions.length,
-            });
+        await deps.db.transaction(async (tx) => {
+          await appendTaskResumeDispatchEvidence({
+            db: tx,
+            job,
+            priorActionCount: history.priorActions.length,
           });
+        });
 
-          const result = await deps.orchestrator.resumeTask({
-            taskId,
-            workspaceId,
-            operatorId,
-            context,
-            priorActions: history.priorActions,
-          });
+        const result = await deps.orchestrator.resumeTask({
+          taskId,
+          workspaceId,
+          operatorId,
+          context,
+          priorActions: history.priorActions,
+        });
 
-          log.info(
-            { taskId, status: result.status, iterations: result.iterationsUsed },
-            'Task resumed',
-          );
-        } catch (err) {
-          log.error({ err, taskId }, 'Failed to resume task');
-          throw err;
-        }
+        log.info(
+          { taskId, status: result.status, iterations: result.iterationsUsed },
+          'Task resumed',
+        );
+      } catch (err) {
+        log.error({ err, taskId }, 'Failed to resume task');
+        throw err;
       }
-    },
-  );
+    }
+  });
 
   async function appendTaskResumeDispatchEvidence(input: {
     db: EvidencePersistenceDb;
@@ -599,6 +596,14 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     if (!workspaceId) {
       throw new Error(`${name} requires workspaceId for durable pipeline evidence`);
     }
+    await appendPipelineEvidence({
+      name,
+      job,
+      workspaceId,
+      status: 'pipeline_job_started',
+      fallbackArgs: extraArgs,
+    });
+
     try {
       const result = await runPipeline(name, extraArgs);
       await appendPipelineEvidence({
@@ -650,7 +655,7 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
     name: keyof typeof PIPELINE_ALLOWLIST;
     job: PgBoss.Job<PipelineJobData>;
     workspaceId?: string;
-    status: 'pipeline_job_succeeded' | 'pipeline_job_failed';
+    status: 'pipeline_job_started' | 'pipeline_job_succeeded' | 'pipeline_job_failed';
     result?: PipelineRunResult;
     error?: unknown;
     fallbackArgs?: string[];
@@ -684,12 +689,19 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
         id: auditEventId,
         workspaceId,
         action:
-          input.status === 'pipeline_job_succeeded'
-            ? 'PIPELINE_JOB_SUCCEEDED'
-            : 'PIPELINE_JOB_FAILED',
+          input.status === 'pipeline_job_started'
+            ? 'PIPELINE_JOB_STARTED'
+            : input.status === 'pipeline_job_succeeded'
+              ? 'PIPELINE_JOB_SUCCEEDED'
+              : 'PIPELINE_JOB_FAILED',
         actor: `job:${input.name}`,
         target: input.job.id ?? input.name,
-        verdict: input.status === 'pipeline_job_succeeded' ? 'allow' : 'error',
+        verdict:
+          input.status === 'pipeline_job_started'
+            ? 'pending'
+            : input.status === 'pipeline_job_succeeded'
+              ? 'allow'
+              : 'error',
         metadata: {
           evidenceType: input.status,
           replayRef,
@@ -704,13 +716,17 @@ export async function registerJobHandlers(boss: PgBoss, deps: JobDeps): Promise<
         evidenceType: input.status,
         sourceType: 'pipeline_worker',
         title:
-          input.status === 'pipeline_job_succeeded'
-            ? `${input.name} completed`
-            : `${input.name} failed`,
+          input.status === 'pipeline_job_started'
+            ? `${input.name} started`
+            : input.status === 'pipeline_job_succeeded'
+              ? `${input.name} completed`
+              : `${input.name} failed`,
         summary:
-          input.status === 'pipeline_job_succeeded'
-            ? 'Workspace-scoped background ingestion pipeline completed.'
-            : 'Workspace-scoped background ingestion pipeline failed before completion.',
+          input.status === 'pipeline_job_started'
+            ? 'Workspace-scoped background ingestion pipeline was durably recorded before script execution.'
+            : input.status === 'pipeline_job_succeeded'
+              ? 'Workspace-scoped background ingestion pipeline completed.'
+              : 'Workspace-scoped background ingestion pipeline failed before completion.',
         redactionState: 'redacted',
         sensitivity: input.name === 'pipeline.yc-private' ? 'sensitive' : 'internal',
         contentHash: hashJson(metadata),
