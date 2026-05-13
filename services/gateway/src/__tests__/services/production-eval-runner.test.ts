@@ -1085,6 +1085,147 @@ describe('createProductionEvalRunner', () => {
     expect(result.run.failureReason).toContain('excluded child/subagent row');
   });
 
+  it('passes cross_workspace_operator_rejection from gateway and runtime denial evidence', async () => {
+    const gatewayReplayRef = `operator-scope:${workspaceId}:gateway_operator_scope:audit-operator-gateway`;
+    const runtimeReplayRef = `operator-scope:${workspaceId}:orchestrator_operator_scope:audit-operator-runtime`;
+    const gatewayMetadata = {
+      requestedOperatorId: 'operator-foreign-gateway',
+      surface: 'gateway:/conduct',
+      reason: 'operatorId_not_in_workspace',
+      evidenceContract: 'operator_scope_denial_evidence_required',
+      credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+      replayRef: gatewayReplayRef,
+    };
+    const runtimeMetadata = {
+      requestedOperatorId: 'operator-foreign-runtime',
+      surface: 'orchestrator.resolveRuntime',
+      reason: 'operatorId_not_in_workspace',
+      evidenceContract: 'operator_scope_denial_evidence_required',
+      credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+      replayRef: runtimeReplayRef,
+    };
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-operator-gateway',
+            computerActionId: null,
+            evidenceType: 'workspace_operator_scope_rejected',
+            sourceType: 'gateway_operator_scope',
+            auditEventId: 'audit-operator-gateway',
+            sensitivity: 'internal',
+            replayRef: gatewayReplayRef,
+            metadata: gatewayMetadata,
+          }),
+          evidenceItem({
+            id: 'evidence-operator-runtime',
+            computerActionId: null,
+            evidenceType: 'workspace_operator_scope_rejected',
+            sourceType: 'orchestrator_operator_scope',
+            auditEventId: 'audit-operator-runtime',
+            sensitivity: 'internal',
+            replayRef: runtimeReplayRef,
+            metadata: runtimeMetadata,
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-operator-gateway',
+            action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+            target: 'operator-foreign-gateway',
+            verdict: 'deny',
+            metadata: { ...gatewayMetadata, evidenceItemId: 'evidence-operator-gateway' },
+          }),
+          auditRow({
+            id: 'audit-operator-runtime',
+            action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+            target: 'operator-foreign-runtime',
+            verdict: 'deny',
+            metadata: { ...runtimeMetadata, evidenceItemId: 'evidence-operator-runtime' },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'cross_workspace_operator_rejection',
+      capabilityKey: 'operator_scoping',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'cross_workspace_operator_rejection',
+      status: 'passed',
+      capabilityKey: 'operator_scoping',
+      evidenceRefs: [gatewayReplayRef, runtimeReplayRef],
+      auditReceiptRefs: ['audit:audit-operator-gateway', 'audit:audit-operator-runtime'],
+      metadata: {
+        runnerRef: 'gateway:cross_workspace_operator_rejection:v1',
+        verifiedGatewayEvidenceItemId: 'evidence-operator-gateway',
+        verifiedRuntimeEvidenceItemId: 'evidence-operator-runtime',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+  });
+
+  it('fails cross_workspace_operator_rejection without runtime denial evidence', async () => {
+    const gatewayReplayRef = `operator-scope:${workspaceId}:gateway_operator_scope:audit-operator-gateway`;
+    const metadata = {
+      requestedOperatorId: 'operator-foreign-gateway',
+      surface: 'gateway:/tasks',
+      reason: 'operatorId_not_in_workspace',
+      evidenceContract: 'operator_scope_denial_evidence_required',
+      credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+      replayRef: gatewayReplayRef,
+    };
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-operator-gateway',
+            computerActionId: null,
+            evidenceType: 'workspace_operator_scope_rejected',
+            sourceType: 'gateway_operator_scope',
+            auditEventId: 'audit-operator-gateway',
+            sensitivity: 'internal',
+            replayRef: gatewayReplayRef,
+            metadata,
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-operator-gateway',
+            action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+            target: 'operator-foreign-gateway',
+            verdict: 'deny',
+            metadata: { ...metadata, evidenceItemId: 'evidence-operator-gateway' },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'cross_workspace_operator_rejection',
+      capabilityKey: 'operator_scoping',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('gateway ingress and orchestrator runtime');
+  });
+
   it('passes pmf_discovery opportunity_scoring only from brokered score evidence and audit rows', async () => {
     const opp = opportunity({ id: 'opp-pmf-1' });
     const score = opportunityScore({ id: 'score-pmf-1', opportunityId: opp.id });

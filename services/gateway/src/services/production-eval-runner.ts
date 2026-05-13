@@ -79,6 +79,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'approval_resume_isolation') {
         return executeApprovalResumeIsolationEval(db, input);
       }
+      if (input.evalId === 'cross_workspace_operator_rejection') {
+        return executeCrossWorkspaceOperatorRejectionEval(db, input);
+      }
       return failedRun(
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
@@ -456,6 +459,91 @@ async function executeApprovalResumeIsolationEval(
               runSequence: row.runSequence,
               actionTool: row.actionTool,
             })),
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function executeCrossWorkspaceOperatorRejectionEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(500);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(500);
+
+  const gatewayProof = findOperatorScopeRejectionProof(
+    evidenceRows,
+    auditRows,
+    input.workspaceId,
+    'gateway_operator_scope',
+  );
+  const runtimeProof = findOperatorScopeRejectionProof(
+    evidenceRows,
+    auditRows,
+    input.workspaceId,
+    'orchestrator_operator_scope',
+  );
+
+  if (!gatewayProof || !runtimeProof) {
+    return failedRun(
+      input,
+      'Cross-Workspace Operator Rejection Regression requires durable gateway ingress and orchestrator runtime rejection evidence with deny audit receipts',
+    );
+  }
+
+  const completedAt = new Date().toISOString();
+  const evidenceRefs = [evidenceRef(gatewayProof.evidence), evidenceRef(runtimeProof.evidence)];
+  const auditReceiptRefs = [auditRef(gatewayProof.audit), auditRef(runtimeProof.audit)];
+  const requestedOperatorIds = uniqueSorted([
+    String((gatewayProof.evidence.metadata as Record<string, unknown>)['requestedOperatorId']),
+    String((runtimeProof.evidence.metadata as Record<string, unknown>)['requestedOperatorId']),
+  ]);
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'cross_workspace_operator_rejection',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'operator_scoping',
+      runRef:
+        input.runRef ?? `real-external-eval:cross_workspace_operator_rejection:${randomUUID()}`,
+      summary:
+        'Verified cross-workspace operator IDs are denied at gateway ingress and orchestrator runtime with durable evidence and audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:cross_workspace_operator_rejection:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedGatewayEvidenceItemId: gatewayProof.evidence.id,
+        verifiedGatewayAuditEventId: gatewayProof.audit.id,
+        verifiedRuntimeEvidenceItemId: runtimeProof.evidence.id,
+        verifiedRuntimeAuditEventId: runtimeProof.audit.id,
+        requestedOperatorIds,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'gateway-and-runtime-operator-scope-denial',
+          status: 'passed',
+          evidenceRefs,
+          auditReceiptRefs,
+          completedAt,
+          metadata: {
+            gatewaySurface: (gatewayProof.evidence.metadata as Record<string, unknown>)['surface'],
+            runtimeSurface: (runtimeProof.evidence.metadata as Record<string, unknown>)['surface'],
+            requestedOperatorIds,
           },
         },
       ],
@@ -1531,6 +1619,67 @@ function isTaskResumeDispatchAudit(
   );
 }
 
+function findOperatorScopeRejectionProof(
+  evidenceRows: EvidenceItemRow[],
+  auditRows: AuditRow[],
+  workspaceId: string,
+  sourceType: 'gateway_operator_scope' | 'orchestrator_operator_scope',
+): { evidence: EvidenceItemRow; audit: AuditRow } | undefined {
+  for (const evidence of evidenceRows) {
+    if (!isOperatorScopeRejectionEvidence(evidence, workspaceId, sourceType)) continue;
+    const audit = auditRows.find((row) => isOperatorScopeRejectionAudit(row, evidence));
+    if (audit) return { evidence, audit };
+  }
+  return undefined;
+}
+
+function isOperatorScopeRejectionEvidence(
+  row: EvidenceItemRow,
+  workspaceId: string,
+  sourceType: 'gateway_operator_scope' | 'orchestrator_operator_scope',
+): boolean {
+  if (!row.replayRef || !row.auditEventId || row.workspaceId !== workspaceId) return false;
+  if (
+    row.evidenceType !== 'workspace_operator_scope_rejected' ||
+    row.sourceType !== sourceType ||
+    row.redactionState !== 'redacted' ||
+    row.sensitivity !== 'internal'
+  ) {
+    return false;
+  }
+  if (!isRecord(row.metadata)) return false;
+  return (
+    typeof row.metadata['requestedOperatorId'] === 'string' &&
+    row.metadata['requestedOperatorId'].length > 0 &&
+    typeof row.metadata['surface'] === 'string' &&
+    row.metadata['surface'].length > 0 &&
+    row.metadata['reason'] === 'operatorId_not_in_workspace' &&
+    row.metadata['evidenceContract'] === 'operator_scope_denial_evidence_required' &&
+    row.metadata['credentialBoundary'] === 'no_raw_credentials_or_session_payloads_in_evidence' &&
+    row.metadata['replayRef'] === row.replayRef &&
+    row.metadata['foreignWorkspaceId'] === undefined
+  );
+}
+
+function isOperatorScopeRejectionAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'WORKSPACE_OPERATOR_SCOPE_REJECTED' &&
+    row.verdict === 'deny' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'requestedOperatorId', requestedOperatorId(evidence)) &&
+    hasMetadataValue(row.metadata, 'reason', 'operatorId_not_in_workspace') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? ''),
+  );
+}
+
+function requestedOperatorId(evidence: EvidenceItemRow): string {
+  return isRecord(evidence.metadata) && typeof evidence.metadata['requestedOperatorId'] === 'string'
+    ? evidence.metadata['requestedOperatorId']
+    : '';
+}
+
 function failedRun(
   input: TrustedRealExternalEvalInput,
   reason: string,
@@ -1964,6 +2113,10 @@ function hasMetadataNumber(metadata: unknown, key: string, expected: number): bo
 
 function metadataArrayIncludes(metadata: unknown, key: string, expected: string): boolean {
   return isRecord(metadata) && Array.isArray(metadata[key]) && metadata[key].includes(expected);
+}
+
+function uniqueSorted(values: readonly string[]): string[] {
+  return [...new Set(values)].sort((a, b) => a.localeCompare(b));
 }
 
 function normalizeVerdict(verdict: string): string {

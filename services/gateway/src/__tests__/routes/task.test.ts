@@ -208,10 +208,7 @@ function createAutoRunDispatchDb(options: { failDispatchEvidence?: boolean } = {
               }
               return [
                 {
-                  id:
-                    evidenceInsertCount === 1
-                      ? 'evidence-task-create-1'
-                      : 'evidence-task-run-1',
+                  id: evidenceInsertCount === 1 ? 'evidence-task-create-1' : 'evidence-task-run-1',
                 },
               ];
             }
@@ -344,6 +341,27 @@ describe('taskRoutes', () => {
 
     it('rejects operatorId from another workspace before task creation', async () => {
       const deps = createMockDeps();
+      const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      const updates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+      deps.db.insert = vi.fn((table: unknown) => ({
+        values: vi.fn((value: Record<string, unknown>) => {
+          inserts.push({ table, value });
+          return {
+            returning: vi.fn(async () =>
+              table === evidenceItems ? [{ id: 'evidence-operator-scope-task-1' }] : [],
+            ),
+            then: (resolve: (value: unknown[]) => void) => resolve([]),
+          };
+        }),
+      })) as never;
+      deps.db.update = vi.fn((table: unknown) => ({
+        set: vi.fn((value: Record<string, unknown>) => {
+          updates.push({ table, value });
+          return {
+            where: vi.fn(async () => []),
+          };
+        }),
+      })) as never;
       const { fetch } = testApp(taskRoutes, deps as any);
       const res = await fetch(
         'POST',
@@ -359,7 +377,31 @@ describe('taskRoutes', () => {
       const json = await expectJson<{ error: string }>(res, 403);
 
       expect(json.error).toBe('operatorId does not belong to authenticated workspace');
-      expect(deps.db.insert).not.toHaveBeenCalled();
+      expect(inserts.some((insert) => insert.table === tasks)).toBe(false);
+      expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+        workspaceId: VALID_UUID,
+        action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+        target: '00000000-0000-0000-0000-000000000099',
+        verdict: 'deny',
+        metadata: {
+          requestedOperatorId: '00000000-0000-0000-0000-000000000099',
+          reason: 'operatorId_not_in_workspace',
+        },
+      });
+      expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+        workspaceId: VALID_UUID,
+        evidenceType: 'workspace_operator_scope_rejected',
+        sourceType: 'gateway_operator_scope',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        metadata: {
+          requestedOperatorId: '00000000-0000-0000-0000-000000000099',
+          reason: 'operatorId_not_in_workspace',
+        },
+      });
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: { evidenceItemId: 'evidence-operator-scope-task-1' },
+      });
     });
 
     it('returns 201 on successful creation', async () => {
