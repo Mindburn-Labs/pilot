@@ -9,7 +9,7 @@ const log = createLogger('email');
  * Primary drivers:
  *   - `resend` (managed, modern, recommended for SaaS)
  *   - `smtp` (nodemailer — for self-hosters / enterprise SMTP)
- *   - `noop` (dev fallback — logs the email instead of sending)
+ *   - `noop` (dev fallback — does not send; logs redacted delivery metadata)
  *
  * Selection via `EMAIL_PROVIDER` env var. Defaults to `noop` for safety.
  */
