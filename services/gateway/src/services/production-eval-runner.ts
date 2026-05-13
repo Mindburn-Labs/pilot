@@ -70,6 +70,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'pmf_discovery') {
         return executePmfDiscoveryEval(db, input);
       }
+      if (input.evalId === 'skill_invocation_governance') {
+        return executeSkillInvocationGovernanceEval(db, input);
+      }
       if (input.evalId === 'proof_dag_lineage') {
         return executeProofDagLineageEval(db, input);
       }
@@ -80,6 +83,174 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
       );
+    },
+  };
+}
+
+async function executeSkillInvocationGovernanceEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const taskRows = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.workspaceId, input.workspaceId))
+    .orderBy(desc(tasks.createdAt))
+    .limit(100);
+  const taskIds = taskRows.map((row) => row.id);
+  if (taskIds.length === 0) {
+    return failedRun(
+      input,
+      'Skill Invocation Governance Eval requires a workspace-scoped task with subagent skill invocation records',
+    );
+  }
+
+  const runRows = await db
+    .select()
+    .from(taskRuns)
+    .where(inArray(taskRuns.taskId, taskIds))
+    .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id))
+    .limit(500);
+  const handoffRows = await db
+    .select()
+    .from(agentHandoffs)
+    .where(eq(agentHandoffs.workspaceId, input.workspaceId))
+    .orderBy(desc(agentHandoffs.createdAt), desc(agentHandoffs.id))
+    .limit(200);
+  const executionRows = await db
+    .select()
+    .from(toolExecutions)
+    .where(
+      and(
+        eq(toolExecutions.workspaceId, input.workspaceId),
+        eq(toolExecutions.toolKey, 'skill.invoke'),
+      ),
+    )
+    .orderBy(desc(toolExecutions.completedAt))
+    .limit(100);
+
+  const proof = findSkillInvocationGovernanceProof({
+    taskRows,
+    runRows,
+    handoffRows,
+    executionRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Skill Invocation Governance Eval requires a completed brokered skill.invoke execution, versioned skill metadata on task_runs and agent_handoffs, policy pins, and brokered invocation IDs',
+    );
+  }
+
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(
+      and(
+        eq(evidenceItems.workspaceId, input.workspaceId),
+        eq(evidenceItems.toolExecutionId, proof.execution.id),
+      ),
+    )
+    .orderBy(desc(evidenceItems.observedAt))
+    .limit(25);
+  const evidence = evidenceRows.find((row) => isSkillInvocationToolEvidence(row, proof.execution));
+  if (!evidence) {
+    return failedRun(
+      input,
+      `skill.invoke tool execution ${proof.execution.id} has no linked skill Tool Broker evidence row`,
+    );
+  }
+  if (!evidence.auditEventId) {
+    return failedRun(input, `skill.invoke evidence ${evidence.id} is missing audit_event_id`);
+  }
+  if (
+    !hasBrokeredSkillInvocation(
+      proof.run.skillInvocations,
+      proof.execution,
+      proof.skill,
+      evidence.id,
+    ) ||
+    !hasBrokeredSkillInvocation(
+      proof.handoff.skillInvocations,
+      proof.execution,
+      proof.skill,
+      evidence.id,
+    )
+  ) {
+    return failedRun(
+      input,
+      `skill.invoke evidence ${evidence.id} is not referenced by task_run and handoff brokeredInvocation metadata`,
+    );
+  }
+
+  const audits = await db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, evidence.auditEventId)))
+    .limit(1);
+  const audit = audits.find((row) => isSkillInvocationToolAudit(row, evidence, proof.execution));
+  if (!audit) {
+    return failedRun(
+      input,
+      `skill.invoke evidence ${evidence.id} has no matching TOOL_EXECUTION audit row`,
+    );
+  }
+
+  const skill = proof.skill;
+  const evidenceReference = evidenceRef(evidence);
+  const auditReference = auditRef(audit);
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'skill_invocation_governance',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'skill_registry_runtime',
+      runRef: input.runRef ?? `real-external-eval:skill-invocation:${randomUUID()}`,
+      summary:
+        'Skill Invocation Governance Eval verified a loaded, versioned, scoped skill activated through Tool Broker with task-run metadata, handoff metadata, evidence, policy pins, and audit receipt.',
+      evidenceRefs: [evidenceReference],
+      auditReceiptRefs: [auditReference],
+      metadata: {
+        runnerRef: 'gateway:skill_invocation_governance:v1',
+        verifiedTaskId: proof.task.id,
+        verifiedTaskRunId: proof.run.id,
+        verifiedAgentHandoffId: proof.handoff.id,
+        verifiedToolExecutionId: proof.execution.id,
+        verifiedEvidenceItemId: evidence.id,
+        verifiedAuditEventId: audit.id,
+        skillName: skill.name,
+        skillVersion: skill.version,
+        skillRiskProfile: skill.riskProfile,
+        skillEvalStatus: skill.evalStatus,
+        permissionRequirements: skill.permissionRequirements,
+        declaredTools: skill.declaredTools,
+        policyDecisionId: proof.execution.policyDecisionId,
+        policyVersion: proof.execution.policyVersion,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'brokered-versioned-skill-invocation',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: {
+            taskRunId: proof.run.id,
+            handoffId: proof.handoff.id,
+            toolExecutionId: proof.execution.id,
+            skillName: skill.name,
+            skillVersion: skill.version,
+            riskProfile: skill.riskProfile,
+            evalStatus: skill.evalStatus,
+            permissionRequirements: skill.permissionRequirements,
+            declaredTools: skill.declaredTools,
+          },
+        },
+      ],
     },
   };
 }
@@ -910,6 +1081,50 @@ async function executeSafeComputerSandboxEval(
   };
 }
 
+function findSkillInvocationGovernanceProof(params: {
+  taskRows: TaskRow[];
+  runRows: TaskRunRow[];
+  handoffRows: AgentHandoffRow[];
+  executionRows: ToolExecutionRow[];
+}):
+  | {
+      task: TaskRow;
+      run: TaskRunRow;
+      handoff: AgentHandoffRow;
+      execution: ToolExecutionRow;
+      skill: SkillInvocationProof;
+    }
+  | undefined {
+  for (const task of params.taskRows) {
+    const taskRunRows = params.runRows.filter((row) => row.taskId === task.id);
+    for (const execution of params.executionRows) {
+      if (!isProductionSkillToolExecution(execution)) continue;
+      const skill = extractSkillInvocationProof(execution.sanitizedOutput);
+      if (!skill) continue;
+      const run = taskRunRows.find(
+        (row) =>
+          row.id === execution.taskRunId &&
+          row.lineageKind === 'subagent_spawn' &&
+          row.parentTaskRunId !== null &&
+          typeof row.operatorRole === 'string' &&
+          row.operatorRole.length > 0 &&
+          hasBrokeredSkillInvocation(row.skillInvocations, execution, skill),
+      );
+      if (!run) continue;
+      const handoff = params.handoffRows.find(
+        (row) =>
+          row.taskId === task.id &&
+          row.childTaskRunId === run.id &&
+          row.handoffKind === 'subagent_spawn' &&
+          hasBrokeredSkillInvocation(row.skillInvocations, execution, skill),
+      );
+      if (!handoff) continue;
+      return { task, run, handoff, execution, skill };
+    }
+  }
+  return undefined;
+}
+
 function findSubagentProofDagProof(params: {
   workspaceId: string;
   taskRows: TaskRow[];
@@ -1012,6 +1227,154 @@ function findApprovalResumeIsolationProof(params: {
     return { task, parentRows, childRows, evidence, audit };
   }
   return undefined;
+}
+
+type SkillInvocationProof = {
+  name: string;
+  version: string;
+  riskProfile: string;
+  permissionRequirements: string[];
+  evalStatus: string;
+  declaredTools: string[];
+  sourcePath: string;
+  instructionHash: string;
+};
+
+function isProductionSkillToolExecution(row: ToolExecutionRow): boolean {
+  return Boolean(
+    row.toolKey === 'skill.invoke' &&
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.outputHash &&
+    row.actionId &&
+    row.taskRunId &&
+    row.idempotencyKey &&
+    Array.isArray(row.evidenceIds) &&
+    row.evidenceIds.length > 0 &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
+    extractSkillInvocationProof(row.sanitizedOutput),
+  );
+}
+
+function extractSkillInvocationProof(value: unknown): SkillInvocationProof | undefined {
+  if (!isRecord(value)) return undefined;
+  const skill = value['skill'];
+  if (!isRecord(skill)) return undefined;
+  const permissionRequirements = getStringArray(skill, 'permissionRequirements');
+  const declaredTools = getStringArray(skill, 'declaredTools');
+  const name = typeof skill['name'] === 'string' ? skill['name'] : '';
+  const version = typeof skill['version'] === 'string' ? skill['version'] : '';
+  const riskProfile = typeof skill['riskProfile'] === 'string' ? skill['riskProfile'] : '';
+  const evalStatus = typeof skill['evalStatus'] === 'string' ? skill['evalStatus'] : '';
+  const sourcePath = typeof skill['sourcePath'] === 'string' ? skill['sourcePath'] : '';
+  const instructionHash =
+    typeof value['instructionHash'] === 'string' ? value['instructionHash'] : '';
+  if (
+    !name ||
+    !version ||
+    !riskProfile ||
+    !evalStatus ||
+    !sourcePath ||
+    !instructionHash ||
+    permissionRequirements.length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    name,
+    version,
+    riskProfile,
+    permissionRequirements,
+    evalStatus,
+    declaredTools,
+    sourcePath,
+    instructionHash,
+  };
+}
+
+function hasBrokeredSkillInvocation(
+  value: unknown,
+  execution: ToolExecutionRow,
+  skill: SkillInvocationProof,
+  evidenceItemId?: string,
+): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => isBrokeredSkillInvocation(entry, execution, skill, evidenceItemId));
+}
+
+function isBrokeredSkillInvocation(
+  value: unknown,
+  execution: ToolExecutionRow,
+  skill: SkillInvocationProof,
+  evidenceItemId?: string,
+): boolean {
+  if (!isRecord(value)) return false;
+  const brokered = value['brokeredInvocation'];
+  const expectedEvidenceItemId =
+    typeof evidenceItemId === 'string' && evidenceItemId.length > 0 ? evidenceItemId : undefined;
+  return Boolean(
+    value['name'] === skill.name &&
+    value['version'] === skill.version &&
+    value['riskProfile'] === skill.riskProfile &&
+    value['evalStatus'] === skill.evalStatus &&
+    value['sourcePath'] === skill.sourcePath &&
+    value['instructionHash'] === skill.instructionHash &&
+    arrayContainsAll(value['permissionRequirements'], skill.permissionRequirements) &&
+    arrayContainsAll(value['declaredTools'], skill.declaredTools) &&
+    isRecord(brokered) &&
+    brokered['actionId'] === execution.actionId &&
+    brokered['toolExecutionId'] === execution.id &&
+    (expectedEvidenceItemId
+      ? brokered['evidenceItemId'] === expectedEvidenceItemId
+      : typeof brokered['evidenceItemId'] === 'string' && brokered['evidenceItemId'].length > 0) &&
+    brokered['status'] === 'completed' &&
+    brokered['inputHash'] === execution.inputHash &&
+    brokered['outputHash'] === execution.outputHash &&
+    brokered['policyDecisionId'] === execution.policyDecisionId &&
+    brokered['policyVersion'] === execution.policyVersion,
+  );
+}
+
+function isSkillInvocationToolEvidence(row: EvidenceItemRow, execution: ToolExecutionRow): boolean {
+  return Boolean(
+    row.toolExecutionId === execution.id &&
+    row.actionId === execution.actionId &&
+    row.evidenceType === 'tool_execution_completed' &&
+    row.sourceType === 'tool_broker' &&
+    row.auditEventId &&
+    row.replayRef === `tool:${execution.id}` &&
+    row.contentHash === execution.outputHash &&
+    Array.isArray(execution.evidenceIds) &&
+    execution.evidenceIds.includes(row.id) &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', 'skill.invoke') &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'skill_manifest') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'skill_run_record') &&
+    metadataArrayIncludes(row.metadata, 'permissionRequirements', 'skill:invoke'),
+  );
+}
+
+function isSkillInvocationToolAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  execution: ToolExecutionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.action === 'TOOL_EXECUTION' &&
+    row.target === 'skill.invoke' &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', 'skill.invoke') &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+  );
 }
 
 function isParentReplayRun(row: TaskRunRow): boolean {
@@ -1634,6 +1997,10 @@ function isSha256ContentHash(value: string | null): boolean {
 
 function isNonEmptyArray(value: unknown): value is unknown[] {
   return Array.isArray(value) && value.length > 0;
+}
+
+function arrayContainsAll(value: unknown, expected: string[]): boolean {
+  return Array.isArray(value) && expected.every((entry) => value.includes(entry));
 }
 
 function getStringArray(metadata: Record<string, unknown>, key: string): string[] {

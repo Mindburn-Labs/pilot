@@ -500,7 +500,254 @@ function decisionCourtMetadata(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function skillInvocationOutput(overrides: Record<string, unknown> = {}) {
+  return {
+    skill: {
+      name: 'yc-application-writing',
+      version: '1.0.0',
+      riskProfile: 'medium',
+      permissionRequirements: ['skill:invoke'],
+      evalStatus: 'implemented',
+      declaredTools: ['search_knowledge'],
+      sourcePath: 'packs/skills/yc-application-writing/SKILL.md',
+    },
+    activation: {
+      reason: 'explicit',
+      score: 1,
+      subagentName: 'application_writer',
+    },
+    taskHash: 'sha256:task-hash',
+    instructionHash: 'sha256:instruction-hash',
+    capability: {
+      key: 'skill_registry_runtime',
+      state: 'implemented',
+    },
+    ...overrides,
+  };
+}
+
+function skillInvocationAudit(
+  execution: ToolExecutionRow,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    name: 'yc-application-writing',
+    version: '1.0.0',
+    activationReason: 'explicit',
+    score: 1,
+    riskProfile: 'medium',
+    permissionRequirements: ['skill:invoke'],
+    evalStatus: 'implemented',
+    declaredTools: ['search_knowledge'],
+    sourcePath: 'packs/skills/yc-application-writing/SKILL.md',
+    instructionHash: 'sha256:instruction-hash',
+    brokeredInvocation: {
+      actionId: execution.actionId,
+      toolExecutionId: execution.id,
+      evidenceItemId: 'evidence-skill-invoke',
+      status: 'completed',
+      inputHash: execution.inputHash,
+      outputHash: execution.outputHash,
+      policyDecisionId: execution.policyDecisionId,
+      policyVersion: execution.policyVersion,
+    },
+    ...overrides,
+  };
+}
+
 describe('createProductionEvalRunner', () => {
+  it('passes skill_invocation_governance from brokered skill metadata, evidence, and audit rows', async () => {
+    const task = taskRow({ id: 'task-skill-1' });
+    const execution = toolExecution({
+      id: 'tool-execution-skill-1',
+      actionId: 'action-skill-1',
+      taskRunId: 'task-run-skill-1',
+      toolKey: 'skill.invoke',
+      inputHash: 'sha256:skill-input',
+      sanitizedInput: {
+        skillName: 'yc-application-writing',
+        expectedVersion: '1.0.0',
+        allowedTools: ['search_knowledge'],
+      },
+      outputHash: 'sha256:skill-output',
+      sanitizedOutput: skillInvocationOutput(),
+      evidenceIds: ['evidence-skill-invoke'],
+      policyDecisionId: 'skill-decision-1',
+      policyVersion: 'founder-ops-v1',
+      helmDocumentVersionPins: { skillPolicy: 'founder-ops-v1' },
+      completedAt: new Date('2026-05-12T00:02:00.000Z'),
+    });
+    const invocation = skillInvocationAudit(execution);
+    const run = taskRunRow({
+      id: 'task-run-skill-1',
+      taskId: task.id,
+      lineageKind: 'subagent_spawn',
+      parentTaskRunId: 'task-run-parent-1',
+      rootTaskRunId: 'task-run-parent-1',
+      spawnedByActionId: 'task-run-parent-1',
+      actionTool: 'subagent.spawn',
+      operatorRole: 'application_writer',
+      skillInvocations: [invocation],
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        taskRows: [task],
+        taskRunRows: [run],
+        handoffRows: [
+          agentHandoffRow({
+            taskId: task.id,
+            parentTaskRunId: 'task-run-parent-1',
+            childTaskRunId: run.id,
+            toAgent: 'application_writer',
+            skillInvocations: [invocation],
+          }),
+        ],
+        toolExecutionRows: [execution],
+        evidence: [
+          evidenceItem({
+            id: 'evidence-skill-invoke',
+            computerActionId: null,
+            actionId: execution.actionId,
+            toolExecutionId: execution.id,
+            evidenceType: 'tool_execution_completed',
+            sourceType: 'tool_broker',
+            auditEventId: 'audit-skill-invoke',
+            contentHash: execution.outputHash,
+            replayRef: `tool:${execution.id}`,
+            metadata: {
+              broker: 'tool_broker_v1',
+              toolKey: 'skill.invoke',
+              actionId: execution.actionId,
+              toolExecutionId: execution.id,
+              status: 'completed',
+              riskClass: 'medium',
+              effectLevel: 'E2',
+              manifestVersion: 'runtime_skill_adapter_v1',
+              requiredEvidence: ['skill_manifest', 'skill_run_record'],
+              permissionRequirements: ['skill:invoke'],
+              policyDecisionId: execution.policyDecisionId,
+              policyVersion: execution.policyVersion,
+            },
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-skill-invoke',
+            action: 'TOOL_EXECUTION',
+            target: 'skill.invoke',
+            verdict: 'allow',
+            metadata: {
+              broker: 'tool_broker_v1',
+              toolKey: 'skill.invoke',
+              toolExecutionId: execution.id,
+              evidenceItemId: 'evidence-skill-invoke',
+              policyDecisionId: execution.policyDecisionId,
+              policyVersion: execution.policyVersion,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'skill_invocation_governance',
+      capabilityKey: 'skill_registry_runtime',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'skill_invocation_governance',
+      status: 'passed',
+      capabilityKey: 'skill_registry_runtime',
+      evidenceRefs: ['tool:tool-execution-skill-1'],
+      auditReceiptRefs: ['audit:audit-skill-invoke'],
+      metadata: {
+        runnerRef: 'gateway:skill_invocation_governance:v1',
+        verifiedTaskId: task.id,
+        verifiedTaskRunId: run.id,
+        verifiedToolExecutionId: execution.id,
+        skillName: 'yc-application-writing',
+        skillVersion: '1.0.0',
+        skillRiskProfile: 'medium',
+        skillEvalStatus: 'implemented',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'brokered-versioned-skill-invocation',
+        status: 'passed',
+        metadata: expect.objectContaining({
+          skillName: 'yc-application-writing',
+          skillVersion: '1.0.0',
+          permissionRequirements: ['skill:invoke'],
+          declaredTools: ['search_knowledge'],
+        }),
+      }),
+    ]);
+  });
+
+  it('fails skill_invocation_governance when skill metadata is not brokered', async () => {
+    const task = taskRow({ id: 'task-skill-1' });
+    const execution = toolExecution({
+      id: 'tool-execution-skill-1',
+      actionId: 'action-skill-1',
+      taskRunId: 'task-run-skill-1',
+      toolKey: 'skill.invoke',
+      sanitizedOutput: skillInvocationOutput(),
+      outputHash: 'sha256:skill-output',
+      evidenceIds: ['evidence-skill-invoke'],
+      policyDecisionId: 'skill-decision-1',
+      policyVersion: 'founder-ops-v1',
+      helmDocumentVersionPins: { skillPolicy: 'founder-ops-v1' },
+    });
+    const promptOnlyInvocation = skillInvocationAudit(execution, { brokeredInvocation: undefined });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        taskRows: [task],
+        taskRunRows: [
+          taskRunRow({
+            id: 'task-run-skill-1',
+            taskId: task.id,
+            lineageKind: 'subagent_spawn',
+            parentTaskRunId: 'task-run-parent-1',
+            operatorRole: 'application_writer',
+            skillInvocations: [promptOnlyInvocation],
+          }),
+        ],
+        handoffRows: [
+          agentHandoffRow({
+            taskId: task.id,
+            childTaskRunId: 'task-run-skill-1',
+            skillInvocations: [promptOnlyInvocation],
+          }),
+        ],
+        toolExecutionRows: [execution],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'skill_invocation_governance',
+      capabilityKey: 'skill_registry_runtime',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('brokered skill.invoke execution');
+  });
+
   it('passes proof_dag_lineage from durable parent, spawn, child, handoff, evidence, and receipts', async () => {
     const task = taskRow({ id: 'task-foundation-1' });
     const parent = taskRunRow({
