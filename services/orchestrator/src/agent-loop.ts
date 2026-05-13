@@ -1,7 +1,7 @@
 import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
-import { createHash } from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { createHash, randomUUID } from 'node:crypto';
+import { and, eq } from 'drizzle-orm';
 import { type LlmGovernance, type LlmProvider, type LlmUsage } from '@pilot/shared/llm';
 import {
   HelmDeniedError,
@@ -1132,30 +1132,107 @@ export class AgentLoop {
   ): Promise<void> {
     let approvalId: string | undefined;
     const actionHash = computeActionHash(action);
+    const policyVersion = this.lastToolGovernance?.policyVersion ?? this.localPolicyVersion();
+    const requestedBy = params.operatorId ?? 'system';
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const approvalContext = {
+      taskId: params.taskId,
+      workspaceId: params.workspaceId,
+      operatorId: params.operatorId ?? null,
+      actionHash,
+    };
     try {
-      const { approvals } = await import('@pilot/db/schema');
-      const [record] = await this.db
-        .insert(approvals)
-        .values({
-          workspaceId: params.workspaceId,
-          taskId: params.taskId,
-          action: action.tool,
-          actionInput: toJsonValue(action.input),
-          actionHash,
-          policyVersion: this.lastToolGovernance?.policyVersion ?? this.localPolicyVersion(),
-          approvalContext: {
-            taskId: params.taskId,
+      const { approvals, auditLog } = await import('@pilot/db/schema');
+      await this.db.transaction(async (tx) => {
+        const [record] = await tx
+          .insert(approvals)
+          .values({
             workspaceId: params.workspaceId,
-            operatorId: params.operatorId ?? null,
+            taskId: params.taskId,
+            action: action.tool,
+            actionInput: toJsonValue(action.input),
             actionHash,
-          },
+            policyVersion,
+            approvalContext,
+            reason,
+            status: 'pending',
+            requestedBy,
+            expiresAt,
+          })
+          .returning();
+        approvalId = record?.id;
+        if (!approvalId) {
+          throw new Error('approval insert did not return id');
+        }
+
+        const auditEventId = randomUUID();
+        const replayRef = `approval:${approvalId}:requested:${actionHash.slice(7, 23)}`;
+        const metadata = {
+          approvalId,
+          taskId: params.taskId,
+          workspaceId: params.workspaceId,
+          operatorId: params.operatorId ?? null,
+          action: action.tool,
+          actionHash,
+          policyVersion,
           reason,
           status: 'pending',
-          requestedBy: params.operatorId ?? 'system',
-          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24h expiry
-        })
-        .returning();
-      approvalId = record?.id;
+          requestedBy,
+          expiresAt: expiresAt.toISOString(),
+          replayRef,
+          evidenceItemId: null,
+          credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+        };
+        const contentHash = `sha256:${createHash('sha256').update(stableJson(metadata)).digest('hex')}`;
+
+        await tx.insert(auditLog).values({
+          id: auditEventId,
+          workspaceId: params.workspaceId,
+          action: 'WORKSPACE_APPROVAL_REQUESTED',
+          actor: `operator:${requestedBy}`,
+          target: approvalId,
+          verdict: 'pending',
+          reason,
+          metadata,
+        });
+
+        const evidenceItemId = await appendEvidenceItem(tx, {
+          workspaceId: params.workspaceId,
+          taskId: params.taskId,
+          auditEventId,
+          evidenceType: 'workspace_approval_requested',
+          sourceType: 'agent_loop_approval',
+          title: `Approval requested: ${action.tool}`,
+          summary: reason,
+          redactionState: 'redacted',
+          sensitivity: 'internal',
+          contentHash,
+          replayRef,
+          metadata,
+        });
+
+        const proofContext = {
+          ...approvalContext,
+          auditEventId,
+          evidenceItemId,
+          replayRef,
+        };
+
+        await tx
+          .update(auditLog)
+          .set({
+            metadata: {
+              ...metadata,
+              evidenceItemId,
+            },
+          })
+          .where(and(eq(auditLog.workspaceId, params.workspaceId), eq(auditLog.id, auditEventId)));
+
+        await tx
+          .update(approvals)
+          .set({ approvalContext: proofContext })
+          .where(and(eq(approvals.workspaceId, params.workspaceId), eq(approvals.id, approvalId)));
+      });
     } catch (err) {
       captureException(err, {
         tags: { source: 'createApprovalRecord', taskId: params.taskId },
