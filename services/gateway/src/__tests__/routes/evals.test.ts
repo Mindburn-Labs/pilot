@@ -1042,7 +1042,9 @@ describe('evalRoutes', () => {
     }>(res, 200);
 
     expect(body.check.canPromote).toBe(false);
-    expect(body.check.requiredEval).toBe('Full Startup Launch Eval and Stripe Setup Prep Eval');
+    expect(body.check.requiredEval).toBe(
+      'Full Startup Launch Eval and Stripe Setup Prep Eval and Company Formation Prep Eval',
+    );
     expect(body.check.blockers.join(' ')).toContain('No eval run submitted');
   });
 
@@ -1069,6 +1071,16 @@ describe('evalRoutes', () => {
           metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:01.000Z'),
         },
+        {
+          evalId: 'company_formation_prep',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: 'startup_lifecycle',
+          evidenceRefs: ['evidence:company-formation-prep'],
+          auditReceiptRefs: ['audit:company-formation-prep'],
+          metadata: realExternalMetadata,
+          completedAt: new Date('2026-05-05T00:00:02.000Z'),
+        },
       ],
     ]);
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
@@ -1092,14 +1104,20 @@ describe('evalRoutes', () => {
 
     expect(body.check.canPromote).toBe(true);
     expect(body.check.matchedEvalId).toBe('full_startup_launch');
-    expect(body.check.matchedEvalIds).toEqual(['full_startup_launch', 'stripe_setup_prep']);
+    expect(body.check.matchedEvalIds).toEqual([
+      'full_startup_launch',
+      'stripe_setup_prep',
+      'company_formation_prep',
+    ]);
     expect(body.check.evidenceRefs).toEqual([
       'evidence:startup-launch',
       'evidence:stripe-setup-prep',
+      'evidence:company-formation-prep',
     ]);
     expect(body.check.auditReceiptRefs).toEqual([
       'audit:startup-launch',
       'audit:stripe-setup-prep',
+      'audit:company-formation-prep',
     ]);
   });
 
@@ -1166,6 +1184,19 @@ describe('evalRoutes', () => {
           },
           completedAt: new Date('2026-05-05T00:00:01.000Z'),
         },
+        {
+          evalId: 'company_formation_prep',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: null,
+          evidenceRefs: ['evidence:company-formation-prep'],
+          auditReceiptRefs: ['audit:company-formation-prep'],
+          metadata: {
+            ...realExternalMetadata,
+            capabilityKeys: ['startup_lifecycle'],
+          },
+          completedAt: new Date('2026-05-05T00:00:02.000Z'),
+        },
       ],
     ]);
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
@@ -1189,14 +1220,20 @@ describe('evalRoutes', () => {
 
     expect(body.check.canPromote).toBe(true);
     expect(body.check.matchedEvalId).toBe('full_startup_launch');
-    expect(body.check.matchedEvalIds).toEqual(['full_startup_launch', 'stripe_setup_prep']);
+    expect(body.check.matchedEvalIds).toEqual([
+      'full_startup_launch',
+      'stripe_setup_prep',
+      'company_formation_prep',
+    ]);
     expect(body.check.evidenceRefs).toEqual([
       'evidence:startup-launch',
       'evidence:stripe-setup-prep',
+      'evidence:company-formation-prep',
     ]);
     expect(body.check.auditReceiptRefs).toEqual([
       'audit:startup-launch',
       'audit:stripe-setup-prep',
+      'audit:company-formation-prep',
     ]);
   });
 

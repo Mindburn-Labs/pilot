@@ -625,7 +625,7 @@ const capabilityRequiredEvalIds: Partial<Record<CapabilityKey, readonly PilotEva
   approval_resume: ['approval_resume_isolation'],
   evidence_ledger: ['helm_governance', 'recovery'],
   command_center: ['command_center_real_state_ux'],
-  startup_lifecycle: ['full_startup_launch', 'stripe_setup_prep'],
+  startup_lifecycle: ['full_startup_launch', 'stripe_setup_prep', 'company_formation_prep'],
   founder_off_grid: ['founder_off_grid'],
   polsia_outperformance: ['polsia_outperformance'],
 };

@@ -125,12 +125,26 @@ describe('production eval suite', () => {
           metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:01:00.000Z',
         },
+        {
+          evalId: 'company_formation_prep',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: 'startup_lifecycle',
+          evidenceRefs: ['evidence:company-formation-prep'],
+          auditReceiptRefs: ['audit:company-formation-prep'],
+          metadata: realExternalMetadata,
+          completedAt: '2026-05-05T00:02:00.000Z',
+        },
       ],
     });
 
     expect(passed.canPromote).toBe(true);
     expect(passed.matchedEvalId).toBe('full_startup_launch');
-    expect(passed.matchedEvalIds).toEqual(['full_startup_launch', 'stripe_setup_prep']);
+    expect(passed.matchedEvalIds).toEqual([
+      'full_startup_launch',
+      'stripe_setup_prep',
+      'company_formation_prep',
+    ]);
   });
 
   it('blocks promotion from control-plane proof checks even with evidence and audit receipts', () => {
@@ -182,12 +196,25 @@ describe('production eval suite', () => {
           metadata: realExternalMetadata,
           completedAt: '2026-05-05T00:01:00.000Z',
         },
+        {
+          evalId: 'company_formation_prep',
+          workspaceId,
+          status: 'passed',
+          evidenceRefs: ['evidence:company-formation-prep'],
+          auditReceiptRefs: ['audit:company-formation-prep'],
+          metadata: realExternalMetadata,
+          completedAt: '2026-05-05T00:02:00.000Z',
+        },
       ],
     });
 
     expect(passed.canPromote).toBe(true);
     expect(passed.matchedEvalId).toBe('full_startup_launch');
-    expect(passed.matchedEvalIds).toEqual(['full_startup_launch', 'stripe_setup_prep']);
+    expect(passed.matchedEvalIds).toEqual([
+      'full_startup_launch',
+      'stripe_setup_prep',
+      'company_formation_prep',
+    ]);
   });
 
   it('requires every mapped eval before evidence ledger promotion is eligible', () => {
