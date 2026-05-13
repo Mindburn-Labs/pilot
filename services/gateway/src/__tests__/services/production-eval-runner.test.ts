@@ -3,11 +3,18 @@ import {
   a2aMessages,
   a2aThreads,
   agentHandoffs,
+  artifacts,
   auditLog,
   browserObservations,
   computerActions,
+  deployHealth,
+  deployments,
   evidenceItems,
   evidencePacks,
+  missionEdges,
+  missionNodes,
+  missionTasks,
+  missions,
   opportunities,
   opportunityScores,
   taskRuns,
@@ -20,6 +27,18 @@ import { createProductionEvalRunner } from '../../services/production-eval-runne
 
 const workspaceId = '00000000-0000-4000-8000-000000000001';
 const browserCredentialBoundary = 'read_only_no_cookie_or_password_export';
+const fullStartupStages = [
+  'founder_onboarding',
+  'ideation',
+  'market_research',
+  'pmf_discovery',
+  'product_definition',
+  'brand_domain_planning',
+  'engineering',
+  'infrastructure_deployment',
+  'growth_experiments',
+  'operations_recovery',
+] as const;
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
@@ -28,9 +47,16 @@ type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 type A2aThreadRow = typeof a2aThreads.$inferSelect;
 type A2aMessageRow = typeof a2aMessages.$inferSelect;
+type MissionRow = typeof missions.$inferSelect;
+type MissionNodeRow = typeof missionNodes.$inferSelect;
+type MissionEdgeRow = typeof missionEdges.$inferSelect;
+type MissionTaskRow = typeof missionTasks.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
+type ArtifactRow = typeof artifacts.$inferSelect;
+type DeploymentRow = typeof deployments.$inferSelect;
+type DeployHealthRow = typeof deployHealth.$inferSelect;
 type OpportunityRow = typeof opportunities.$inferSelect;
 type OpportunityScoreRow = typeof opportunityScores.$inferSelect;
 type ToolExecutionRow = typeof toolExecutions.$inferSelect;
@@ -43,9 +69,16 @@ function createRunnerDb({
   audits = [],
   a2aThreadRows = [],
   a2aMessageRows = [],
+  missionRows = [],
+  missionNodeRows = [],
+  missionEdgeRows = [],
+  missionTaskRows = [],
   taskRows = [],
   taskRunRows = [],
   handoffRows = [],
+  artifactRows = [],
+  deploymentRows = [],
+  deployHealthRows = [],
   opportunityRows = [],
   scoreRows = [],
   toolExecutionRows = [],
@@ -57,9 +90,16 @@ function createRunnerDb({
   audits?: AuditRow[];
   a2aThreadRows?: A2aThreadRow[];
   a2aMessageRows?: A2aMessageRow[];
+  missionRows?: MissionRow[];
+  missionNodeRows?: MissionNodeRow[];
+  missionEdgeRows?: MissionEdgeRow[];
+  missionTaskRows?: MissionTaskRow[];
   taskRows?: TaskRow[];
   taskRunRows?: TaskRunRow[];
   handoffRows?: AgentHandoffRow[];
+  artifactRows?: ArtifactRow[];
+  deploymentRows?: DeploymentRow[];
+  deployHealthRows?: DeployHealthRow[];
   opportunityRows?: OpportunityRow[];
   scoreRows?: OpportunityScoreRow[];
   toolExecutionRows?: ToolExecutionRow[];
@@ -82,19 +122,33 @@ function createRunnerDb({
                       ? a2aThreadRows
                       : table === a2aMessages
                         ? a2aMessageRows
-                        : table === tasks
-                          ? taskRows
-                          : table === taskRuns
-                            ? taskRunRows
-                            : table === agentHandoffs
-                              ? handoffRows
-                              : table === opportunities
-                                ? opportunityRows
-                                : table === opportunityScores
-                                  ? scoreRows
-                                  : table === toolExecutions
-                                    ? toolExecutionRows
-                                    : [];
+                        : table === missions
+                          ? missionRows
+                          : table === missionNodes
+                            ? missionNodeRows
+                            : table === missionEdges
+                              ? missionEdgeRows
+                              : table === missionTasks
+                                ? missionTaskRows
+                                : table === tasks
+                                  ? taskRows
+                                  : table === taskRuns
+                                    ? taskRunRows
+                                    : table === agentHandoffs
+                                      ? handoffRows
+                                      : table === artifacts
+                                        ? artifactRows
+                                        : table === deployments
+                                          ? deploymentRows
+                                          : table === deployHealth
+                                            ? deployHealthRows
+                                            : table === opportunities
+                                              ? opportunityRows
+                                              : table === opportunityScores
+                                                ? scoreRows
+                                                : table === toolExecutions
+                                                  ? toolExecutionRows
+                                                  : [];
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -196,6 +250,131 @@ function toolExecution(overrides: Partial<ToolExecutionRow>): ToolExecutionRow {
     error: null,
     createdAt: new Date('2026-05-12T00:01:00.000Z'),
     completedAt: new Date('2026-05-12T00:02:00.000Z'),
+    ...overrides,
+  };
+}
+
+function missionRow(overrides: Partial<MissionRow> = {}): MissionRow {
+  return {
+    id: 'mission-full-startup-1',
+    workspaceId,
+    ventureId: 'venture-full-startup-1',
+    goalId: 'goal-full-startup-1',
+    missionKey: 'startup-launch-full-1',
+    title: 'Launch evidence automation startup',
+    status: 'completed',
+    compilerVersion: 'startup-lifecycle.v1',
+    autonomyMode: 'review',
+    capabilityState: 'prototype',
+    productionReady: false,
+    assumptions: ['External legal and payment actions require approval.'],
+    blockers: [],
+    metadata: { templateKey: 'full_startup_launch' },
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    updatedAt: new Date('2026-05-12T00:20:00.000Z'),
+    startedAt: new Date('2026-05-12T00:01:00.000Z'),
+    completedAt: new Date('2026-05-12T00:20:00.000Z'),
+    ...overrides,
+  };
+}
+
+function missionNodeRow(overrides: Partial<MissionNodeRow>): MissionNodeRow {
+  return {
+    id: 'mission-node-1',
+    workspaceId,
+    missionId: 'mission-full-startup-1',
+    nodeKey: 'founder_onboarding',
+    stage: 'founder_onboarding',
+    title: 'Founder onboarding',
+    objective: 'Gather launch constraints',
+    status: 'completed',
+    sortOrder: 1,
+    requiredAgents: ['founder_operator'],
+    requiredSkills: ['startup_lifecycle'],
+    requiredTools: ['tool_broker'],
+    requiredEvidence: ['run summary'],
+    helmPolicyClasses: ['audit'],
+    escalationConditions: ['restricted action'],
+    acceptanceCriteria: ['Evidence recorded'],
+    metadata: {},
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    updatedAt: new Date('2026-05-12T00:10:00.000Z'),
+    startedAt: new Date('2026-05-12T00:01:00.000Z'),
+    completedAt: new Date('2026-05-12T00:10:00.000Z'),
+    ...overrides,
+  };
+}
+
+function missionEdgeRow(overrides: Partial<MissionEdgeRow>): MissionEdgeRow {
+  return {
+    id: 'mission-edge-1',
+    workspaceId,
+    missionId: 'mission-full-startup-1',
+    edgeKey: 'founder_onboarding->ideation',
+    fromNodeKey: 'founder_onboarding',
+    toNodeKey: 'ideation',
+    reason: 'Sequential lifecycle dependency',
+    metadata: {},
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function missionTaskRow(overrides: Partial<MissionTaskRow>): MissionTaskRow {
+  return {
+    id: 'mission-task-1',
+    workspaceId,
+    missionId: 'mission-full-startup-1',
+    nodeId: 'mission-node-1',
+    taskId: 'task-full-startup-1',
+    role: 'startup_lifecycle_node',
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
+function artifactRow(overrides: Partial<ArtifactRow> = {}): ArtifactRow {
+  return {
+    id: 'artifact-landing-page-1',
+    workspaceId,
+    type: 'landing_page',
+    name: 'Launch landing page',
+    description: 'MVP launch landing page artifact',
+    storagePath: 'artifacts/landing/index.html',
+    mimeType: 'text/html',
+    sizeBytes: 2048,
+    metadata: { missionId: 'mission-full-startup-1' },
+    currentVersion: 1,
+    createdAt: new Date('2026-05-12T00:12:00.000Z'),
+    updatedAt: new Date('2026-05-12T00:12:00.000Z'),
+    ...overrides,
+  };
+}
+
+function deploymentRow(overrides: Partial<DeploymentRow> = {}): DeploymentRow {
+  return {
+    id: 'deployment-full-startup-1',
+    workspaceId,
+    targetId: 'deploy-target-1',
+    artifactId: 'artifact-landing-page-1',
+    status: 'live',
+    version: 'launch-v1',
+    url: 'https://launch.example.com',
+    metadata: { providerDeploymentId: 'provider-deployment-1' },
+    startedAt: new Date('2026-05-12T00:14:00.000Z'),
+    completedAt: new Date('2026-05-12T00:16:00.000Z'),
+    ...overrides,
+  };
+}
+
+function deployHealthRow(overrides: Partial<DeployHealthRow> = {}): DeployHealthRow {
+  return {
+    id: 'deploy-health-full-startup-1',
+    deploymentId: 'deployment-full-startup-1',
+    status: 'healthy',
+    checkedAt: new Date('2026-05-12T00:17:00.000Z'),
+    responseTimeMs: '120',
+    details: { statusCode: 200 },
     ...overrides,
   };
 }
@@ -443,6 +622,349 @@ function agentHandoffRow(overrides: Partial<AgentHandoffRow>): AgentHandoffRow {
   };
 }
 
+function launchGovernanceMetadata(action: string, decisionId: string) {
+  return {
+    surface: 'launch',
+    action,
+    policyDecisionId: decisionId,
+    policyVersion: 'founder-ops-v1',
+    evidencePackId: `pack-${decisionId}`,
+    policyPin: {
+      policyDecisionId: decisionId,
+      policyVersion: 'founder-ops-v1',
+      decisionRequired: true,
+      documentVersionPins: {
+        deploymentPolicy: 'founder-ops-v1',
+      },
+    },
+  };
+}
+
+function fullStartupLaunchFixture({ includeHealth = true }: { includeHealth?: boolean } = {}): {
+  missionRows: MissionRow[];
+  missionNodeRows: MissionNodeRow[];
+  missionEdgeRows: MissionEdgeRow[];
+  missionTaskRows: MissionTaskRow[];
+  taskRows: TaskRow[];
+  taskRunRows: TaskRunRow[];
+  toolExecutionRows: ToolExecutionRow[];
+  artifactRows: ArtifactRow[];
+  deploymentRows: DeploymentRow[];
+  deployHealthRows: DeployHealthRow[];
+  evidence: EvidenceItemRow[];
+  audits: AuditRow[];
+} {
+  const mission = missionRow();
+  const nodes = fullStartupStages.map((stage, index) =>
+    missionNodeRow({
+      id: `mission-node-${stage}`,
+      nodeKey: stage,
+      stage,
+      title: `Launch stage ${stage}`,
+      sortOrder: index + 1,
+    }),
+  );
+  const edges = fullStartupStages.slice(1).map((stage, index) =>
+    missionEdgeRow({
+      id: `mission-edge-${index + 1}`,
+      edgeKey: `${fullStartupStages[index]}->${stage}`,
+      fromNodeKey: fullStartupStages[index],
+      toNodeKey: stage,
+    }),
+  );
+  const taskRowsForMission = nodes.map((node, index) =>
+    taskRow({
+      id: `task-full-startup-${index + 1}`,
+      title: `Task for ${node.nodeKey}`,
+      status: 'completed',
+      completedAt: new Date('2026-05-12T00:20:00.000Z'),
+    }),
+  );
+  const taskLinks = nodes.map((node, index) =>
+    missionTaskRow({
+      id: `mission-task-${index + 1}`,
+      nodeId: node.id,
+      taskId: taskRowsForMission[index]!.id,
+    }),
+  );
+  const runs = taskRowsForMission.map((task, index) =>
+    taskRunRow({
+      id: `task-run-full-startup-${index + 1}`,
+      taskId: task.id,
+      runSequence: index + 1,
+      actionTool:
+        index < 3
+          ? ['search_knowledge', 'create_artifact', 'operator.computer_use'][index]!
+          : 'finish',
+      completedAt: new Date(`2026-05-12T00:${String(2 + index).padStart(2, '0')}:00.000Z`),
+    }),
+  );
+  const executionToolKeys = ['search_knowledge', 'create_artifact', 'operator.computer_use'];
+  const executionHashes = ['e', 'f', '1'];
+  const executions = executionToolKeys.map((toolKey, index) =>
+    toolExecution({
+      id: `tool-execution-full-startup-${index + 1}`,
+      actionId: `action-full-startup-${index + 1}`,
+      taskRunId: runs[index]!.id,
+      toolKey,
+      inputHash: `sha256:launch-input-${index + 1}`,
+      sanitizedInput: { stage: nodes[index]!.stage },
+      outputHash: `sha256:${executionHashes[index]!.repeat(64)}`,
+      sanitizedOutput: {
+        evidenceKinds: index === 1 ? ['artifact_diff'] : ['agent_run_log'],
+        artifactDiffRef: index === 1 ? 'artifact:artifact-landing-page-1:1' : undefined,
+      },
+      evidenceIds: [`evidence-tool-full-startup-${index + 1}`],
+      policyDecisionId: `tool-decision-full-startup-${index + 1}`,
+      policyVersion: 'founder-ops-v1',
+      helmDocumentVersionPins: { toolAccessPolicy: 'founder-ops-v1' },
+      completedAt: new Date(`2026-05-12T00:${String(5 + index).padStart(2, '0')}:00.000Z`),
+    }),
+  );
+  const artifact = artifactRow();
+  const deployment = deploymentRow();
+  const health = deployHealthRow();
+  const persistHash = `sha256:${'2'.repeat(64)}`;
+  const checkpointHash = `sha256:${'3'.repeat(64)}`;
+  const artifactHash = `sha256:${'4'.repeat(64)}`;
+  const deployReplayRef = 'launch:workspace:deploy:audit-deploy-full-startup';
+  const healthReplayRef = 'launch:workspace:deploy_health_check:audit-health-full-startup';
+  const deploymentGovernance = launchGovernanceMetadata('DEPLOY', 'deploy-decision-full-startup');
+  const healthGovernance = launchGovernanceMetadata(
+    'DEPLOY_HEALTH_CHECK',
+    'health-decision-full-startup',
+  );
+  const toolEvidence = executions.map((execution, index) =>
+    evidenceItem({
+      id: `evidence-tool-full-startup-${index + 1}`,
+      computerActionId: null,
+      actionId: execution.actionId,
+      taskRunId: execution.taskRunId,
+      toolExecutionId: execution.id,
+      evidenceType: 'tool_execution_completed',
+      sourceType: 'tool_broker',
+      auditEventId: `audit-tool-full-startup-${index + 1}`,
+      contentHash: execution.outputHash,
+      replayRef: `tool:${execution.id}`,
+      metadata: {
+        broker: 'tool_broker_v1',
+        toolKey: execution.toolKey,
+        toolExecutionId: execution.id,
+        status: 'completed',
+        policyDecisionId: execution.policyDecisionId,
+        policyVersion: execution.policyVersion,
+      },
+    }),
+  );
+  const toolAudits = executions.map((execution, index) =>
+    auditRow({
+      id: `audit-tool-full-startup-${index + 1}`,
+      action: 'TOOL_EXECUTION',
+      target: execution.toolKey,
+      verdict: 'allow',
+      metadata: {
+        broker: 'tool_broker_v1',
+        toolKey: execution.toolKey,
+        toolExecutionId: execution.id,
+        evidenceItemId: `evidence-tool-full-startup-${index + 1}`,
+        policyDecisionId: execution.policyDecisionId,
+        policyVersion: execution.policyVersion,
+      },
+    }),
+  );
+
+  return {
+    missionRows: [mission],
+    missionNodeRows: nodes,
+    missionEdgeRows: edges,
+    missionTaskRows: taskLinks,
+    taskRows: taskRowsForMission,
+    taskRunRows: runs,
+    toolExecutionRows: executions,
+    artifactRows: [artifact],
+    deploymentRows: [deployment],
+    deployHealthRows: includeHealth ? [health] : [],
+    evidence: [
+      evidenceItem({
+        id: 'evidence-full-startup-persist',
+        computerActionId: null,
+        ventureId: mission.ventureId,
+        missionId: mission.id,
+        evidenceType: 'startup_lifecycle_mission_persisted',
+        sourceType: 'gateway_startup_lifecycle',
+        auditEventId: null,
+        sensitivity: 'internal',
+        contentHash: persistHash,
+        replayRef: `mission:${mission.id}:persisted`,
+        metadata: {
+          compilerVersion: 'startup-lifecycle.v1',
+          autonomyMode: 'review',
+          capabilityState: 'prototype',
+          productionReady: false,
+          nodeCount: nodes.length,
+          edgeCount: edges.length,
+          taskCount: taskLinks.length,
+          source: 'startup_lifecycle_persist',
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-full-startup-checkpoint',
+        computerActionId: null,
+        ventureId: mission.ventureId,
+        missionId: mission.id,
+        evidenceType: 'startup_lifecycle_mission_checkpoint',
+        sourceType: 'gateway_startup_lifecycle',
+        auditEventId: 'audit-full-startup-checkpoint',
+        sensitivity: 'internal',
+        contentHash: checkpointHash,
+        replayRef: `mission:${mission.id}:checkpoint:completed`,
+        metadata: {
+          checkpointVersion: 'mission-checkpoint.v1',
+          checkpointId: 'checkpoint-full-startup-completed',
+          missionStatus: 'completed',
+          nodeCount: nodes.length,
+          edgeCount: edges.length,
+          taskLinkCount: taskLinks.length,
+          nodeStatuses: { completed: nodes.length },
+          snapshot: {
+            nodes: nodes.map((node) => ({ nodeKey: node.nodeKey, status: node.status })),
+          },
+          productionReady: false,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-full-startup-artifact',
+        computerActionId: null,
+        artifactId: artifact.id,
+        evidenceType: 'artifact_created',
+        sourceType: 'tool_registry',
+        auditEventId: 'audit-full-startup-artifact',
+        sensitivity: 'internal',
+        contentHash: artifactHash,
+        storageRef: artifact.storagePath,
+        replayRef: `artifact:${artifact.id}:1`,
+        metadata: {
+          artifactType: artifact.type,
+          version: 1,
+          mimeType: artifact.mimeType,
+          sizeBytes: artifact.sizeBytes,
+          storageMode: 'inline_artifact_metadata',
+          tool: 'create_artifact',
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-full-startup-deploy',
+        computerActionId: null,
+        evidenceType: 'launch_deployment_requested',
+        sourceType: 'gateway_launch',
+        auditEventId: 'audit-full-startup-deploy',
+        sensitivity: 'restricted',
+        contentHash: null,
+        replayRef: deployReplayRef,
+        metadata: {
+          evidenceType: 'launch_deployment_requested',
+          replayRef: deployReplayRef,
+          action: 'DEPLOY',
+          executionStatus: 'pending',
+          targetId: deployment.targetId,
+          provider: 'digitalocean',
+          imageProvided: true,
+          secretValuesStoredInEvidence: false,
+          governance: deploymentGovernance,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-full-startup-health',
+        computerActionId: null,
+        evidenceType: 'launch_deployment_health_check_requested',
+        sourceType: 'gateway_launch',
+        auditEventId: 'audit-full-startup-health',
+        sensitivity: 'restricted',
+        contentHash: null,
+        replayRef: healthReplayRef,
+        metadata: {
+          evidenceType: 'launch_deployment_health_check_requested',
+          replayRef: healthReplayRef,
+          action: 'DEPLOY_HEALTH_CHECK',
+          executionStatus: 'pending',
+          deploymentId: deployment.id,
+          healthCheckId: health.id,
+          secretValuesStoredInEvidence: false,
+          governance: healthGovernance,
+        },
+      }),
+      ...toolEvidence,
+    ],
+    audits: [
+      auditRow({
+        id: 'audit-full-startup-checkpoint',
+        action: 'STARTUP_LIFECYCLE_MISSION_CHECKPOINT',
+        target: mission.id,
+        verdict: 'recorded',
+        metadata: {
+          evidenceItemId: 'evidence-full-startup-checkpoint',
+          evidenceType: 'startup_lifecycle_mission_checkpoint',
+          checkpointVersion: 'mission-checkpoint.v1',
+          checkpointId: 'checkpoint-full-startup-completed',
+          missionStatus: 'completed',
+          replayRef: `mission:${mission.id}:checkpoint:completed`,
+          contentHash: checkpointHash,
+        },
+      }),
+      auditRow({
+        id: 'audit-full-startup-artifact',
+        action: 'ARTIFACT_CREATED',
+        target: artifact.id,
+        verdict: 'created',
+        metadata: {
+          evidenceItemId: 'evidence-full-startup-artifact',
+          evidenceType: 'artifact_created',
+          replayRef: `artifact:${artifact.id}:1`,
+          artifactId: artifact.id,
+          artifactType: artifact.type,
+          version: 1,
+        },
+      }),
+      auditRow({
+        id: 'audit-full-startup-deploy',
+        action: 'DEPLOY',
+        target: `digitalocean:${deployment.targetId}`,
+        verdict: 'allow',
+        metadata: {
+          evidenceItemId: 'evidence-full-startup-deploy',
+          evidenceType: 'launch_deployment_requested',
+          replayRef: deployReplayRef,
+          action: 'DEPLOY',
+          executionStatus: 'completed',
+          deploymentId: deployment.id,
+          providerDeploymentId: 'provider-deployment-1',
+          providerStatus: 'live',
+          urlRecorded: true,
+          governance: deploymentGovernance,
+        },
+      }),
+      auditRow({
+        id: 'audit-full-startup-health',
+        action: 'DEPLOY_HEALTH_CHECK',
+        target: deployment.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceItemId: 'evidence-full-startup-health',
+          evidenceType: 'launch_deployment_health_check_requested',
+          replayRef: healthReplayRef,
+          action: 'DEPLOY_HEALTH_CHECK',
+          executionStatus: 'completed',
+          deploymentId: deployment.id,
+          healthStatus: health.status,
+          providerStatus: 'healthy',
+          governance: healthGovernance,
+        },
+      }),
+      ...toolAudits,
+    ],
+  };
+}
+
 function helmReceiptMetadata(pack: EvidencePackRow): Record<string, string | null> {
   return {
     decisionId: pack.decisionId,
@@ -629,6 +1151,82 @@ function skillInvocationAudit(
 }
 
 describe('createProductionEvalRunner', () => {
+  it('passes full_startup_launch from completed mission DAG, tools, artifact, deployment, health, evidence, and audit rows', async () => {
+    const fixture = fullStartupLaunchFixture();
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'full_startup_launch',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'full_startup_launch',
+      status: 'passed',
+      evidenceRefs: expect.arrayContaining([
+        'mission:mission-full-startup-1:persisted',
+        'mission:mission-full-startup-1:checkpoint:completed',
+        'artifact:artifact-landing-page-1:1',
+        'launch:workspace:deploy:audit-deploy-full-startup',
+        'launch:workspace:deploy_health_check:audit-health-full-startup',
+      ]),
+      auditReceiptRefs: expect.arrayContaining([
+        'audit:audit-full-startup-checkpoint',
+        'audit:audit-full-startup-artifact',
+        'audit:audit-full-startup-deploy',
+        'audit:audit-full-startup-health',
+      ]),
+      metadata: {
+        runnerRef: 'gateway:full_startup_launch:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedMissionId: 'mission-full-startup-1',
+        verifiedArtifactId: 'artifact-landing-page-1',
+        verifiedDeploymentId: 'deployment-full-startup-1',
+        verifiedDeployHealthId: 'deploy-health-full-startup-1',
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'completed-lifecycle-mission-dag',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'brokered-runtime-tool-evidence',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'artifact-and-deployment-verification',
+        status: 'passed',
+      }),
+    ]);
+  });
+
+  it('fails full_startup_launch without deployment health proof', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb(fullStartupLaunchFixture({ includeHealth: false })),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'full_startup_launch',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('live deployment and health evidence');
+  });
+
   it('passes skill_invocation_governance from brokered skill metadata, evidence, and audit rows', async () => {
     const task = taskRow({ id: 'task-skill-1' });
     const execution = toolExecution({
@@ -2618,7 +3216,7 @@ describe('createProductionEvalRunner', () => {
 
     const result = await runner.execute({
       workspaceId,
-      evalId: 'full_startup_launch',
+      evalId: 'domain_to_deployment',
       executionMode: PRODUCTION_READY_EXECUTION_MODE,
       evidenceRefs: [],
       auditReceiptRefs: [],
@@ -2629,7 +3227,7 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain(
-      'No trusted real_external_eval runner is implemented for full_startup_launch',
+      'No trusted real_external_eval runner is implemented for domain_to_deployment',
     );
   });
 });

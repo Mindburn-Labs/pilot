@@ -4,11 +4,18 @@ import {
   a2aMessages,
   a2aThreads,
   agentHandoffs,
+  artifacts,
   auditLog,
   browserObservations,
   computerActions,
+  deployHealth,
+  deployments,
   evidenceItems,
   evidencePacks,
+  missionEdges,
+  missionNodes,
+  missionTasks,
+  missions,
   opportunities,
   opportunityScores,
   taskRuns,
@@ -34,6 +41,21 @@ type ProductionEvalRunner = {
   }>;
 };
 
+const FULL_STARTUP_LAUNCH_REQUIRED_STAGES = [
+  'founder_onboarding',
+  'ideation',
+  'market_research',
+  'pmf_discovery',
+  'product_definition',
+  'brand_domain_planning',
+  'engineering',
+  'infrastructure_deployment',
+  'growth_experiments',
+  'operations_recovery',
+] as const;
+
+const FULL_STARTUP_MIN_TOOL_PROOFS = 3;
+
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
@@ -41,9 +63,16 @@ type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 type A2aThreadRow = typeof a2aThreads.$inferSelect;
 type A2aMessageRow = typeof a2aMessages.$inferSelect;
+type MissionRow = typeof missions.$inferSelect;
+type MissionNodeRow = typeof missionNodes.$inferSelect;
+type MissionEdgeRow = typeof missionEdges.$inferSelect;
+type MissionTaskRow = typeof missionTasks.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
+type ArtifactRow = typeof artifacts.$inferSelect;
+type DeploymentRow = typeof deployments.$inferSelect;
+type DeployHealthRow = typeof deployHealth.$inferSelect;
 type OpportunityRow = typeof opportunities.$inferSelect;
 type OpportunityScoreRow = typeof opportunityScores.$inferSelect;
 type ToolExecutionRow = typeof toolExecutions.$inferSelect;
@@ -59,6 +88,9 @@ const BROWSER_CREDENTIAL_BOUNDARY = 'read_only_no_cookie_or_password_export';
 export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
   return {
     async execute(input) {
+      if (input.evalId === 'full_startup_launch') {
+        return executeFullStartupLaunchEval(db, input);
+      }
       if (input.evalId === 'safe_computer_sandbox_action') {
         return executeSafeComputerSandboxEval(db, input);
       }
@@ -99,6 +131,202 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
       );
+    },
+  };
+}
+
+async function executeFullStartupLaunchEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const missionRows = await db
+    .select()
+    .from(missions)
+    .where(eq(missions.workspaceId, input.workspaceId))
+    .orderBy(desc(missions.completedAt), desc(missions.updatedAt), desc(missions.id))
+    .limit(100);
+  const nodeRows = await db
+    .select()
+    .from(missionNodes)
+    .where(eq(missionNodes.workspaceId, input.workspaceId))
+    .orderBy(desc(missionNodes.updatedAt), desc(missionNodes.id))
+    .limit(1000);
+  const edgeRows = await db
+    .select()
+    .from(missionEdges)
+    .where(eq(missionEdges.workspaceId, input.workspaceId))
+    .orderBy(desc(missionEdges.createdAt), desc(missionEdges.id))
+    .limit(1000);
+  const missionTaskRows = await db
+    .select()
+    .from(missionTasks)
+    .where(eq(missionTasks.workspaceId, input.workspaceId))
+    .orderBy(desc(missionTasks.createdAt), desc(missionTasks.id))
+    .limit(1000);
+  const taskRows = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.workspaceId, input.workspaceId))
+    .orderBy(desc(tasks.createdAt), desc(tasks.id))
+    .limit(1000);
+  const taskIds = taskRows.map((row) => row.id);
+  const runRows =
+    taskIds.length > 0
+      ? await db
+          .select()
+          .from(taskRuns)
+          .where(inArray(taskRuns.taskId, taskIds))
+          .orderBy(desc(taskRuns.completedAt), desc(taskRuns.startedAt), desc(taskRuns.id))
+          .limit(2000)
+      : [];
+  const executionRows = await db
+    .select()
+    .from(toolExecutions)
+    .where(eq(toolExecutions.workspaceId, input.workspaceId))
+    .orderBy(desc(toolExecutions.completedAt), desc(toolExecutions.id))
+    .limit(2000);
+  const artifactRows = await db
+    .select()
+    .from(artifacts)
+    .where(eq(artifacts.workspaceId, input.workspaceId))
+    .orderBy(desc(artifacts.updatedAt), desc(artifacts.id))
+    .limit(500);
+  const deploymentRows = await db
+    .select()
+    .from(deployments)
+    .where(eq(deployments.workspaceId, input.workspaceId))
+    .orderBy(desc(deployments.completedAt), desc(deployments.id))
+    .limit(500);
+  const healthRows = await db
+    .select()
+    .from(deployHealth)
+    .orderBy(desc(deployHealth.checkedAt), desc(deployHealth.id))
+    .limit(500);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(2000);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(2000);
+
+  const proof = findFullStartupLaunchProof({
+    workspaceId: input.workspaceId,
+    missionRows,
+    nodeRows,
+    edgeRows,
+    missionTaskRows,
+    taskRows,
+    runRows,
+    executionRows,
+    artifactRows,
+    deploymentRows,
+    healthRows,
+    evidenceRows,
+    auditRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Full Startup Launch Eval requires a completed startup lifecycle mission DAG, required launch stages, completed linked task runs, brokered tool evidence, artifact provenance, live deployment and health evidence, checkpoint evidence, and durable audit receipts',
+    );
+  }
+
+  const evidenceRefs = [
+    evidenceRef(proof.persistEvidence),
+    evidenceRef(proof.checkpointEvidence),
+    evidenceRef(proof.artifactEvidence),
+    evidenceRef(proof.deploymentEvidence),
+    evidenceRef(proof.healthEvidence),
+    ...proof.toolProofs.map((item) => evidenceRef(item.evidence)),
+  ];
+  const auditReceiptRefs = [
+    auditRef(proof.checkpointAudit),
+    auditRef(proof.artifactAudit),
+    auditRef(proof.deploymentAudit),
+    auditRef(proof.healthAudit),
+    ...proof.toolProofs.map((item) => auditRef(item.audit)),
+  ];
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'full_startup_launch',
+      status: 'passed',
+      capabilityKey: input.capabilityKey,
+      runRef: input.runRef ?? `real-external-eval:full-startup-launch:${randomUUID()}`,
+      summary:
+        'Full Startup Launch Eval verified a completed lifecycle mission DAG with required stages, task-run execution, brokered tool evidence, artifact provenance, deployment verification, checkpoint evidence, and audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:full_startup_launch:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedMissionId: proof.mission.id,
+        verifiedNodeCount: proof.nodes.length,
+        verifiedEdgeCount: proof.edges.length,
+        verifiedTaskRunIds: proof.completedRuns.map((row) => row.id),
+        verifiedToolExecutionIds: proof.toolProofs.map((item) => item.execution.id),
+        verifiedArtifactId: proof.artifact.id,
+        verifiedDeploymentId: proof.deployment.id,
+        verifiedDeploymentUrl: proof.deployment.url,
+        verifiedDeployHealthId: proof.health.id,
+        requiredStages: [...FULL_STARTUP_LAUNCH_REQUIRED_STAGES],
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'completed-lifecycle-mission-dag',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.persistEvidence), evidenceRef(proof.checkpointEvidence)],
+          auditReceiptRefs: [auditRef(proof.checkpointAudit)],
+          completedAt,
+          metadata: {
+            missionId: proof.mission.id,
+            nodeCount: proof.nodes.length,
+            edgeCount: proof.edges.length,
+            stages: uniqueSorted(proof.nodes.map((row) => row.stage)),
+          },
+        },
+        {
+          stepKey: 'brokered-runtime-tool-evidence',
+          status: 'passed',
+          evidenceRefs: proof.toolProofs.map((item) => evidenceRef(item.evidence)),
+          auditReceiptRefs: proof.toolProofs.map((item) => auditRef(item.audit)),
+          completedAt,
+          metadata: {
+            taskRunIds: proof.completedRuns.map((row) => row.id),
+            toolExecutionIds: proof.toolProofs.map((item) => item.execution.id),
+          },
+        },
+        {
+          stepKey: 'artifact-and-deployment-verification',
+          status: 'passed',
+          evidenceRefs: [
+            evidenceRef(proof.artifactEvidence),
+            evidenceRef(proof.deploymentEvidence),
+            evidenceRef(proof.healthEvidence),
+          ],
+          auditReceiptRefs: [
+            auditRef(proof.artifactAudit),
+            auditRef(proof.deploymentAudit),
+            auditRef(proof.healthAudit),
+          ],
+          completedAt,
+          metadata: {
+            artifactId: proof.artifact.id,
+            deploymentId: proof.deployment.id,
+            deploymentUrl: proof.deployment.url,
+            healthStatus: proof.health.status,
+          },
+        },
+      ],
     },
   };
 }
@@ -2485,6 +2713,461 @@ function isCommandCenterRealStateUxAudit(row: AuditRow, evidence: EvidenceItemRo
     hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
     hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
     hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+type FullStartupLaunchProof = {
+  mission: MissionRow;
+  nodes: MissionNodeRow[];
+  edges: MissionEdgeRow[];
+  taskLinks: MissionTaskRow[];
+  completedRuns: TaskRunRow[];
+  persistEvidence: EvidenceItemRow;
+  checkpointEvidence: EvidenceItemRow;
+  checkpointAudit: AuditRow;
+  artifact: ArtifactRow;
+  artifactEvidence: EvidenceItemRow;
+  artifactAudit: AuditRow;
+  deployment: DeploymentRow;
+  deploymentEvidence: EvidenceItemRow;
+  deploymentAudit: AuditRow;
+  health: DeployHealthRow;
+  healthEvidence: EvidenceItemRow;
+  healthAudit: AuditRow;
+  toolProofs: Array<{
+    execution: ToolExecutionRow;
+    evidence: EvidenceItemRow;
+    audit: AuditRow;
+  }>;
+};
+
+function findFullStartupLaunchProof(params: {
+  workspaceId: string;
+  missionRows: MissionRow[];
+  nodeRows: MissionNodeRow[];
+  edgeRows: MissionEdgeRow[];
+  missionTaskRows: MissionTaskRow[];
+  taskRows: TaskRow[];
+  runRows: TaskRunRow[];
+  executionRows: ToolExecutionRow[];
+  artifactRows: ArtifactRow[];
+  deploymentRows: DeploymentRow[];
+  healthRows: DeployHealthRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): FullStartupLaunchProof | undefined {
+  for (const mission of params.missionRows) {
+    if (!isCompletedFullStartupMission(mission)) continue;
+    const nodes = params.nodeRows
+      .filter((row) => row.missionId === mission.id)
+      .sort((a, b) => a.sortOrder - b.sortOrder || a.nodeKey.localeCompare(b.nodeKey));
+    if (!hasRequiredFullStartupStages(nodes)) continue;
+    if (!nodes.every((row) => row.status === 'completed' || row.status === 'skipped')) continue;
+
+    const edges = params.edgeRows.filter((row) => row.missionId === mission.id);
+    if (edges.length < FULL_STARTUP_LAUNCH_REQUIRED_STAGES.length - 1) continue;
+
+    const nodeIds = new Set(nodes.map((row) => row.id));
+    const taskLinks = params.missionTaskRows.filter(
+      (row) => row.missionId === mission.id && (!row.nodeId || nodeIds.has(row.nodeId)),
+    );
+    if (taskLinks.length < nodes.length) continue;
+
+    const taskIds = new Set(taskLinks.map((row) => row.taskId));
+    const completedRuns = params.runRows.filter(
+      (row) => taskIds.has(row.taskId) && row.status === 'completed' && Boolean(row.completedAt),
+    );
+    if (completedRuns.length < nodes.length) continue;
+
+    const persistEvidence = params.evidenceRows.find((row) =>
+      isFullStartupMissionPersistEvidence(row, mission, nodes.length),
+    );
+    if (!persistEvidence) continue;
+
+    const checkpointEvidence = params.evidenceRows.find((row) =>
+      isFullStartupCompletedCheckpointEvidence(row, mission, nodes.length),
+    );
+    if (!checkpointEvidence) continue;
+    const checkpointAudit = params.auditRows.find((row) =>
+      isFullStartupCompletedCheckpointAudit(row, checkpointEvidence, mission),
+    );
+    if (!checkpointAudit) continue;
+
+    const toolProofs = findFullStartupToolProofs({
+      completedRuns,
+      executionRows: params.executionRows,
+      evidenceRows: params.evidenceRows,
+      auditRows: params.auditRows,
+    });
+    if (toolProofs.length < FULL_STARTUP_MIN_TOOL_PROOFS) continue;
+
+    for (const deployment of params.deploymentRows) {
+      if (!isFullStartupLiveDeployment(deployment)) continue;
+      const artifactId = deployment.artifactId;
+      const artifact = artifactId
+        ? params.artifactRows.find((row) => isFullStartupArtifact(row, artifactId))
+        : undefined;
+      if (!artifact) continue;
+
+      const artifactEvidence = params.evidenceRows.find((row) =>
+        isFullStartupArtifactEvidence(row, artifact),
+      );
+      if (!artifactEvidence) continue;
+      const artifactAudit = params.auditRows.find((row) =>
+        isFullStartupArtifactAudit(row, artifactEvidence, artifact),
+      );
+      if (!artifactAudit) continue;
+
+      const deploymentEvidence = params.evidenceRows.find((row) =>
+        isFullStartupDeploymentEvidence(row, deployment),
+      );
+      if (!deploymentEvidence) continue;
+      const deploymentAudit = params.auditRows.find((row) =>
+        isFullStartupDeploymentAudit(row, deploymentEvidence, deployment),
+      );
+      if (!deploymentAudit) continue;
+
+      const health = params.healthRows.find((row) => isFullStartupDeployHealth(row, deployment));
+      if (!health) continue;
+      const healthEvidence = params.evidenceRows.find((row) =>
+        isFullStartupHealthEvidence(row, health, deployment),
+      );
+      if (!healthEvidence) continue;
+      const healthAudit = params.auditRows.find((row) =>
+        isFullStartupHealthAudit(row, healthEvidence, health, deployment),
+      );
+      if (!healthAudit) continue;
+
+      return {
+        mission,
+        nodes,
+        edges,
+        taskLinks,
+        completedRuns,
+        persistEvidence,
+        checkpointEvidence,
+        checkpointAudit,
+        artifact,
+        artifactEvidence,
+        artifactAudit,
+        deployment,
+        deploymentEvidence,
+        deploymentAudit,
+        health,
+        healthEvidence,
+        healthAudit,
+        toolProofs: toolProofs.slice(0, FULL_STARTUP_MIN_TOOL_PROOFS),
+      };
+    }
+  }
+  return undefined;
+}
+
+function isCompletedFullStartupMission(row: MissionRow): boolean {
+  return (
+    row.status === 'completed' &&
+    Boolean(row.completedAt) &&
+    row.productionReady === false &&
+    row.capabilityState !== 'production_ready' &&
+    row.compilerVersion === 'startup-lifecycle.v1' &&
+    Boolean(row.ventureId) &&
+    Boolean(row.goalId)
+  );
+}
+
+function hasRequiredFullStartupStages(rows: MissionNodeRow[]): boolean {
+  const stages = rows.map((row) => row.stage);
+  return FULL_STARTUP_LAUNCH_REQUIRED_STAGES.every((stage) => stages.includes(stage));
+}
+
+function isFullStartupMissionPersistEvidence(
+  row: EvidenceItemRow,
+  mission: MissionRow,
+  nodeCount: number,
+): boolean {
+  return Boolean(
+    row.workspaceId === mission.workspaceId &&
+    row.missionId === mission.id &&
+    row.ventureId === mission.ventureId &&
+    row.evidenceType === 'startup_lifecycle_mission_persisted' &&
+    row.sourceType === 'gateway_startup_lifecycle' &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'internal' &&
+    row.replayRef === `mission:${mission.id}:persisted` &&
+    isSha256ContentHash(row.contentHash) &&
+    hasMetadataValue(row.metadata, 'compilerVersion', 'startup-lifecycle.v1') &&
+    hasMetadataNumber(row.metadata, 'nodeCount', nodeCount) &&
+    hasMetadataValue(row.metadata, 'source', 'startup_lifecycle_persist') &&
+    isRecord(row.metadata) &&
+    row.metadata['productionReady'] === false,
+  );
+}
+
+function isFullStartupCompletedCheckpointEvidence(
+  row: EvidenceItemRow,
+  mission: MissionRow,
+  nodeCount: number,
+): boolean {
+  return Boolean(
+    row.workspaceId === mission.workspaceId &&
+    row.missionId === mission.id &&
+    row.evidenceType === 'startup_lifecycle_mission_checkpoint' &&
+    row.sourceType === 'gateway_startup_lifecycle' &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'internal' &&
+    row.auditEventId &&
+    row.replayRef &&
+    isSha256ContentHash(row.contentHash) &&
+    hasMetadataValue(row.metadata, 'checkpointVersion', 'mission-checkpoint.v1') &&
+    hasMetadataValue(row.metadata, 'missionStatus', 'completed') &&
+    hasMetadataNumber(row.metadata, 'nodeCount', nodeCount) &&
+    isRecord(row.metadata) &&
+    row.metadata['productionReady'] === false,
+  );
+}
+
+function isFullStartupCompletedCheckpointAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  mission: MissionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === mission.workspaceId &&
+    row.action === 'STARTUP_LIFECYCLE_MISSION_CHECKPOINT' &&
+    row.target === mission.id &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'startup_lifecycle_mission_checkpoint') &&
+    hasMetadataValue(row.metadata, 'checkpointVersion', 'mission-checkpoint.v1') &&
+    hasMetadataValue(row.metadata, 'missionStatus', 'completed') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+function findFullStartupToolProofs(params: {
+  completedRuns: TaskRunRow[];
+  executionRows: ToolExecutionRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): FullStartupLaunchProof['toolProofs'] {
+  const runIds = new Set(params.completedRuns.map((row) => row.id));
+  const proofs: FullStartupLaunchProof['toolProofs'] = [];
+  for (const execution of params.executionRows) {
+    if (!isFullStartupToolExecution(execution, runIds)) continue;
+    const evidence = params.evidenceRows.find((row) => isFullStartupToolEvidence(row, execution));
+    if (!evidence) continue;
+    const audit = params.auditRows.find((row) => isFullStartupToolAudit(row, evidence, execution));
+    if (!audit) continue;
+    proofs.push({ execution, evidence, audit });
+  }
+  return proofs;
+}
+
+function isFullStartupToolExecution(row: ToolExecutionRow, completedRunIds: Set<string>): boolean {
+  return Boolean(
+    row.taskRunId &&
+    completedRunIds.has(row.taskRunId) &&
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.toolKey !== 'finish' &&
+    row.outputHash &&
+    row.actionId &&
+    row.idempotencyKey &&
+    Array.isArray(row.evidenceIds) &&
+    row.evidenceIds.length > 0 &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins),
+  );
+}
+
+function isFullStartupToolEvidence(row: EvidenceItemRow, execution: ToolExecutionRow): boolean {
+  return Boolean(
+    row.workspaceId === execution.workspaceId &&
+    row.toolExecutionId === execution.id &&
+    row.taskRunId === execution.taskRunId &&
+    row.actionId === execution.actionId &&
+    row.evidenceType === 'tool_execution_completed' &&
+    row.sourceType === 'tool_broker' &&
+    row.auditEventId &&
+    row.replayRef === `tool:${execution.id}` &&
+    row.contentHash === execution.outputHash &&
+    Array.isArray(execution.evidenceIds) &&
+    execution.evidenceIds.includes(row.id) &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+  );
+}
+
+function isFullStartupToolAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  execution: ToolExecutionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === execution.workspaceId &&
+    row.action === 'TOOL_EXECUTION' &&
+    row.target === execution.toolKey &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+  );
+}
+
+function isFullStartupArtifact(row: ArtifactRow, artifactId: string): boolean {
+  return (
+    row.id === artifactId &&
+    ['landing_page', 'code', 'design', 'copy', 'pitch_deck', 'application'].includes(row.type) &&
+    typeof row.storagePath === 'string' &&
+    row.storagePath.length > 0
+  );
+}
+
+function isFullStartupArtifactEvidence(row: EvidenceItemRow, artifact: ArtifactRow): boolean {
+  return Boolean(
+    row.workspaceId === artifact.workspaceId &&
+    row.artifactId === artifact.id &&
+    row.evidenceType === 'artifact_created' &&
+    (row.sourceType === 'tool_registry' || row.sourceType === 'mcp_server') &&
+    row.auditEventId &&
+    row.replayRef === `artifact:${artifact.id}:1` &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'internal' &&
+    hasMetadataValue(row.metadata, 'artifactType', artifact.type) &&
+    hasMetadataNumber(row.metadata, 'version', 1),
+  );
+}
+
+function isFullStartupArtifactAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  artifact: ArtifactRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === artifact.workspaceId &&
+    row.action === 'ARTIFACT_CREATED' &&
+    row.target === artifact.id &&
+    row.verdict === 'created' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'artifact_created') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'artifactId', artifact.id),
+  );
+}
+
+function isFullStartupLiveDeployment(row: DeploymentRow): boolean {
+  return Boolean(
+    row.status === 'live' &&
+    row.completedAt &&
+    row.artifactId &&
+    typeof row.url === 'string' &&
+    /^https?:\/\//u.test(row.url),
+  );
+}
+
+function isFullStartupDeploymentEvidence(row: EvidenceItemRow, deployment: DeploymentRow): boolean {
+  return Boolean(
+    row.workspaceId === deployment.workspaceId &&
+    row.evidenceType === 'launch_deployment_requested' &&
+    row.sourceType === 'gateway_launch' &&
+    row.auditEventId &&
+    row.replayRef &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'restricted' &&
+    hasMetadataValue(row.metadata, 'action', 'DEPLOY') &&
+    hasMetadataValue(row.metadata, 'executionStatus', 'pending') &&
+    isRecord(row.metadata) &&
+    row.metadata['secretValuesStoredInEvidence'] === false,
+  );
+}
+
+function isFullStartupDeploymentAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  deployment: DeploymentRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === deployment.workspaceId &&
+    row.action === 'DEPLOY' &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'launch_deployment_requested') &&
+    hasMetadataValue(row.metadata, 'executionStatus', 'completed') &&
+    hasMetadataValue(row.metadata, 'deploymentId', deployment.id) &&
+    hasLaunchGovernanceMetadata(row.metadata),
+  );
+}
+
+function isFullStartupDeployHealth(row: DeployHealthRow, deployment: DeploymentRow): boolean {
+  return (
+    row.deploymentId === deployment.id &&
+    row.status === 'healthy' &&
+    Boolean(row.checkedAt) &&
+    isRecord(row.details)
+  );
+}
+
+function isFullStartupHealthEvidence(
+  row: EvidenceItemRow,
+  health: DeployHealthRow,
+  deployment: DeploymentRow,
+): boolean {
+  return Boolean(
+    row.workspaceId === deployment.workspaceId &&
+    row.evidenceType === 'launch_deployment_health_check_requested' &&
+    row.sourceType === 'gateway_launch' &&
+    row.auditEventId &&
+    row.replayRef &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'restricted' &&
+    hasMetadataValue(row.metadata, 'action', 'DEPLOY_HEALTH_CHECK') &&
+    hasMetadataValue(row.metadata, 'deploymentId', deployment.id) &&
+    hasMetadataValue(row.metadata, 'executionStatus', 'pending') &&
+    isRecord(row.metadata) &&
+    row.metadata['secretValuesStoredInEvidence'] === false &&
+    (row.metadata['healthCheckId'] === undefined || row.metadata['healthCheckId'] === health.id),
+  );
+}
+
+function isFullStartupHealthAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  health: DeployHealthRow,
+  deployment: DeploymentRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === deployment.workspaceId &&
+    row.action === 'DEPLOY_HEALTH_CHECK' &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'launch_deployment_health_check_requested') &&
+    hasMetadataValue(row.metadata, 'executionStatus', 'completed') &&
+    hasMetadataValue(row.metadata, 'deploymentId', deployment.id) &&
+    hasMetadataValue(row.metadata, 'healthStatus', health.status) &&
+    hasLaunchGovernanceMetadata(row.metadata),
+  );
+}
+
+function hasLaunchGovernanceMetadata(metadata: unknown): boolean {
+  if (!isRecord(metadata)) return false;
+  const governance = metadata['governance'];
+  if (!isRecord(governance)) return false;
+  return (
+    hasMetadataString(governance, 'policyDecisionId') &&
+    hasMetadataString(governance, 'policyVersion') &&
+    isRecord(governance['policyPin'])
   );
 }
 
