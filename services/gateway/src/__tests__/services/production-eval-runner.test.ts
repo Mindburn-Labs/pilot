@@ -544,6 +544,35 @@ function decisionCourtMetadata(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function commandCenterUxMetadata(overrides: Record<string, unknown> = {}) {
+  return {
+    commandCenterEvalVersion: 'command-center-real-state-ux.v1',
+    executionMode: PRODUCTION_READY_EXECUTION_MODE,
+    apiResponseFixtureRef: 'artifact:command-center-api-fixture.json',
+    apiResponseFixtureHash: `sha256:${'a'.repeat(64)}`,
+    uiScreenshotRef: 'artifact:command-center.png',
+    uiScreenshotHash: `sha256:${'b'.repeat(64)}`,
+    accessibilityReportRef: 'artifact:command-center-a11y.json',
+    accessibilityReportHash: `sha256:${'c'.repeat(64)}`,
+    capabilityMatrixRendered: true,
+    capabilityStatesRendered: ['implemented', 'prototype', 'blocked'],
+    durableStateSurfaces: [
+      'mission_graph',
+      'agent_lanes',
+      'action_timeline',
+      'evidence_drawer',
+      'receipt_chips',
+      'browser_computer_replay',
+      'permission_graph',
+      'eval_status',
+      'capability_matrix',
+    ],
+    routeLocalMockState: false,
+    productionReadyClaims: false,
+    ...overrides,
+  };
+}
+
 function skillInvocationOutput(overrides: Record<string, unknown> = {}) {
   return {
     skill: {
@@ -1780,6 +1809,197 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain('recovery-applied evidence with durable audit');
+  });
+
+  it('passes command_center_real_state_ux only from durable API fixture, screenshot, accessibility, and audit proof', async () => {
+    const replayRef = 'command-center:eval:real-state-ux:1';
+    const contentHash = `sha256:${'d'.repeat(64)}`;
+    const metadata = commandCenterUxMetadata();
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-command-center-ux',
+            computerActionId: null,
+            evidenceType: 'command_center_real_state_ux',
+            sourceType: 'command_center_eval',
+            auditEventId: 'audit-command-center-ux',
+            sensitivity: 'internal',
+            contentHash,
+            replayRef,
+            metadata,
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-command-center-ux',
+            action: 'COMMAND_CENTER_REAL_STATE_UX_EVAL',
+            target: 'command_center',
+            verdict: 'recorded',
+            metadata: {
+              ...metadata,
+              evidenceItemId: 'evidence-command-center-ux',
+              evidenceType: 'command_center_real_state_ux',
+              sourceType: 'command_center_eval',
+              replayRef,
+              contentHash,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'command_center_real_state_ux',
+      capabilityKey: 'command_center',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'command_center_real_state_ux',
+      status: 'passed',
+      capabilityKey: 'command_center',
+      evidenceRefs: [replayRef],
+      auditReceiptRefs: ['audit:audit-command-center-ux'],
+      metadata: {
+        runnerRef: 'gateway:command_center_real_state_ux:v1',
+        verifiedEvidenceItemId: 'evidence-command-center-ux',
+        verifiedAuditEventId: 'audit-command-center-ux',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'durable-command-center-api-fixture',
+        status: 'passed',
+        evidenceRefs: [replayRef],
+      }),
+      expect.objectContaining({
+        stepKey: 'ui-screenshot-and-replay-surfaces',
+        status: 'passed',
+        evidenceRefs: [replayRef],
+      }),
+      expect.objectContaining({
+        stepKey: 'accessibility-and-claim-control',
+        status: 'passed',
+        evidenceRefs: [replayRef],
+        metadata: expect.objectContaining({
+          routeLocalMockState: false,
+          productionReadyClaims: false,
+        }),
+      }),
+    ]);
+  });
+
+  it('fails command_center_real_state_ux when screenshot proof is missing', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-command-center-ux',
+            computerActionId: null,
+            evidenceType: 'command_center_real_state_ux',
+            sourceType: 'command_center_eval',
+            auditEventId: 'audit-command-center-ux',
+            sensitivity: 'internal',
+            contentHash: `sha256:${'d'.repeat(64)}`,
+            replayRef: 'command-center:eval:real-state-ux:1',
+            metadata: commandCenterUxMetadata({ uiScreenshotHash: undefined }),
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'command_center_real_state_ux',
+      capabilityKey: 'command_center',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('UI screenshot');
+  });
+
+  it('fails command_center_real_state_ux when accessibility proof is missing', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-command-center-ux',
+            computerActionId: null,
+            evidenceType: 'command_center_real_state_ux',
+            sourceType: 'command_center_eval',
+            auditEventId: 'audit-command-center-ux',
+            sensitivity: 'internal',
+            contentHash: `sha256:${'d'.repeat(64)}`,
+            replayRef: 'command-center:eval:real-state-ux:1',
+            metadata: commandCenterUxMetadata({ accessibilityReportRef: '' }),
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'command_center_real_state_ux',
+      capabilityKey: 'command_center',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('accessibility report');
+  });
+
+  it('fails command_center_real_state_ux when the linked audit receipt is missing', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-command-center-ux',
+            computerActionId: null,
+            evidenceType: 'command_center_real_state_ux',
+            sourceType: 'command_center_eval',
+            auditEventId: 'audit-command-center-ux',
+            sensitivity: 'internal',
+            contentHash: `sha256:${'d'.repeat(64)}`,
+            replayRef: 'command-center:eval:real-state-ux:1',
+            metadata: commandCenterUxMetadata(),
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'command_center_real_state_ux',
+      capabilityKey: 'command_center',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('linked audit receipt');
   });
 
   it('passes pmf_discovery opportunity_scoring only from brokered score evidence and audit rows', async () => {

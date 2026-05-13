@@ -468,6 +468,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gate 8 adds /api/command-center/permission-graph with workspace role, member, operator, tool-scope, policy-config-key, and governance capability edges without raw policy values',
       'Gate 8 adds /api/command-center/mission-graph backed by durable missions, mission_nodes, mission_edges, mission_tasks, checkpoint evidence, recovery-plan evidence, recovery-apply evidence, and rollback evidence rows without autonomous DAG promotion',
       'Gate 10 adds /api/command-center/eval-status backed by durable eval_runs, eval_results, eval_steps, eval_evidence_links, and capability_promotions rows without mutating the capability registry',
+      'Gateway real_external_eval runner for Command Center Real-State UX verifies durable command-center API fixture evidence, UI screenshot hash/ref, accessibility report hash/ref, non-production capability labels, replay surfaces, and COMMAND_CENTER_REAL_STATE_UX_EVAL audit rows before creating promotion eligibility',
       'apps/web /command-center renders capability truth, blocked mission runtime, receipt chips, evidence drawers, browser/computer replay rows, subagent proof-DAG rows, and escalation state from the API',
       'apps/web /browser-computer renders browser sessions plus recent browser observation and safe computer action replay refs from real API state without production promotion',
     ],
