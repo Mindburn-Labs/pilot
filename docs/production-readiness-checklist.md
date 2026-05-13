@@ -87,4 +87,4 @@ Medium, high, and restricted actions must not execute if any of these fail:
 - Mission runtime has explicit bounded execution and recovery controls, but not a production long-running founder-off-grid loop.
 - Evidence ledger coverage still has non-broker legacy writer gaps.
 - Command center surfaces real state, but mission autonomy is still prototype-only.
-- Founder-off-grid and Polsia outperformance remain blocked.
+- Founder-off-grid now has a server-owned durable-proof runner for controlled founder-absent evidence packs, but the capability remains blocked until a real eval run passes and long-running off-grid runtime controls are complete. Polsia outperformance remains blocked.

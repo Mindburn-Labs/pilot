@@ -518,9 +518,11 @@ const capabilityRecords = validateCapabilityRecords([
     blockers: [
       'Mission runtime, HELM receipts, permission graph, durable agents, browser/computer evidence, and recovery are not eval-promoted as complete',
       'No off-grid autonomy mode with budget/risk limits and emergency stop coverage',
-      'No controlled founder-off-grid eval has passed',
+      'No controlled founder-off-grid eval run has passed and promoted the capability',
     ],
-    evidence: ['Gate 10 must gate this capability with controlled eval evidence'],
+    evidence: [
+      'Gateway real_external_eval runner for Founder-Off-Grid verifies controlled founder-absent boundary evidence, mission checkpoint, concise progress report, true blocker queue, delegated handoff, brokered allowed actions, no disallowed founder-absent external/legal/payment actions, and linked audit receipts before creating promotion eligibility',
+    ],
     evalRequirement: 'Founder-Off-Grid Eval',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,
   },
