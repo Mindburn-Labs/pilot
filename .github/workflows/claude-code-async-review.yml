@@ -42,10 +42,26 @@ jobs:
             echo "command=/review" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check Claude credentials
+        id: claude_auth
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANTHROPIC_API_KEY}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Claude Code review because neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is configured."
+          fi
+
       - name: Run Claude Code review
+        if: steps.claude_auth.outputs.available == 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             Invoke the HELM PR preflight workflow on this PR in the Pilot repo.
 
@@ -61,3 +77,9 @@ jobs:
 
             Mode: ${{ steps.mode.outputs.command }}
           claude_args: '--model claude-opus-4-7 --effort high'
+
+      - name: Claude review unavailable
+        if: steps.claude_auth.outputs.available != 'true'
+        run: |
+          echo "Claude Code review was skipped because no Claude credential is configured for this repository."
+          echo "The needs-ultrareview label gate still enforces explicit review intent; configure ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN to run the async reviewer."
