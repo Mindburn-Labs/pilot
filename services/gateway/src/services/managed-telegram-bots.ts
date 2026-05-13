@@ -102,6 +102,8 @@ type ManagedTelegramControlEvidenceInput = {
   replayRef: string;
   sensitivity: 'internal' | 'confidential' | 'restricted';
   metadata: Record<string, unknown>;
+  auditVerdict?: 'allow' | 'failed';
+  auditReason?: string | null;
 };
 type ManagedTelegramWebhookSetupOptions = {
   actor: string;
@@ -692,7 +694,55 @@ export class ManagedTelegramBotService {
 
     const token = await this.secrets.get(workspaceId, asSecretKind(bot.tokenSecretRef));
     if (token) {
-      await deleteWebhook(token).catch(() => {});
+      try {
+        await deleteWebhook(token);
+      } catch (err) {
+        const cleanupEvidence = await this.opts.db.transaction(async (tx) =>
+          appendManagedTelegramControlEvidence(tx as unknown as Db, {
+            workspaceId,
+            actor: `user:${userId}`,
+            action: TELEGRAM_MANAGED_ACTIONS.DISABLE,
+            target: bot.id,
+            evidenceType: 'managed_telegram_disable_cleanup_failed',
+            title: 'Managed Telegram disable cleanup failed',
+            summary:
+              'Telegram webhook deletion failed after disable was authorized; Pilot kept the bot active and retained the token secret for retry.',
+            replayRef: `managed-telegram-bot:${bot.id}:disable-cleanup-failed`,
+            sensitivity: 'restricted',
+            metadata: {
+              ...managedTelegramElevatedControlMetadata(bot, governance),
+              cleanupAction: 'deleteWebhook',
+              cleanupStatus: 'failed',
+              error: errorMessage(err),
+              tokenSecretRetainedForRetry: true,
+              rawTelegramApiResponseStoredInEvidence: false,
+            },
+            auditVerdict: 'failed',
+            auditReason: errorMessage(err),
+          }),
+        );
+        await this.opts.db
+          .update(managedTelegramBots)
+          .set({
+            lastError: errorMessage(err),
+            governanceMetadata: appendGovernanceMetadata(
+              appendGovernanceMetadata(bot.governanceMetadata, 'disable', governance),
+              'disableCleanupFailedEvidence',
+              managedTelegramControlEvidenceMetadata(cleanupEvidence),
+            ),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(managedTelegramBots.id, bot.id),
+              eq(managedTelegramBots.workspaceId, workspaceId),
+            ),
+          );
+        throw new ManagedTelegramBotError(
+          'Managed Telegram webhook deletion failed; bot remains active for retry',
+          502,
+        );
+      }
       await this.secrets.delete(workspaceId, asSecretKind(bot.tokenSecretRef));
     }
     this.childBotCache.delete(bot.id);
@@ -1614,8 +1664,8 @@ async function appendManagedTelegramControlEvidence(
   await db
     .update(auditLog)
     .set({
-      verdict: 'allow',
-      reason: null,
+      verdict: input.auditVerdict ?? 'allow',
+      reason: input.auditReason ?? null,
       metadata: {
         ...metadata,
         evidenceType: input.evidenceType,

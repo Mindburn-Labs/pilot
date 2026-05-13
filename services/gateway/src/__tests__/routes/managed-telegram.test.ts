@@ -957,9 +957,16 @@ describe('managed Telegram service governance', () => {
         rawWebhookSecretStoredInEvidence: false,
       }),
     });
-    expect(JSON.stringify(claimEvidence.metadata)).not.toContain('123');
+    expect(claimEvidence.metadata['telegramBotIdHash']).toEqual(
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+    );
+    expect(webhookEvidence.metadata['telegramBotIdHash']).toEqual(
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+    );
+    expect(webhookEvidence.metadata['webhookUrlHash']).toEqual(
+      expect.stringMatching(/^[0-9a-f]{64}$/),
+    );
     expect(JSON.stringify(claimEvidence.metadata)).not.toContain('pilot_launch_bot');
-    expect(JSON.stringify(webhookEvidence.metadata)).not.toContain('123');
     expect(JSON.stringify(webhookEvidence.metadata)).not.toContain('pilot.example.com');
 
     const claimEvidenceIndex = operations.findIndex(
@@ -1420,6 +1427,115 @@ describe('managed Telegram service governance', () => {
           (update.value as { status?: string }).status === 'disabled',
       ),
     ).toBe(false);
+  });
+
+  it('keeps managed Telegram bot active and records failure evidence when webhook deletion fails', async () => {
+    const { db, state, inserts, updates, operations } = makeManagedTelegramActionDb();
+    const helmClient = {
+      evaluate: vi.fn(async () => ({
+        receipt: {
+          decisionId: 'dec-disable',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+        evidencePackId: 'evidence-disable',
+      })),
+    };
+    const secrets = {
+      get: vi.fn(async () => 'child-token'),
+      delete: vi.fn(async () => true),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: helmClient as never,
+    });
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async () =>
+      Response.json({ ok: false, description: 'webhook still in use' }),
+    );
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(service.disable('ws-1', 'user-1')).rejects.toThrow(
+      'Managed Telegram webhook deletion failed; bot remains active for retry',
+    );
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://api.telegram.org/botchild-token/deleteWebhook',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ drop_pending_updates: true }),
+      }),
+    );
+    expect(secrets.delete).not.toHaveBeenCalled();
+    expect(state.bot['status']).toBe('active');
+    expect(state.bot['lastError']).toBe('webhook still in use');
+    expect(state.bot['governanceMetadata']).toMatchObject({
+      disableCleanupFailedEvidence: {
+        auditEventId: expect.any(String),
+        evidenceItemId: 'evidence-send-item',
+      },
+    });
+
+    const failureEvidence = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_disable_cleanup_failed',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(failureEvidence).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_disable_cleanup_failed',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'restricted',
+      metadata: expect.objectContaining({
+        cleanupAction: 'deleteWebhook',
+        cleanupStatus: 'failed',
+        error: 'webhook still in use',
+        tokenSecretRetainedForRetry: true,
+        rawTelegramApiResponseStoredInEvidence: false,
+        rawTelegramBotIdStoredInEvidence: false,
+        rawTokenSecretRefStoredInEvidence: false,
+      }),
+    });
+    const serializedEvidence = JSON.stringify(failureEvidence.metadata);
+    expect(serializedEvidence).not.toContain('child-token');
+    expect(serializedEvidence).not.toContain('custom_telegram_managed_bot_token_bot-1');
+
+    const failureEvidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_disable_cleanup_failed',
+    );
+    const lastErrorIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBots &&
+        (operation.value as { lastError?: string }).lastError === 'webhook still in use',
+    );
+    const failedAuditIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === auditLog &&
+        (operation.value as { verdict?: string; reason?: string }).verdict === 'failed' &&
+        (operation.value as { verdict?: string; reason?: string }).reason ===
+          'webhook still in use',
+    );
+    const disabledIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBots &&
+        (operation.value as { status?: string }).status === 'disabled',
+    );
+    expect(failureEvidenceIndex).toBeGreaterThanOrEqual(0);
+    expect(failedAuditIndex).toBeGreaterThan(failureEvidenceIndex);
+    expect(lastErrorIndex).toBeGreaterThan(failureEvidenceIndex);
+    expect(disabledIndex).toBe(-1);
+    expect(updates.some((update) => update.table === managedTelegramBots)).toBe(true);
   });
 
   it('fails closed before rotating managed Telegram tokens when rotation evidence fails', async () => {
