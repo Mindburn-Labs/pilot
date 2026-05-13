@@ -752,11 +752,32 @@ describe('connectorRoutes', () => {
         authUrl: string;
         connector: string;
         evidenceItemId: string;
+        requestEvidenceItemId: string;
       }>(res, 200);
       expect(body.connector).toBe('github');
       expect(body.authUrl).toContain('auth.example.com');
-      expect(body.evidenceItemId).toBe('evidence-item-1');
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
+      const initiateFlow = deps.oauth.initiateFlow as ReturnType<typeof vi.fn>;
+      const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        initiateFlow.mock.invocationCallOrder[0]!,
+      );
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_oauth_initiate_requested',
+        replayRef: expect.stringMatching(/^connector:github:oauth:initiate-requested:/),
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          effectOrder: 'before_oauth_initiate',
+          requestedAction: 'initiate_connector_oauth',
+          credentialBoundary: 'oauth_url_not_stored_in_evidence',
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_oauth_initiated',
         replayRef: 'connector:github:oauth:initiate',
@@ -766,6 +787,17 @@ describe('connectorRoutes', () => {
         }),
       });
       expect(JSON.stringify(evidence)).not.toContain('auth.example.com');
+    });
+
+    it('does not initiate OAuth when request evidence persistence fails', async () => {
+      const deps = createMockDeps({ connectors: createConnectorsMock() as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch('GET', '/github/oauth/initiate', undefined, wsHeader);
+
+      expect(res.status).toBe(500);
+      expect(deps.oauth.initiateFlow).not.toHaveBeenCalled();
     });
   });
 
@@ -811,10 +843,35 @@ describe('connectorRoutes', () => {
       const { fetch } = testApp(connectorRoutes, deps);
 
       const res = await fetch('POST', '/github/oauth/refresh', { grantId: 'grant-1' }, wsHeader);
-      const body = await expectJson<{ error: string; evidenceItemId: string }>(res, 401);
+      const body = await expectJson<{
+        error: string;
+        evidenceItemId: string;
+        requestEvidenceItemId: string;
+      }>(res, 401);
       expect(body.error).toContain('Token refresh failed');
-      expect(body.evidenceItemId).toBe('evidence-item-1');
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
+      const refreshToken = deps.oauth.refreshToken as ReturnType<typeof vi.fn>;
+      const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        refreshToken.mock.invocationCallOrder[0]!,
+      );
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_oauth_refresh_requested',
+        replayRef: 'connector:github:oauth-refresh-requested:grant-1',
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          grantId: 'grant-1',
+          effectOrder: 'before_oauth_refresh',
+          requestedAction: 'refresh_connector_oauth_token',
+          credentialBoundary: 'no_raw_tokens_in_evidence',
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_oauth_refresh_failed',
         replayRef: 'connector:github:oauth-refresh-failed:grant-1',
@@ -841,11 +898,28 @@ describe('connectorRoutes', () => {
       const { fetch } = testApp(connectorRoutes, deps);
 
       const res = await fetch('POST', '/github/oauth/refresh', { grantId: 'grant-1' }, wsHeader);
-      const body = await expectJson<{ refreshed: boolean; evidenceItemId: string }>(res, 200);
+      const body = await expectJson<{
+        refreshed: boolean;
+        evidenceItemId: string;
+        requestEvidenceItemId: string;
+      }>(res, 200);
 
       expect(body.refreshed).toBe(true);
-      expect(body.evidenceItemId).toBe('evidence-item-1');
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_oauth_refresh_requested',
+        replayRef: 'connector:github:oauth-refresh-requested:grant-1',
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          grantId: 'grant-1',
+          effectOrder: 'before_oauth_refresh',
+          requestedAction: 'refresh_connector_oauth_token',
+          credentialBoundary: 'no_raw_tokens_in_evidence',
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_oauth_refreshed',
         replayRef: 'connector:github:oauth-refresh:grant-1',
@@ -856,6 +930,26 @@ describe('connectorRoutes', () => {
         }),
       });
       expect(JSON.stringify(evidence)).not.toContain('new-token');
+    });
+
+    it('does not refresh OAuth token when request evidence persistence fails', async () => {
+      const deps = createMockDeps({
+        connectors: {
+          ...createConnectorsMock(),
+          getGrantByWorkspaceConnector: vi.fn(async () => ownedGrant),
+        } as any,
+        oauth: {
+          ...createMockDeps().oauth,
+          refreshToken: vi.fn(async () => 'new-token'),
+        } as any,
+      });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch('POST', '/github/oauth/refresh', { grantId: 'grant-1' }, wsHeader);
+
+      expect(res.status).toBe(500);
+      expect(deps.oauth.refreshToken).not.toHaveBeenCalled();
     });
 
     it('rejects token refresh for a cross-workspace grantId', async () => {
