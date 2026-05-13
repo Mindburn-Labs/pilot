@@ -83,7 +83,7 @@ Medium, high, and restricted actions must not execute if any of these fail:
 
 - Real external eval adapters are not complete for the required production scenarios.
 - Browser execution is limited to governed read-only observation and lacks a productized bridge/eval pass.
-- Computer use is limited to safe local actions and lacks sandbox provider eval promotion.
+- Computer use is limited to safe local actions plus provider-backed sandbox command/file actions and lacks sandbox dev-server eval promotion.
 - Mission runtime has explicit bounded execution and recovery controls, but not a production long-running founder-off-grid loop.
 - Evidence ledger coverage still has non-broker legacy writer gaps.
 - Command center surfaces real state, but mission autonomy is still prototype-only.
