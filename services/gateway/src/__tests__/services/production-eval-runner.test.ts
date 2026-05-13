@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  agentHandoffs,
   auditLog,
   browserObservations,
   computerActions,
@@ -7,6 +8,8 @@ import {
   evidencePacks,
   opportunities,
   opportunityScores,
+  taskRuns,
+  tasks,
   toolExecutions,
 } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
@@ -21,6 +24,9 @@ type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type TaskRow = typeof tasks.$inferSelect;
+type TaskRunRow = typeof taskRuns.$inferSelect;
+type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
 type OpportunityRow = typeof opportunities.$inferSelect;
 type OpportunityScoreRow = typeof opportunityScores.$inferSelect;
 type ToolExecutionRow = typeof toolExecutions.$inferSelect;
@@ -31,6 +37,9 @@ function createRunnerDb({
   packs = [],
   evidence = [],
   audits = [],
+  taskRows = [],
+  taskRunRows = [],
+  handoffRows = [],
   opportunityRows = [],
   scoreRows = [],
   toolExecutionRows = [],
@@ -40,6 +49,9 @@ function createRunnerDb({
   packs?: EvidencePackRow[];
   evidence?: EvidenceItemRow[];
   audits?: AuditRow[];
+  taskRows?: TaskRow[];
+  taskRunRows?: TaskRunRow[];
+  handoffRows?: AgentHandoffRow[];
   opportunityRows?: OpportunityRow[];
   scoreRows?: OpportunityScoreRow[];
   toolExecutionRows?: ToolExecutionRow[];
@@ -58,13 +70,19 @@ function createRunnerDb({
                   ? evidence
                   : table === auditLog
                     ? audits
-                    : table === opportunities
-                      ? opportunityRows
-                      : table === opportunityScores
-                        ? scoreRows
-                        : table === toolExecutions
-                          ? toolExecutionRows
-                          : [];
+                    : table === tasks
+                      ? taskRows
+                      : table === taskRuns
+                        ? taskRunRows
+                        : table === agentHandoffs
+                          ? handoffRows
+                          : table === opportunities
+                            ? opportunityRows
+                            : table === opportunityScores
+                              ? scoreRows
+                              : table === toolExecutions
+                                ? toolExecutionRows
+                                : [];
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -303,6 +321,84 @@ function auditRow(overrides: Partial<AuditRow>): AuditRow {
   };
 }
 
+function taskRow(overrides: Partial<TaskRow>): TaskRow {
+  return {
+    id: 'task-foundation-1',
+    workspaceId,
+    operatorId: null,
+    parentTaskId: null,
+    title: 'Foundation proof task',
+    description: 'Verify lineage and replay invariants',
+    mode: 'autonomous',
+    status: 'running',
+    priority: 0,
+    metadata: {},
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    updatedAt: new Date('2026-05-12T00:00:00.000Z'),
+    completedAt: null,
+    ...overrides,
+  };
+}
+
+function taskRunRow(overrides: Partial<TaskRunRow>): TaskRunRow {
+  return {
+    id: 'task-run-parent-1',
+    taskId: 'task-foundation-1',
+    status: 'completed',
+    actionTool: 'search_knowledge',
+    actionInput: { query: 'customers' },
+    actionHash: 'sha256:action',
+    actionOutput: { ok: true },
+    verdict: 'allow',
+    iterationsUsed: 1,
+    iterationBudget: 50,
+    modelUsed: 'test-model',
+    tokensIn: 10,
+    tokensOut: 20,
+    costUsd: '0.0000',
+    error: null,
+    helmDecisionId: 'decision-parent-1',
+    helmPolicyVersion: 'founder-ops-v1',
+    helmReasonCode: null,
+    parentTaskRunId: null,
+    rootTaskRunId: null,
+    spawnedByActionId: null,
+    lineageKind: 'parent_action',
+    runSequence: 1,
+    checkpointId: null,
+    operatorRole: null,
+    budgetSliceUsed: '0.0000',
+    budgetSliceAllocated: null,
+    skillInvocations: [],
+    startedAt: new Date('2026-05-12T00:01:00.000Z'),
+    completedAt: new Date('2026-05-12T00:02:00.000Z'),
+    checkpointState: null,
+    lastCheckpointAt: null,
+    watchdogAlertedAt: null,
+    ...overrides,
+  };
+}
+
+function agentHandoffRow(overrides: Partial<AgentHandoffRow>): AgentHandoffRow {
+  return {
+    id: 'handoff-1',
+    workspaceId,
+    taskId: 'task-foundation-1',
+    parentTaskRunId: 'task-run-parent-1',
+    childTaskRunId: 'task-run-spawn-1',
+    fromAgent: 'orchestrator',
+    toAgent: 'researcher',
+    handoffKind: 'subagent_spawn',
+    status: 'completed',
+    skillInvocations: [],
+    input: { task: 'research customer pain' },
+    output: { summary: 'done' },
+    createdAt: new Date('2026-05-12T00:03:00.000Z'),
+    completedAt: new Date('2026-05-12T00:04:00.000Z'),
+    ...overrides,
+  };
+}
+
 function helmReceiptMetadata(pack: EvidencePackRow): Record<string, string | null> {
   return {
     decisionId: pack.decisionId,
@@ -405,6 +501,343 @@ function decisionCourtMetadata(overrides: Record<string, unknown> = {}) {
 }
 
 describe('createProductionEvalRunner', () => {
+  it('passes proof_dag_lineage from durable parent, spawn, child, handoff, evidence, and receipts', async () => {
+    const task = taskRow({ id: 'task-foundation-1' });
+    const parent = taskRunRow({
+      id: 'task-run-parent-1',
+      taskId: task.id,
+      lineageKind: 'parent_action',
+      parentTaskRunId: null,
+      rootTaskRunId: null,
+      actionTool: 'subagent.parallel',
+      runSequence: 1,
+    });
+    const spawn = taskRunRow({
+      id: 'task-run-spawn-1',
+      taskId: task.id,
+      lineageKind: 'subagent_spawn',
+      parentTaskRunId: parent.id,
+      rootTaskRunId: parent.id,
+      spawnedByActionId: parent.id,
+      actionTool: 'subagent.spawn',
+      operatorRole: 'research',
+      runSequence: 2,
+    });
+    const child = taskRunRow({
+      id: 'task-run-child-1',
+      taskId: task.id,
+      lineageKind: 'subagent_action',
+      parentTaskRunId: spawn.id,
+      rootTaskRunId: parent.id,
+      spawnedByActionId: spawn.id,
+      actionTool: 'search_knowledge',
+      operatorRole: 'research',
+      runSequence: 3,
+    });
+    const spawnPack = helmReceiptPack({
+      id: 'pack-subagent-spawn-1',
+      workspaceId,
+      decisionId: 'local_spawn_1',
+      taskRunId: spawn.id,
+      action: 'SUBAGENT_SPAWN',
+      resource: 'researcher',
+      policyVersion: 'founder-ops-v1',
+      decisionHash: null,
+      principal: `workspace:${workspaceId}/operator:research/subagent:researcher:abc123`,
+    });
+    const childPack = helmReceiptPack({
+      id: 'pack-child-receipt-1',
+      workspaceId,
+      decisionId: 'child-decision-1',
+      taskRunId: child.id,
+      action: 'LLM_INFERENCE',
+      resource: 'anthropic/claude-sonnet-4',
+      parentEvidencePackId: spawnPack.id,
+      principal: `workspace:${workspaceId}/operator:research/subagent:researcher:abc123`,
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        taskRows: [task],
+        taskRunRows: [parent, spawn, child],
+        handoffRows: [
+          agentHandoffRow({
+            taskId: task.id,
+            parentTaskRunId: parent.id,
+            childTaskRunId: spawn.id,
+          }),
+        ],
+        packs: [spawnPack, childPack],
+        evidence: [
+          evidenceItem({
+            id: 'evidence-subagent-spawn-1',
+            computerActionId: null,
+            evidencePackId: spawnPack.id,
+            evidenceType: 'subagent_spawn_receipt',
+            sourceType: 'conductor',
+            replayRef: `helm:${spawnPack.decisionId}`,
+            metadata: {
+              decisionId: spawnPack.decisionId,
+              policyVersion: spawnPack.policyVersion,
+              action: 'SUBAGENT_SPAWN',
+            },
+          }),
+          evidenceItem({
+            id: 'evidence-child-receipt-1',
+            computerActionId: null,
+            taskRunId: child.id,
+            evidencePackId: childPack.id,
+            evidenceType: 'llm_inference_receipt',
+            sourceType: 'agent_loop',
+            replayRef: `helm:${childPack.decisionId}`,
+            metadata: {
+              decisionId: childPack.decisionId,
+              policyVersion: childPack.policyVersion,
+              parentEvidencePackId: spawnPack.id,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'proof_dag_lineage',
+      capabilityKey: 'subagent_lineage',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'proof_dag_lineage',
+      status: 'passed',
+      capabilityKey: 'subagent_lineage',
+      evidenceRefs: ['helm:local_spawn_1', 'helm:child-decision-1'],
+      auditReceiptRefs: ['helm:local_spawn_1', 'helm:child-decision-1'],
+      metadata: {
+        runnerRef: 'gateway:proof_dag_lineage:v1',
+        verifiedParentTaskRunId: parent.id,
+        verifiedSpawnTaskRunId: spawn.id,
+        verifiedChildTaskRunId: child.id,
+        verifiedAgentHandoffId: 'handoff-1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps[0]).toEqual(
+      expect.objectContaining({
+        stepKey: 'parent-subagent-proof-dag',
+        status: 'passed',
+        metadata: expect.objectContaining({
+          parentTaskRunId: parent.id,
+          spawnTaskRunId: spawn.id,
+          childTaskRunId: child.id,
+        }),
+      }),
+    );
+  });
+
+  it('fails proof_dag_lineage when child receipt evidence is not anchored to the spawn pack', async () => {
+    const task = taskRow({ id: 'task-foundation-1' });
+    const parent = taskRunRow({
+      id: 'task-run-parent-1',
+      taskId: task.id,
+      actionTool: 'subagent.parallel',
+    });
+    const spawn = taskRunRow({
+      id: 'task-run-spawn-1',
+      taskId: task.id,
+      lineageKind: 'subagent_spawn',
+      parentTaskRunId: parent.id,
+      rootTaskRunId: parent.id,
+      spawnedByActionId: parent.id,
+      actionTool: 'subagent.spawn',
+      operatorRole: 'research',
+    });
+    const child = taskRunRow({
+      id: 'task-run-child-1',
+      taskId: task.id,
+      lineageKind: 'subagent_action',
+      parentTaskRunId: spawn.id,
+      rootTaskRunId: parent.id,
+      actionTool: 'search_knowledge',
+    });
+    const spawnPack = helmReceiptPack({
+      id: 'pack-subagent-spawn-1',
+      decisionId: 'local_spawn_1',
+      taskRunId: spawn.id,
+      action: 'SUBAGENT_SPAWN',
+      principal: `workspace:${workspaceId}/operator:research/subagent:researcher:abc123`,
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        taskRows: [task],
+        taskRunRows: [parent, spawn, child],
+        handoffRows: [
+          agentHandoffRow({
+            taskId: task.id,
+            parentTaskRunId: parent.id,
+            childTaskRunId: spawn.id,
+          }),
+        ],
+        packs: [spawnPack],
+        evidence: [
+          evidenceItem({
+            computerActionId: null,
+            evidencePackId: spawnPack.id,
+            evidenceType: 'subagent_spawn_receipt',
+            sourceType: 'conductor',
+            replayRef: `helm:${spawnPack.decisionId}`,
+            metadata: {
+              decisionId: spawnPack.decisionId,
+              policyVersion: spawnPack.policyVersion,
+              action: 'SUBAGENT_SPAWN',
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'proof_dag_lineage',
+      capabilityKey: 'subagent_lineage',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('child receipt evidence');
+  });
+
+  it('passes approval_resume_isolation from deterministic parent-only replay evidence', async () => {
+    const task = taskRow({ id: 'task-resume-1' });
+    const parentOne = taskRunRow({
+      id: 'task-run-parent-1',
+      taskId: task.id,
+      lineageKind: 'parent_action',
+      parentTaskRunId: null,
+      actionTool: 'search_knowledge',
+      runSequence: 1,
+      startedAt: new Date('2026-05-12T00:01:00.000Z'),
+    });
+    const parentTwo = taskRunRow({
+      id: 'task-run-parent-2',
+      taskId: task.id,
+      lineageKind: 'parent_action',
+      parentTaskRunId: null,
+      actionTool: 'score_opportunity',
+      runSequence: 2,
+      startedAt: new Date('2026-05-12T00:02:00.000Z'),
+    });
+    const child = taskRunRow({
+      id: 'task-run-child-1',
+      taskId: task.id,
+      lineageKind: 'subagent_action',
+      parentTaskRunId: 'task-run-spawn-1',
+      rootTaskRunId: parentOne.id,
+      actionTool: 'search_knowledge',
+      runSequence: 3,
+    });
+    const resumeEvidence = evidenceItem({
+      id: 'evidence-resume-1',
+      computerActionId: null,
+      auditEventId: 'audit-resume-1',
+      evidenceType: 'task_resume_dispatched',
+      sourceType: 'task_resume_worker',
+      replayRef: `task:${workspaceId}:${task.id}:resume:audit-resume-1`,
+      metadata: {
+        taskId: task.id,
+        priorActionCount: 2,
+        evidenceContract: 'task_resume_dispatch_before_orchestrator_resume',
+        credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+        replayRef: `task:${workspaceId}:${task.id}:resume:audit-resume-1`,
+      },
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        taskRows: [task],
+        taskRunRows: [parentTwo, child, parentOne],
+        evidence: [resumeEvidence],
+        audits: [
+          auditRow({
+            id: 'audit-resume-1',
+            action: 'TASK_RESUME_DISPATCHED',
+            target: task.id,
+            verdict: 'allow',
+            metadata: {
+              taskId: task.id,
+              priorActionCount: 2,
+              evidenceItemId: resumeEvidence.id,
+              replayRef: resumeEvidence.replayRef,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'approval_resume_isolation',
+      capabilityKey: 'approval_resume',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'approval_resume_isolation',
+      status: 'passed',
+      capabilityKey: 'approval_resume',
+      evidenceRefs: [resumeEvidence.replayRef],
+      auditReceiptRefs: ['audit:audit-resume-1'],
+      metadata: {
+        runnerRef: 'gateway:approval_resume_isolation:v1',
+        verifiedTaskId: task.id,
+        parentReplayTaskRunIds: [parentOne.id, parentTwo.id],
+        excludedChildTaskRunIds: [child.id],
+        priorActionCount: 2,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+  });
+
+  it('fails approval_resume_isolation when child rows are absent from the replay fixture', async () => {
+    const task = taskRow({ id: 'task-resume-1' });
+    const parentOne = taskRunRow({ id: 'task-run-parent-1', taskId: task.id, runSequence: 1 });
+    const parentTwo = taskRunRow({ id: 'task-run-parent-2', taskId: task.id, runSequence: 2 });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        taskRows: [task],
+        taskRunRows: [parentOne, parentTwo],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'approval_resume_isolation',
+      capabilityKey: 'approval_resume',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('excluded child/subagent row');
+  });
+
   it('passes pmf_discovery opportunity_scoring only from brokered score evidence and audit rows', async () => {
     const opp = opportunity({ id: 'opp-pmf-1' });
     const score = opportunityScore({ id: 'score-pmf-1', opportunityId: opp.id });
