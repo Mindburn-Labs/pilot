@@ -100,6 +100,27 @@ describe('conductRoutes', () => {
   it('rejects foreign workspace operatorId before running conductor', async () => {
     const deps = createMockDeps();
     deps.orchestrator.runConduct = vi.fn();
+    const inserts: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+    const updates: Array<{ table: unknown; value: Record<string, unknown> }> = [];
+    deps.db.insert = vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        inserts.push({ table, value });
+        return {
+          returning: vi.fn(async () =>
+            table === evidenceItems ? [{ id: 'evidence-operator-scope-1' }] : [],
+          ),
+          then: (resolve: (value: unknown[]) => void) => resolve([]),
+        };
+      }),
+    })) as never;
+    deps.db.update = vi.fn((table: unknown) => ({
+      set: vi.fn((value: Record<string, unknown>) => {
+        updates.push({ table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })) as never;
     const { fetch } = testApp(conductRoutes, deps as any);
 
     const res = await fetch(
@@ -116,6 +137,30 @@ describe('conductRoutes', () => {
 
     expect(body.error).toBe('operatorId does not belong to authenticated workspace');
     expect(deps.orchestrator.runConduct).not.toHaveBeenCalled();
+    expect(inserts.find((insert) => insert.table === auditLog)?.value).toMatchObject({
+      workspaceId,
+      action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+      target: '00000000-0000-4000-8000-000000000099',
+      verdict: 'deny',
+      metadata: {
+        requestedOperatorId: '00000000-0000-4000-8000-000000000099',
+        reason: 'operatorId_not_in_workspace',
+      },
+    });
+    expect(inserts.find((insert) => insert.table === evidenceItems)?.value).toMatchObject({
+      workspaceId,
+      evidenceType: 'workspace_operator_scope_rejected',
+      sourceType: 'gateway_operator_scope',
+      redactionState: 'redacted',
+      sensitivity: 'internal',
+      metadata: {
+        requestedOperatorId: '00000000-0000-4000-8000-000000000099',
+        reason: 'operatorId_not_in_workspace',
+      },
+    });
+    expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+      metadata: { evidenceItemId: 'evidence-operator-scope-1' },
+    });
   });
 
   it('persists redacted dispatch evidence before running conductor', async () => {

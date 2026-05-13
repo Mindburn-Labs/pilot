@@ -1,7 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { type Context } from 'hono';
 import { and, eq } from 'drizzle-orm';
+import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
-import { operators, workspaceMembers } from '@pilot/db/schema';
+import { auditLog, operators, workspaceMembers } from '@pilot/db/schema';
 import { WorkspaceRoleSchema, type WorkspaceRole } from '@pilot/shared/schemas';
 
 const WORKSPACE_ROLE_RANK: Record<WorkspaceRole, number> = {
@@ -77,7 +79,24 @@ export async function requireWorkspaceOperator(
   operatorId?: string | null,
 ): Promise<Response | null> {
   if (await workspaceOperatorBelongsToWorkspace(db, workspaceId, operatorId)) return null;
-  return c.json({ error: 'operatorId does not belong to authenticated workspace' }, 403);
+  const proof = await persistWorkspaceOperatorScopeRejection(db, {
+    workspaceId,
+    requestedOperatorId: operatorId ?? 'unknown',
+    actor: `user:${(c.get('userId') as string | undefined) ?? 'unknown'}`,
+    sourceType: 'gateway_operator_scope',
+    surface: `gateway:${c.req.path}`,
+    target: operatorId ?? null,
+  });
+  if (!proof) {
+    return c.json({ error: 'operator scope rejection evidence persistence failed' }, 500);
+  }
+  return c.json(
+    {
+      error: 'operatorId does not belong to authenticated workspace',
+      evidenceItemId: proof.evidenceItemId,
+    },
+    403,
+  );
 }
 
 export async function workspaceUserBelongsToWorkspace(
@@ -92,4 +111,65 @@ export async function workspaceUserBelongsToWorkspace(
     .where(and(eq(workspaceMembers.userId, userId), eq(workspaceMembers.workspaceId, workspaceId)))
     .limit(1);
   return Boolean(member);
+}
+
+type OperatorScopeRejectionProofInput = {
+  workspaceId: string;
+  requestedOperatorId: string;
+  actor: string;
+  sourceType: 'gateway_operator_scope' | 'orchestrator_operator_scope';
+  surface: string;
+  target?: string | null;
+};
+
+export async function persistWorkspaceOperatorScopeRejection(
+  db: Db,
+  input: OperatorScopeRejectionProofInput,
+): Promise<{ auditEventId: string; evidenceItemId: string } | null> {
+  return db
+    .transaction(async (tx) => {
+      const auditEventId = randomUUID();
+      const replayRef = `operator-scope:${input.workspaceId}:${input.sourceType}:${auditEventId}`;
+      const metadata = {
+        requestedOperatorId: input.requestedOperatorId,
+        surface: input.surface,
+        reason: 'operatorId_not_in_workspace',
+        evidenceContract: 'operator_scope_denial_evidence_required',
+        credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+        replayRef,
+      };
+
+      await tx.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId: input.workspaceId,
+        action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+        actor: input.actor,
+        target: input.target ?? input.requestedOperatorId,
+        verdict: 'deny',
+        reason: 'operatorId does not belong to authenticated workspace',
+        metadata,
+      });
+
+      const evidenceItemId = await appendEvidenceItem(tx, {
+        workspaceId: input.workspaceId,
+        auditEventId,
+        evidenceType: 'workspace_operator_scope_rejected',
+        sourceType: input.sourceType,
+        title: 'Workspace operator scope rejected',
+        summary:
+          'Pilot rejected a requested operatorId before execution because it is not owned by the authenticated workspace.',
+        redactionState: 'redacted',
+        sensitivity: 'internal',
+        replayRef,
+        metadata,
+      });
+
+      await tx
+        .update(auditLog)
+        .set({ metadata: { ...metadata, evidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+      return { auditEventId, evidenceItemId };
+    })
+    .catch(() => null);
 }

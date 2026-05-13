@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import PgBoss from 'pg-boss';
+import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
 import { type LlmProvider } from '@pilot/shared/llm';
 import { type TenantLlmResolver } from '@pilot/shared/llm/tenant-resolver';
@@ -363,6 +365,12 @@ export class Orchestrator {
         .where(and(eq(operators.id, operatorId), eq(operators.workspaceId, workspaceId)))
         .limit(1);
       if (!op) {
+        await persistOperatorScopeRejection(this.db, {
+          workspaceId,
+          requestedOperatorId: operatorId,
+          actor: 'orchestrator',
+          surface: 'orchestrator.resolveRuntime',
+        });
         throw new Error('operatorId does not belong to workspace');
       }
       operatorGoal = op.goal;
@@ -399,6 +407,61 @@ export class Orchestrator {
       operatorGoal,
     };
   }
+}
+
+async function persistOperatorScopeRejection(
+  db: Db,
+  input: {
+    workspaceId: string;
+    requestedOperatorId: string;
+    actor: string;
+    surface: string;
+  },
+): Promise<void> {
+  const { auditLog } = await import('@pilot/db/schema');
+  const { and, eq } = await import('drizzle-orm');
+  const auditEventId = randomUUID();
+  const replayRef = `operator-scope:${input.workspaceId}:orchestrator_operator_scope:${auditEventId}`;
+  const metadata = {
+    requestedOperatorId: input.requestedOperatorId,
+    surface: input.surface,
+    reason: 'operatorId_not_in_workspace',
+    evidenceContract: 'operator_scope_denial_evidence_required',
+    credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+    replayRef,
+  };
+
+  await db.transaction(async (tx) => {
+    await tx.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId: input.workspaceId,
+      action: 'WORKSPACE_OPERATOR_SCOPE_REJECTED',
+      actor: input.actor,
+      target: input.requestedOperatorId,
+      verdict: 'deny',
+      reason: 'operatorId does not belong to workspace',
+      metadata,
+    });
+
+    const evidenceItemId = await appendEvidenceItem(tx, {
+      workspaceId: input.workspaceId,
+      auditEventId,
+      evidenceType: 'workspace_operator_scope_rejected',
+      sourceType: 'orchestrator_operator_scope',
+      title: 'Workspace operator scope rejected at runtime',
+      summary:
+        'Orchestrator rejected a requested operatorId before agent execution because it is not owned by the workspace.',
+      redactionState: 'redacted',
+      sensitivity: 'internal',
+      replayRef,
+      metadata,
+    });
+
+    await tx
+      .update(auditLog)
+      .set({ metadata: { ...metadata, evidenceItemId } })
+      .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+  });
 }
 
 export { TrustBoundary } from './trust.js';
