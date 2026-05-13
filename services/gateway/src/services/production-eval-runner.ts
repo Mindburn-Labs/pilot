@@ -10,6 +10,7 @@ import {
   computerActions,
   deployHealth,
   deployments,
+  deployTargets,
   evidenceItems,
   evidencePacks,
   missionEdges,
@@ -55,6 +56,8 @@ const FULL_STARTUP_LAUNCH_REQUIRED_STAGES = [
 ] as const;
 
 const FULL_STARTUP_MIN_TOOL_PROOFS = 3;
+const DOMAIN_TO_DEPLOYMENT_BUILD_TERMS = ['build', 'compile', 'bundle'] as const;
+const DOMAIN_TO_DEPLOYMENT_TEST_TERMS = ['test', 'lint', 'typecheck'] as const;
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
@@ -71,6 +74,7 @@ type TaskRow = typeof tasks.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
 type ArtifactRow = typeof artifacts.$inferSelect;
+type DeployTargetRow = typeof deployTargets.$inferSelect;
 type DeploymentRow = typeof deployments.$inferSelect;
 type DeployHealthRow = typeof deployHealth.$inferSelect;
 type OpportunityRow = typeof opportunities.$inferSelect;
@@ -90,6 +94,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
     async execute(input) {
       if (input.evalId === 'full_startup_launch') {
         return executeFullStartupLaunchEval(db, input);
+      }
+      if (input.evalId === 'domain_to_deployment') {
+        return executeDomainToDeploymentEval(db, input);
       }
       if (input.evalId === 'safe_computer_sandbox_action') {
         return executeSafeComputerSandboxEval(db, input);
@@ -131,6 +138,185 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
       );
+    },
+  };
+}
+
+async function executeDomainToDeploymentEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const targetRows = await db
+    .select()
+    .from(deployTargets)
+    .where(eq(deployTargets.workspaceId, input.workspaceId))
+    .orderBy(desc(deployTargets.updatedAt), desc(deployTargets.id))
+    .limit(250);
+  const artifactRows = await db
+    .select()
+    .from(artifacts)
+    .where(eq(artifacts.workspaceId, input.workspaceId))
+    .orderBy(desc(artifacts.updatedAt), desc(artifacts.id))
+    .limit(500);
+  const deploymentRows = await db
+    .select()
+    .from(deployments)
+    .where(eq(deployments.workspaceId, input.workspaceId))
+    .orderBy(desc(deployments.completedAt), desc(deployments.id))
+    .limit(500);
+  const healthRows = await db
+    .select()
+    .from(deployHealth)
+    .orderBy(desc(deployHealth.checkedAt), desc(deployHealth.id))
+    .limit(500);
+  const computerRows = await db
+    .select()
+    .from(computerActions)
+    .where(eq(computerActions.workspaceId, input.workspaceId))
+    .orderBy(desc(computerActions.createdAt), desc(computerActions.id))
+    .limit(500);
+  const browserRows = await db
+    .select()
+    .from(browserObservations)
+    .where(eq(browserObservations.workspaceId, input.workspaceId))
+    .orderBy(desc(browserObservations.observedAt), desc(browserObservations.replayIndex))
+    .limit(500);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(2500);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(2500);
+
+  const proof = findDomainToDeploymentProof({
+    workspaceId: input.workspaceId,
+    targetRows,
+    artifactRows,
+    deploymentRows,
+    healthRows,
+    computerRows,
+    browserRows,
+    evidenceRows,
+    auditRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Domain-to-Deployment Eval requires audited build and test computer actions, redacted deploy target DNS/hosting evidence, artifact provenance, live deployment evidence, healthy deployment verification, browser screenshot/DOM proof, rollback-plan evidence, and durable audit receipts',
+    );
+  }
+
+  const evidenceRefs = [
+    evidenceRef(proof.build.evidence),
+    evidenceRef(proof.test.evidence),
+    evidenceRef(proof.targetEvidence),
+    evidenceRef(proof.artifactEvidence),
+    evidenceRef(proof.deploymentEvidence),
+    evidenceRef(proof.healthEvidence),
+    evidenceRef(proof.browserEvidence),
+    evidenceRef(proof.rollbackEvidence),
+  ];
+  const auditReceiptRefs = [
+    auditRef(proof.build.audit),
+    auditRef(proof.test.audit),
+    auditRef(proof.targetAudit),
+    auditRef(proof.artifactAudit),
+    auditRef(proof.deploymentAudit),
+    auditRef(proof.healthAudit),
+    auditRef(proof.browserAudit),
+    auditRef(proof.rollbackAudit),
+  ];
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'domain_to_deployment',
+      status: 'passed',
+      capabilityKey: input.capabilityKey,
+      runRef: input.runRef ?? `real-external-eval:domain-to-deployment:${randomUUID()}`,
+      summary:
+        'Domain-to-Deployment Eval verified governed build/test execution, redacted DNS/hosting target evidence, artifact provenance, live deployment, health check, browser screenshot/DOM proof, rollback-plan evidence, and audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:domain_to_deployment:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedBuildComputerActionId: proof.build.action.id,
+        verifiedTestComputerActionId: proof.test.action.id,
+        verifiedDeployTargetId: proof.target.id,
+        verifiedArtifactId: proof.artifact.id,
+        verifiedDeploymentId: proof.deployment.id,
+        verifiedDeploymentUrl: proof.deployment.url,
+        verifiedDeployHealthId: proof.health.id,
+        verifiedBrowserObservationId: proof.browserObservation.id,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'build-and-test-evidence',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.build.evidence), evidenceRef(proof.test.evidence)],
+          auditReceiptRefs: [auditRef(proof.build.audit), auditRef(proof.test.audit)],
+          completedAt,
+          metadata: {
+            buildComputerActionId: proof.build.action.id,
+            testComputerActionId: proof.test.action.id,
+          },
+        },
+        {
+          stepKey: 'dns-hosting-target-evidence',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.targetEvidence)],
+          auditReceiptRefs: [auditRef(proof.targetAudit)],
+          completedAt,
+          metadata: {
+            deployTargetId: proof.target.id,
+            provider: proof.target.provider,
+          },
+        },
+        {
+          stepKey: 'artifact-deployment-health-browser-proof',
+          status: 'passed',
+          evidenceRefs: [
+            evidenceRef(proof.artifactEvidence),
+            evidenceRef(proof.deploymentEvidence),
+            evidenceRef(proof.healthEvidence),
+            evidenceRef(proof.browserEvidence),
+          ],
+          auditReceiptRefs: [
+            auditRef(proof.artifactAudit),
+            auditRef(proof.deploymentAudit),
+            auditRef(proof.healthAudit),
+            auditRef(proof.browserAudit),
+          ],
+          completedAt,
+          metadata: {
+            artifactId: proof.artifact.id,
+            deploymentId: proof.deployment.id,
+            deploymentUrl: proof.deployment.url,
+            healthStatus: proof.health.status,
+            browserObservationId: proof.browserObservation.id,
+            screenshotHash: proof.browserObservation.screenshotHash,
+          },
+        },
+        {
+          stepKey: 'rollback-plan-evidence',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.rollbackEvidence)],
+          auditReceiptRefs: [auditRef(proof.rollbackAudit)],
+          completedAt,
+          metadata: {
+            deploymentId: proof.deployment.id,
+          },
+        },
+      ],
     },
   };
 }
@@ -2716,6 +2902,414 @@ function isCommandCenterRealStateUxAudit(row: AuditRow, evidence: EvidenceItemRo
   );
 }
 
+type DomainComputerProof = {
+  action: ComputerActionRow;
+  evidence: EvidenceItemRow;
+  audit: AuditRow;
+};
+
+type DomainToDeploymentProof = {
+  target: DeployTargetRow;
+  targetEvidence: EvidenceItemRow;
+  targetAudit: AuditRow;
+  build: DomainComputerProof;
+  test: DomainComputerProof;
+  artifact: ArtifactRow;
+  artifactEvidence: EvidenceItemRow;
+  artifactAudit: AuditRow;
+  deployment: DeploymentRow;
+  deploymentEvidence: EvidenceItemRow;
+  deploymentAudit: AuditRow;
+  health: DeployHealthRow;
+  healthEvidence: EvidenceItemRow;
+  healthAudit: AuditRow;
+  browserObservation: BrowserObservationRow;
+  browserEvidence: EvidenceItemRow;
+  browserAudit: AuditRow;
+  rollbackEvidence: EvidenceItemRow;
+  rollbackAudit: AuditRow;
+};
+
+function findDomainToDeploymentProof(params: {
+  workspaceId: string;
+  targetRows: DeployTargetRow[];
+  artifactRows: ArtifactRow[];
+  deploymentRows: DeploymentRow[];
+  healthRows: DeployHealthRow[];
+  computerRows: ComputerActionRow[];
+  browserRows: BrowserObservationRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): DomainToDeploymentProof | undefined {
+  for (const deployment of params.deploymentRows) {
+    if (!isFullStartupLiveDeployment(deployment)) continue;
+    const target = params.targetRows.find((row) => isDomainDeployTarget(row, deployment.targetId));
+    if (!target) continue;
+    const targetEvidence = params.evidenceRows.find((row) =>
+      isDomainDeployTargetEvidence(row, target),
+    );
+    if (!targetEvidence) continue;
+    const targetAudit = params.auditRows.find((row) =>
+      isDomainDeployTargetAudit(row, targetEvidence, target),
+    );
+    if (!targetAudit) continue;
+
+    const artifactId = deployment.artifactId;
+    const artifact = artifactId
+      ? params.artifactRows.find((row) => isFullStartupArtifact(row, artifactId))
+      : undefined;
+    if (!artifact) continue;
+    const artifactEvidence = params.evidenceRows.find((row) =>
+      isFullStartupArtifactEvidence(row, artifact),
+    );
+    if (!artifactEvidence) continue;
+    const artifactAudit = params.auditRows.find((row) =>
+      isFullStartupArtifactAudit(row, artifactEvidence, artifact),
+    );
+    if (!artifactAudit) continue;
+
+    const build = findDomainComputerProof({
+      kind: 'build',
+      terms: DOMAIN_TO_DEPLOYMENT_BUILD_TERMS,
+      artifact,
+      deployment,
+      computerRows: params.computerRows,
+      evidenceRows: params.evidenceRows,
+      auditRows: params.auditRows,
+    });
+    if (!build) continue;
+    const test = findDomainComputerProof({
+      kind: 'test',
+      terms: DOMAIN_TO_DEPLOYMENT_TEST_TERMS,
+      artifact,
+      deployment,
+      computerRows: params.computerRows,
+      evidenceRows: params.evidenceRows,
+      auditRows: params.auditRows,
+    });
+    if (!test) continue;
+    if (test.action.id === build.action.id) continue;
+
+    const deploymentEvidence = params.evidenceRows.find((row) =>
+      isFullStartupDeploymentEvidence(row, deployment),
+    );
+    if (!deploymentEvidence) continue;
+    const deploymentAudit = params.auditRows.find((row) =>
+      isFullStartupDeploymentAudit(row, deploymentEvidence, deployment),
+    );
+    if (!deploymentAudit) continue;
+
+    const health = params.healthRows.find((row) => isFullStartupDeployHealth(row, deployment));
+    if (!health) continue;
+    const healthEvidence = params.evidenceRows.find((row) =>
+      isFullStartupHealthEvidence(row, health, deployment),
+    );
+    if (!healthEvidence) continue;
+    const healthAudit = params.auditRows.find((row) =>
+      isFullStartupHealthAudit(row, healthEvidence, health, deployment),
+    );
+    if (!healthAudit) continue;
+
+    const browser = findDomainBrowserProof({
+      deployment,
+      browserRows: params.browserRows,
+      evidenceRows: params.evidenceRows,
+      auditRows: params.auditRows,
+    });
+    if (!browser) continue;
+
+    const rollback = findDomainRollbackProof({
+      deployment,
+      evidenceRows: params.evidenceRows,
+      auditRows: params.auditRows,
+    });
+    if (!rollback) continue;
+
+    return {
+      target,
+      targetEvidence,
+      targetAudit,
+      build,
+      test,
+      artifact,
+      artifactEvidence,
+      artifactAudit,
+      deployment,
+      deploymentEvidence,
+      deploymentAudit,
+      health,
+      healthEvidence,
+      healthAudit,
+      browserObservation: browser.observation,
+      browserEvidence: browser.evidence,
+      browserAudit: browser.audit,
+      rollbackEvidence: rollback.evidence,
+      rollbackAudit: rollback.audit,
+    };
+  }
+  return undefined;
+}
+
+function isDomainDeployTarget(row: DeployTargetRow, targetId: string): boolean {
+  if (row.id !== targetId || row.isActive !== true) return false;
+  const config = isRecord(row.config) ? row.config : undefined;
+  if (!config) return false;
+  const hasDomain = ['domain', 'customDomain', 'domainName', 'hostname'].some((key) =>
+    hasMetadataString(config, key),
+  );
+  const hasDnsProof =
+    ['dnsProvider', 'dnsZoneId', 'dnsChangeRef', 'dnsRecordRef'].some((key) =>
+      hasMetadataString(config, key),
+    ) ||
+    (Array.isArray(config['dnsRecords']) && config['dnsRecords'].length > 0);
+  return hasDomain && hasDnsProof;
+}
+
+function isDomainDeployTargetEvidence(row: EvidenceItemRow, target: DeployTargetRow): boolean {
+  return Boolean(
+    row.workspaceId === target.workspaceId &&
+    row.evidenceType === 'deploy_target_created' &&
+    row.sourceType === 'gateway_launch' &&
+    row.auditEventId &&
+    row.replayRef === `deploy-target:${target.workspaceId}:${target.id}:created` &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'restricted' &&
+    hasMetadataValue(row.metadata, 'targetId', target.id) &&
+    hasMetadataValue(row.metadata, 'provider', target.provider) &&
+    isRecord(row.metadata) &&
+    row.metadata['configValuesStoredInEvidence'] === false,
+  );
+}
+
+function isDomainDeployTargetAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  target: DeployTargetRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === target.workspaceId &&
+    row.action === 'DEPLOY_TARGET_CREATED' &&
+    row.target === target.id &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'deploy_target_created') &&
+    hasMetadataValue(row.metadata, 'targetId', target.id) &&
+    hasMetadataValue(row.metadata, 'provider', target.provider),
+  );
+}
+
+function findDomainComputerProof(params: {
+  kind: 'build' | 'test';
+  terms: readonly string[];
+  artifact: ArtifactRow;
+  deployment: DeploymentRow;
+  computerRows: ComputerActionRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): DomainComputerProof | undefined {
+  for (const action of params.computerRows) {
+    if (!isDomainComputerAction(action, params.terms, params.artifact, params.deployment)) {
+      continue;
+    }
+    const evidence = findComputerEvidence(params.evidenceRows, action.id);
+    if (!evidence || !isDomainComputerEvidence(evidence, action, params.kind)) continue;
+    const audit = findComputerAudit(params.auditRows, evidence.auditEventId);
+    if (!audit || !isDomainComputerAudit(audit, evidence, action)) continue;
+    return { action, evidence, audit };
+  }
+  return undefined;
+}
+
+function isDomainComputerAction(
+  row: ComputerActionRow,
+  terms: readonly string[],
+  artifact: ArtifactRow,
+  deployment: DeploymentRow,
+): boolean {
+  if (!isCompletedSafeComputerAction(row) || row.actionType !== 'terminal_command') return false;
+  const searchable = [
+    row.objective,
+    row.command,
+    ...(Array.isArray(row.args) ? row.args : []),
+    JSON.stringify(row.metadata ?? {}),
+  ]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ')
+    .toLowerCase();
+  const hasKindTerm = terms.some((term) => searchable.includes(term));
+  if (!hasKindTerm) return false;
+  const metadata = isRecord(row.metadata) ? row.metadata : undefined;
+  if (!metadata) return false;
+  const isLinkedToDomainEval =
+    hasMetadataValue(metadata, 'evalId', 'domain_to_deployment') ||
+    hasMetadataValue(metadata, 'artifactId', artifact.id) ||
+    hasMetadataValue(metadata, 'deploymentId', deployment.id);
+  return isLinkedToDomainEval;
+}
+
+function isDomainComputerEvidence(
+  row: EvidenceItemRow,
+  action: ComputerActionRow,
+  kind: 'build' | 'test',
+): boolean {
+  return Boolean(
+    row.workspaceId === action.workspaceId &&
+    row.computerActionId === action.id &&
+    row.evidenceType === 'computer_action' &&
+    row.sourceType === 'operator_computer_use' &&
+    row.auditEventId &&
+    row.replayRef &&
+    row.contentHash === action.outputHash &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    (hasMetadataValue(row.metadata, 'stage', kind) ||
+      hasMetadataValue(row.metadata, 'evalId', 'domain_to_deployment')),
+  );
+}
+
+function isDomainComputerAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  action: ComputerActionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === action.workspaceId &&
+    row.action === 'OPERATOR_COMPUTER_USE' &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'computerActionId', action.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id),
+  );
+}
+
+function findDomainBrowserProof(params: {
+  deployment: DeploymentRow;
+  browserRows: BrowserObservationRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}):
+  | {
+      observation: BrowserObservationRow;
+      evidence: EvidenceItemRow;
+      audit: AuditRow;
+    }
+  | undefined {
+  for (const observation of params.browserRows) {
+    if (!isDomainDeploymentBrowserObservation(observation, params.deployment)) continue;
+    const evidence = params.evidenceRows.find(
+      (row) => row.browserObservationId === observation.id && findBrowserEvidence(row),
+    );
+    if (!evidence) continue;
+    const audit = params.auditRows.find((row) => isDomainBrowserAudit(row, evidence, observation));
+    if (!audit) continue;
+    return { observation, evidence, audit };
+  }
+  return undefined;
+}
+
+function isDomainDeploymentBrowserObservation(
+  row: BrowserObservationRow,
+  deployment: DeploymentRow,
+): boolean {
+  return Boolean(
+    deployment.url &&
+    isSameOriginOrUrl(row.url, deployment.url) &&
+    row.domHash &&
+    row.redactedDomSnapshot &&
+    row.screenshotHash &&
+    row.screenshotRef &&
+    row.replayIndex !== null &&
+    row.replayIndex !== undefined,
+  );
+}
+
+function isDomainBrowserAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  observation: BrowserObservationRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === observation.workspaceId &&
+    row.action === 'BROWSER_OBSERVATION_CAPTURED' &&
+    row.target === observation.id &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataString(row.metadata, 'helmDecisionId') &&
+    hasMetadataString(row.metadata, 'helmPolicyVersion'),
+  );
+}
+
+function findDomainRollbackProof(params: {
+  deployment: DeploymentRow;
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): { evidence: EvidenceItemRow; audit: AuditRow } | undefined {
+  for (const evidence of params.evidenceRows) {
+    if (!isDomainRollbackEvidence(evidence, params.deployment)) continue;
+    const audit = params.auditRows.find((row) =>
+      isDomainRollbackAudit(row, evidence, params.deployment),
+    );
+    if (!audit) continue;
+    return { evidence, audit };
+  }
+  return undefined;
+}
+
+function isDomainRollbackEvidence(row: EvidenceItemRow, deployment: DeploymentRow): boolean {
+  if (row.workspaceId !== deployment.workspaceId || row.sourceType !== 'gateway_launch') {
+    return false;
+  }
+  if (!row.auditEventId || !row.replayRef) return false;
+  if (row.redactionState !== 'redacted' || row.sensitivity !== 'restricted') return false;
+  if (!isRecord(row.metadata) || row.metadata['secretValuesStoredInEvidence'] !== false) {
+    return false;
+  }
+  const matchesDeployment = hasMetadataValue(row.metadata, 'deploymentId', deployment.id);
+  if (!matchesDeployment) return false;
+  if (row.evidenceType === 'launch_deployment_rollback_plan_recorded') {
+    return (
+      hasMetadataString(row.metadata, 'targetVersion') ||
+      hasMetadataString(row.metadata, 'rollbackPlanRef')
+    );
+  }
+  return Boolean(
+    row.evidenceType === 'launch_deployment_rollback_requested' &&
+    hasMetadataValue(row.metadata, 'action', 'DEPLOY_ROLLBACK') &&
+    hasMetadataValue(row.metadata, 'executionStatus', 'completed') &&
+    hasMetadataString(row.metadata, 'targetVersion') &&
+    hasLaunchGovernanceMetadata(row.metadata),
+  );
+}
+
+function isDomainRollbackAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  deployment: DeploymentRow,
+): boolean {
+  if (row.id !== evidence.auditEventId || row.workspaceId !== deployment.workspaceId) return false;
+  if (
+    row.action === 'DEPLOY_ROLLBACK_PLAN' &&
+    row.target === deployment.id &&
+    row.verdict === 'recorded'
+  ) {
+    return Boolean(
+      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+      hasMetadataValue(row.metadata, 'evidenceType', evidence.evidenceType) &&
+      hasMetadataValue(row.metadata, 'deploymentId', deployment.id),
+    );
+  }
+  return Boolean(
+    row.action === 'DEPLOY_ROLLBACK' &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'launch_deployment_rollback_requested') &&
+    hasMetadataValue(row.metadata, 'executionStatus', 'completed') &&
+    hasMetadataValue(row.metadata, 'deploymentId', deployment.id) &&
+    hasLaunchGovernanceMetadata(row.metadata),
+  );
+}
+
 type FullStartupLaunchProof = {
   mission: MissionRow;
   nodes: MissionNodeRow[];
@@ -3493,6 +4087,19 @@ function isYcUrl(url: string, origin: string): boolean {
       return false;
     }
   });
+}
+
+function isSameOriginOrUrl(candidate: string, expected: string): boolean {
+  try {
+    const candidateUrl = new URL(candidate);
+    const expectedUrl = new URL(expected);
+    return (
+      candidateUrl.href === expectedUrl.href ||
+      (candidateUrl.protocol === expectedUrl.protocol && candidateUrl.host === expectedUrl.host)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function hasPolicyMetadata(row: ComputerActionRow): boolean {
