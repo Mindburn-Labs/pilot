@@ -82,6 +82,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'cross_workspace_operator_rejection') {
         return executeCrossWorkspaceOperatorRejectionEval(db, input);
       }
+      if (input.evalId === 'recovery') {
+        return executeRecoveryEval(db, input);
+      }
       return failedRun(
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
@@ -544,6 +547,107 @@ async function executeCrossWorkspaceOperatorRejectionEval(
             gatewaySurface: (gatewayProof.evidence.metadata as Record<string, unknown>)['surface'],
             runtimeSurface: (runtimeProof.evidence.metadata as Record<string, unknown>)['surface'],
             requestedOperatorIds,
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function executeRecoveryEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(1000);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(1000);
+
+  const recoveryPlan = evidenceRows.find((row) => isRecoveryPlanEvidence(row));
+  const recoveryPlanAudit = recoveryPlan
+    ? auditRows.find((row) => isRecoveryPlanAudit(row, recoveryPlan))
+    : undefined;
+  const recoveryApply = recoveryPlan
+    ? evidenceRows.find((row) => isRecoveryApplyEvidence(row, recoveryPlan))
+    : undefined;
+  const recoveryApplyAudit = recoveryApply
+    ? auditRows.find((row) => isRecoveryApplyAudit(row, recoveryApply))
+    : undefined;
+  const checkpoint = recoveryApply
+    ? evidenceRows.find((row) => isPreRecoveryCheckpointEvidence(row, recoveryApply))
+    : undefined;
+  const checkpointAudit = checkpoint
+    ? auditRows.find((row) => isPreRecoveryCheckpointAudit(row, checkpoint))
+    : undefined;
+
+  if (
+    !recoveryPlan ||
+    !recoveryPlanAudit ||
+    !recoveryApply ||
+    !recoveryApplyAudit ||
+    !checkpoint ||
+    !checkpointAudit
+  ) {
+    return failedRun(
+      input,
+      'Recovery Eval requires linked recovery plan, pre-recovery checkpoint, and recovery-applied evidence with durable audit receipts',
+    );
+  }
+
+  const completedAt = new Date().toISOString();
+  const evidenceRefs = [
+    evidenceRef(recoveryPlan),
+    evidenceRef(checkpoint),
+    evidenceRef(recoveryApply),
+  ];
+  const auditReceiptRefs = [
+    auditRef(recoveryPlanAudit),
+    auditRef(checkpointAudit),
+    auditRef(recoveryApplyAudit),
+  ];
+  const applyMetadata = recoveryApply.metadata as Record<string, unknown>;
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'recovery',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'evidence_ledger',
+      runRef: input.runRef ?? `real-external-eval:recovery:${randomUUID()}`,
+      summary:
+        'Verified recovery plan, pre-recovery checkpoint, and safe recovery apply evidence with audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:recovery:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedMissionId: recoveryApply.missionId ?? recoveryPlan.missionId,
+        verifiedRecoveryPlanEvidenceItemId: recoveryPlan.id,
+        verifiedCheckpointEvidenceItemId: checkpoint.id,
+        verifiedRecoveryApplyEvidenceItemId: recoveryApply.id,
+        recoveredNodeKeys: applyMetadata['recoveredNodeKeys'],
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'checkpointed-safe-recovery-apply',
+          status: 'passed',
+          evidenceRefs,
+          auditReceiptRefs,
+          completedAt,
+          metadata: {
+            recoveryPlanReplayRef: recoveryPlan.replayRef,
+            checkpointReplayRef: checkpoint.replayRef,
+            recoveryApplyReplayRef: recoveryApply.replayRef,
+            recoveredNodeKeys: applyMetadata['recoveredNodeKeys'],
           },
         },
       ],
@@ -1678,6 +1782,124 @@ function requestedOperatorId(evidence: EvidenceItemRow): string {
   return isRecord(evidence.metadata) && typeof evidence.metadata['requestedOperatorId'] === 'string'
     ? evidence.metadata['requestedOperatorId']
     : '';
+}
+
+function isRecoveryPlanEvidence(row: EvidenceItemRow): boolean {
+  if (
+    row.evidenceType !== 'startup_lifecycle_recovery_plan' ||
+    row.sourceType !== 'gateway_startup_lifecycle' ||
+    row.redactionState !== 'redacted' ||
+    row.sensitivity !== 'internal' ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash)
+  ) {
+    return false;
+  }
+  if (!isRecord(row.metadata)) return false;
+  return (
+    row.metadata['recoveryPlanVersion'] === 'mission-recovery-plan.v1' &&
+    typeof row.metadata['recoveryPlanId'] === 'string' &&
+    typeof row.metadata['checkpointId'] === 'string' &&
+    typeof row.metadata['checkpointReplayRef'] === 'string' &&
+    row.metadata['recoveryExecuted'] === false &&
+    row.metadata['productionReady'] === false &&
+    isRecord(row.metadata['plan']) &&
+    isRecord(row.metadata['snapshot'])
+  );
+}
+
+function isRecoveryPlanAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'STARTUP_LIFECYCLE_RECOVERY_PLAN' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'startup_lifecycle_recovery_plan') &&
+    hasMetadataValue(row.metadata, 'recoveryPlanVersion', 'mission-recovery-plan.v1') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+function isRecoveryApplyEvidence(row: EvidenceItemRow, plan: EvidenceItemRow): boolean {
+  if (
+    row.evidenceType !== 'startup_lifecycle_recovery_applied' ||
+    row.sourceType !== 'gateway_startup_lifecycle' ||
+    row.redactionState !== 'redacted' ||
+    row.sensitivity !== 'internal' ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash)
+  ) {
+    return false;
+  }
+  if (!isRecord(row.metadata)) return false;
+  return (
+    row.metadata['recoveryApplyVersion'] === 'mission-recovery-apply.v1' &&
+    typeof row.metadata['recoveryApplyId'] === 'string' &&
+    row.metadata['recoveryPlanReplayRef'] === plan.replayRef &&
+    row.metadata['recoveryPlanEvidenceItemId'] === plan.id &&
+    typeof row.metadata['runtimeCheckpointId'] === 'string' &&
+    isNonEmptyArray(row.metadata['runtimeCheckpointEvidenceItemIds']) &&
+    isNonEmptyArray(row.metadata['recoveredNodeKeys']) &&
+    row.metadata['executionStarted'] === false &&
+    row.metadata['productionReady'] === false
+  );
+}
+
+function isRecoveryApplyAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'STARTUP_LIFECYCLE_RECOVERY_APPLIED' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'startup_lifecycle_recovery_applied') &&
+    hasMetadataValue(row.metadata, 'recoveryApplyVersion', 'mission-recovery-apply.v1') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+function isPreRecoveryCheckpointEvidence(row: EvidenceItemRow, apply: EvidenceItemRow): boolean {
+  if (
+    row.evidenceType !== 'startup_lifecycle_mission_checkpoint' ||
+    row.sourceType !== 'gateway_startup_lifecycle' ||
+    row.redactionState !== 'redacted' ||
+    row.sensitivity !== 'internal' ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash) ||
+    !isRecord(row.metadata) ||
+    !isRecord(apply.metadata)
+  ) {
+    return false;
+  }
+  const checkpointEvidenceIds = apply.metadata['runtimeCheckpointEvidenceItemIds'];
+  return (
+    row.metadata['checkpointKind'] === 'pre_recovery' &&
+    row.metadata['productionReady'] === false &&
+    row.metadata['checkpointId'] === apply.metadata['runtimeCheckpointId'] &&
+    Array.isArray(checkpointEvidenceIds) &&
+    checkpointEvidenceIds.includes(row.id)
+  );
+}
+
+function isPreRecoveryCheckpointAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'STARTUP_LIFECYCLE_MISSION_CHECKPOINT' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'startup_lifecycle_mission_checkpoint') &&
+    hasMetadataValue(row.metadata, 'checkpointVersion', 'mission-runtime-checkpoint.v1') &&
+    hasMetadataValue(row.metadata, 'checkpointKind', 'pre_recovery') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
 }
 
 function failedRun(

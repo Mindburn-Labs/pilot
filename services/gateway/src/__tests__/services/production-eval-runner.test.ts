@@ -1226,6 +1226,234 @@ describe('createProductionEvalRunner', () => {
     expect(result.run.failureReason).toContain('gateway ingress and orchestrator runtime');
   });
 
+  it('passes recovery from recovery plan, pre-recovery checkpoint, and recovery apply receipts', async () => {
+    const missionId = 'mission-recovery-1';
+    const planReplayRef = `mission:${missionId}:recovery-plan:abc123`;
+    const checkpointReplayRef = `mission:${missionId}:checkpoint:pre_recovery:checkpoint-1`;
+    const applyReplayRef = `mission:${missionId}:recovery-apply:def456`;
+    const planHash = `sha256:${'a'.repeat(64)}`;
+    const checkpointHash = `sha256:${'b'.repeat(64)}`;
+    const applyHash = `sha256:${'c'.repeat(64)}`;
+    const planMetadata = {
+      recoveryPlanVersion: 'mission-recovery-plan.v1',
+      recoveryPlanId: 'mission-recovery-plan:abc123',
+      checkpointId: 'mission-checkpoint:abc123',
+      checkpointReplayRef: `mission:${missionId}:checkpoint:abc123`,
+      missionStatus: 'blocked',
+      recoveryExecuted: false,
+      plan: { failedNodeKeys: ['ideation'] },
+      snapshot: { nodeStatusCounts: { failed: 1 } },
+      productionReady: false,
+    };
+    const checkpointMetadata = {
+      checkpointKind: 'pre_recovery',
+      checkpointId: 'checkpoint-1',
+      missionStatus: 'blocked',
+      cursorNodeKey: 'ideation',
+      reason: 'retry failed ideation node',
+      productionReady: false,
+    };
+    const applyMetadata = {
+      recoveryApplyVersion: 'mission-recovery-apply.v1',
+      recoveryApplyId: 'mission-recovery-apply:def456',
+      recoveryPlanReplayRef: planReplayRef,
+      recoveryPlanEvidenceItemId: 'evidence-recovery-plan',
+      runtimeCheckpointId: 'checkpoint-1',
+      runtimeCheckpointEvidenceItemIds: ['evidence-recovery-checkpoint'],
+      recoveredNodeKeys: ['ideation'],
+      skippedNodes: [],
+      executionStarted: false,
+      productionReady: false,
+    };
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-recovery-plan',
+            missionId,
+            computerActionId: null,
+            evidenceType: 'startup_lifecycle_recovery_plan',
+            sourceType: 'gateway_startup_lifecycle',
+            auditEventId: 'audit-recovery-plan',
+            sensitivity: 'internal',
+            contentHash: planHash,
+            replayRef: planReplayRef,
+            metadata: planMetadata,
+          }),
+          evidenceItem({
+            id: 'evidence-recovery-checkpoint',
+            missionId,
+            computerActionId: null,
+            evidenceType: 'startup_lifecycle_mission_checkpoint',
+            sourceType: 'gateway_startup_lifecycle',
+            auditEventId: 'audit-recovery-checkpoint',
+            sensitivity: 'internal',
+            contentHash: checkpointHash,
+            replayRef: checkpointReplayRef,
+            metadata: checkpointMetadata,
+          }),
+          evidenceItem({
+            id: 'evidence-recovery-apply',
+            missionId,
+            computerActionId: null,
+            evidenceType: 'startup_lifecycle_recovery_applied',
+            sourceType: 'gateway_startup_lifecycle',
+            auditEventId: 'audit-recovery-apply',
+            sensitivity: 'internal',
+            contentHash: applyHash,
+            replayRef: applyReplayRef,
+            metadata: applyMetadata,
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-recovery-plan',
+            action: 'STARTUP_LIFECYCLE_RECOVERY_PLAN',
+            target: missionId,
+            verdict: 'recorded',
+            metadata: {
+              ...planMetadata,
+              evidenceType: 'startup_lifecycle_recovery_plan',
+              replayRef: planReplayRef,
+              contentHash: planHash,
+              evidenceItemId: 'evidence-recovery-plan',
+            },
+          }),
+          auditRow({
+            id: 'audit-recovery-checkpoint',
+            action: 'STARTUP_LIFECYCLE_MISSION_CHECKPOINT',
+            target: missionId,
+            verdict: 'recorded',
+            metadata: {
+              ...checkpointMetadata,
+              checkpointVersion: 'mission-runtime-checkpoint.v1',
+              evidenceType: 'startup_lifecycle_mission_checkpoint',
+              replayRef: checkpointReplayRef,
+              contentHash: checkpointHash,
+              evidenceItemId: 'evidence-recovery-checkpoint',
+            },
+          }),
+          auditRow({
+            id: 'audit-recovery-apply',
+            action: 'STARTUP_LIFECYCLE_RECOVERY_APPLIED',
+            target: missionId,
+            verdict: 'recorded',
+            metadata: {
+              ...applyMetadata,
+              evidenceType: 'startup_lifecycle_recovery_applied',
+              replayRef: applyReplayRef,
+              contentHash: applyHash,
+              evidenceItemId: 'evidence-recovery-apply',
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'recovery',
+      capabilityKey: 'evidence_ledger',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'recovery',
+      status: 'passed',
+      capabilityKey: 'evidence_ledger',
+      evidenceRefs: [planReplayRef, checkpointReplayRef, applyReplayRef],
+      auditReceiptRefs: [
+        'audit:audit-recovery-plan',
+        'audit:audit-recovery-checkpoint',
+        'audit:audit-recovery-apply',
+      ],
+      metadata: {
+        runnerRef: 'gateway:recovery:v1',
+        verifiedMissionId: missionId,
+        verifiedRecoveryPlanEvidenceItemId: 'evidence-recovery-plan',
+        verifiedCheckpointEvidenceItemId: 'evidence-recovery-checkpoint',
+        verifiedRecoveryApplyEvidenceItemId: 'evidence-recovery-apply',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+  });
+
+  it('fails recovery when the recovery apply audit receipt is missing', async () => {
+    const missionId = 'mission-recovery-1';
+    const planReplayRef = `mission:${missionId}:recovery-plan:abc123`;
+    const checkpointReplayRef = `mission:${missionId}:checkpoint:pre_recovery:checkpoint-1`;
+    const applyReplayRef = `mission:${missionId}:recovery-apply:def456`;
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-recovery-plan',
+            missionId,
+            computerActionId: null,
+            evidenceType: 'startup_lifecycle_recovery_plan',
+            sourceType: 'gateway_startup_lifecycle',
+            auditEventId: 'audit-recovery-plan',
+            sensitivity: 'internal',
+            contentHash: `sha256:${'a'.repeat(64)}`,
+            replayRef: planReplayRef,
+            metadata: {
+              recoveryPlanVersion: 'mission-recovery-plan.v1',
+              recoveryPlanId: 'mission-recovery-plan:abc123',
+              checkpointId: 'mission-checkpoint:abc123',
+              checkpointReplayRef,
+              recoveryExecuted: false,
+              plan: {},
+              snapshot: {},
+              productionReady: false,
+            },
+          }),
+          evidenceItem({
+            id: 'evidence-recovery-apply',
+            missionId,
+            computerActionId: null,
+            evidenceType: 'startup_lifecycle_recovery_applied',
+            sourceType: 'gateway_startup_lifecycle',
+            auditEventId: 'audit-recovery-apply',
+            sensitivity: 'internal',
+            contentHash: `sha256:${'c'.repeat(64)}`,
+            replayRef: applyReplayRef,
+            metadata: {
+              recoveryApplyVersion: 'mission-recovery-apply.v1',
+              recoveryApplyId: 'mission-recovery-apply:def456',
+              recoveryPlanReplayRef: planReplayRef,
+              recoveryPlanEvidenceItemId: 'evidence-recovery-plan',
+              runtimeCheckpointId: 'checkpoint-1',
+              runtimeCheckpointEvidenceItemIds: ['evidence-recovery-checkpoint'],
+              recoveredNodeKeys: ['ideation'],
+              executionStarted: false,
+              productionReady: false,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'recovery',
+      capabilityKey: 'evidence_ledger',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('recovery-applied evidence with durable audit');
+  });
+
   it('passes pmf_discovery opportunity_scoring only from brokered score evidence and audit rows', async () => {
     const opp = opportunity({ id: 'opp-pmf-1' });
     const score = opportunityScore({ id: 'score-pmf-1', opportunityId: opp.id });

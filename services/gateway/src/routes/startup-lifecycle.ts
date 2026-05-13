@@ -708,8 +708,33 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
 
     const evidenceItemId = await _deps.db.transaction(async (tx) => {
       const db = tx as unknown as typeof _deps.db;
+      const auditEventId = randomUUID();
+      const auditMetadata = {
+        recoveryPlanVersion: 'mission-recovery-plan.v1',
+        evidenceType: 'startup_lifecycle_recovery_plan',
+        recoveryPlanId,
+        checkpointId,
+        checkpointReplayRef,
+        replayRef,
+        contentHash,
+        recoveryExecuted: false,
+        productionReady: false,
+      };
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'STARTUP_LIFECYCLE_RECOVERY_PLAN',
+        actor: `workspace:${workspaceId}`,
+        target: mission.id,
+        verdict: 'recorded',
+        reason: parsed.data.reason ?? `Recovery plan for mission ${mission.status}`,
+        metadata: auditMetadata,
+        createdAt: plannedAt,
+      });
+
       const persistedEvidenceItemId = await appendEvidenceItem(db, {
         workspaceId,
+        auditEventId,
         ventureId: mission.ventureId ?? null,
         missionId: mission.id,
         evidenceType: 'startup_lifecycle_recovery_plan',
@@ -733,6 +758,11 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
           productionReady: false,
         },
       });
+
+      await db
+        .update(auditLog)
+        .set({ metadata: { ...auditMetadata, evidenceItemId: persistedEvidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
 
       await db
         .update(missions)
@@ -922,8 +952,36 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
     const replayRef = `mission:${mission.id}:recovery-apply:${recoveryApplyId.split(':')[1]}`;
     const evidenceItemId = await _deps.db.transaction(async (tx) => {
       const db = tx as unknown as typeof _deps.db;
+      const auditEventId = randomUUID();
+      const auditMetadata = {
+        recoveryApplyVersion: 'mission-recovery-apply.v1',
+        evidenceType: 'startup_lifecycle_recovery_applied',
+        recoveryApplyId,
+        recoveryPlanReplayRef: recoveryEvidence.replayRef,
+        recoveryPlanEvidenceItemId: recoveryEvidence.id,
+        runtimeCheckpointId: runtimeCheckpoint.checkpointId,
+        runtimeCheckpointEvidenceItemIds: runtimeCheckpoint.evidenceItemIds,
+        recoveredNodeKeys: recoveredNodes.map((node) => node.nodeKey),
+        executionStarted: false,
+        replayRef,
+        contentHash,
+        productionReady: false,
+      };
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'STARTUP_LIFECYCLE_RECOVERY_APPLIED',
+        actor: `workspace:${workspaceId}`,
+        target: mission.id,
+        verdict: recoveredNodes.length > 0 ? 'recorded' : 'noop',
+        reason: parsed.data.reason ?? 'safe mission recovery apply requested',
+        metadata: auditMetadata,
+        createdAt: appliedAt,
+      });
+
       const persistedEvidenceItemId = await appendEvidenceItem(db, {
         workspaceId,
+        auditEventId,
         ventureId: mission.ventureId ?? null,
         missionId: mission.id,
         evidenceType: 'startup_lifecycle_recovery_applied',
@@ -951,6 +1009,11 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
           productionReady: false,
         },
       });
+
+      await db
+        .update(auditLog)
+        .set({ metadata: { ...auditMetadata, evidenceItemId: persistedEvidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
 
       for (const { node, taskId } of recoverableNodes) {
         await db
@@ -1061,8 +1124,39 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
         mission,
         snapshot,
       );
+      const auditEventId = randomUUID();
+      const rollbackContentHash = hashJson({
+        missionId: mission.id,
+        checkpointId: checkpoint.checkpointId,
+        reason: parsed.data.reason,
+        rolledBackNodeKeys: appliedRollback.rolledBackNodes.map((node) => node.nodeKey),
+      });
+      const rollbackReplayRef = `mission:${mission.id}:rollback:${checkpoint.checkpointId}`;
+      const auditMetadata = {
+        rollbackVersion: 'mission-rollback.v1',
+        evidenceType: 'startup_lifecycle_mission_rollback_applied',
+        checkpointId: checkpoint.checkpointId,
+        scope: parsed.data.scope,
+        rolledBackNodeKeys: appliedRollback.rolledBackNodes.map((node) => node.nodeKey),
+        destructive: false,
+        replayRef: rollbackReplayRef,
+        contentHash: rollbackContentHash,
+        productionReady: false,
+      };
+      await db.insert(auditLog).values({
+        id: auditEventId,
+        workspaceId,
+        action: 'STARTUP_LIFECYCLE_MISSION_ROLLBACK_APPLIED',
+        actor: `workspace:${workspaceId}`,
+        target: mission.id,
+        verdict: 'recorded',
+        reason: parsed.data.reason,
+        metadata: auditMetadata,
+      });
+
       const evidenceItemId = await appendEvidenceItem(db, {
         workspaceId,
+        auditEventId,
         ventureId: mission.ventureId ?? null,
         missionId: mission.id,
         evidenceType: 'startup_lifecycle_mission_rollback_applied',
@@ -1071,13 +1165,8 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
         summary: `${appliedRollback.rolledBackNodes.length} node(s) reopened without deleting history`,
         redactionState: 'redacted',
         sensitivity: 'internal',
-        contentHash: hashJson({
-          missionId: mission.id,
-          checkpointId: checkpoint.checkpointId,
-          reason: parsed.data.reason,
-          rolledBackNodeKeys: appliedRollback.rolledBackNodes.map((node) => node.nodeKey),
-        }),
-        replayRef: `mission:${mission.id}:rollback:${checkpoint.checkpointId}`,
+        contentHash: rollbackContentHash,
+        replayRef: rollbackReplayRef,
         metadata: {
           rollbackVersion: 'mission-rollback.v1',
           checkpointId: checkpoint.checkpointId,
@@ -1087,6 +1176,10 @@ export function startupLifecycleRoutes(_deps: GatewayDeps) {
           productionReady: false,
         },
       });
+      await db
+        .update(auditLog)
+        .set({ metadata: { ...auditMetadata, evidenceItemId } })
+        .where(and(eq(auditLog.workspaceId, workspaceId), eq(auditLog.id, auditEventId)));
       return { rollback: appliedRollback, rollbackEvidenceItemId: evidenceItemId };
     });
 
