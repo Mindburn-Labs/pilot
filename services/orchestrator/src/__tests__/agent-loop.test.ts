@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentLoop, computeActionHash } from '../agent-loop.js';
+import { appendEvidenceItem } from '@pilot/db';
+
+vi.mock('@pilot/db', () => ({
+  appendEvidenceItem: vi.fn(async () => 'approval-evidence-1'),
+}));
 
 vi.mock('@pilot/db/schema', () => ({
   taskRuns: 'taskRuns',
   approvals: {
+    id: 'approvals.id',
     workspaceId: 'approvals.workspaceId',
     taskId: 'approvals.taskId',
     status: 'approvals.status',
@@ -79,6 +85,7 @@ function baseParams() {
 describe('AgentLoop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(appendEvidenceItem).mockResolvedValue('approval-evidence-1');
     mockTrust.evaluate.mockReturnValue({ verdict: 'allow' });
     mockTrust.policyFingerprint.mockReturnValue('local:policy-v1');
   });
@@ -185,6 +192,8 @@ describe('AgentLoop', () => {
     const loop = new AgentLoop(mockDb, mockTrust);
     loop.setLlm(mockLlm);
     loop.setTools(mockTools);
+    const notifier = vi.fn(async () => undefined);
+    loop.setApprovalNotifier(notifier);
 
     mockLlm.complete.mockResolvedValueOnce('{"tool":"deploy_production","input":{}}');
     mockTrust.evaluate.mockReturnValue({ verdict: 'require_approval', reason: 'needs human' });
@@ -198,6 +207,20 @@ describe('AgentLoop', () => {
     // Approval record inserted (one persistAction + one createApprovalRecord = 2 insert calls
     // plus the saveOperatorMemory call may or may not fire depending on operatorId)
     expect(mockDb.insert).toHaveBeenCalled();
+    expect(appendEvidenceItem).toHaveBeenCalledWith(
+      mockDb,
+      expect.objectContaining({
+        workspaceId: 'ws-1',
+        taskId: 'task-1',
+        evidenceType: 'workspace_approval_requested',
+        sourceType: 'agent_loop_approval',
+        replayRef: expect.stringMatching(/^approval:row-1:requested:/),
+      }),
+    );
+    expect(notifier).toHaveBeenCalledWith('ws-1', 'row-1', 'deploy_production', 'needs human');
+    expect(vi.mocked(appendEvidenceItem).mock.invocationCallOrder[0]).toBeLessThan(
+      notifier.mock.invocationCallOrder[0],
+    );
   });
 
   it('fails closed when action task_run persistence fails', async () => {
@@ -246,6 +269,7 @@ describe('AgentLoop', () => {
           })),
         };
       }),
+      transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => callback(db)),
     } as any;
     const loop = new AgentLoop(db, mockTrust);
     loop.setLlm(mockLlm);
@@ -256,6 +280,32 @@ describe('AgentLoop', () => {
 
     await expect(loop.execute(baseParams())).rejects.toThrow('approval persistence unavailable');
     expect(mockTools.execute).not.toHaveBeenCalled();
+  });
+
+  it('fails closed and does not notify when approval request evidence persistence fails', async () => {
+    const loop = new AgentLoop(mockDb, mockTrust);
+    loop.setLlm(mockLlm);
+    loop.setTools(mockTools);
+    const notifier = vi.fn(async () => undefined);
+    loop.setApprovalNotifier(notifier);
+
+    vi.mocked(appendEvidenceItem).mockRejectedValueOnce(new Error('approval evidence unavailable'));
+    mockLlm.complete.mockResolvedValueOnce('{"tool":"deploy_production","input":{}}');
+    mockTrust.evaluate.mockReturnValue({ verdict: 'require_approval', reason: 'needs human' });
+
+    await expect(loop.execute(baseParams())).rejects.toThrow('approval evidence unavailable');
+
+    expect(mockTools.execute).not.toHaveBeenCalled();
+    expect(notifier).not.toHaveBeenCalled();
+    expect(appendEvidenceItem).toHaveBeenCalledWith(
+      mockDb,
+      expect.objectContaining({
+        workspaceId: 'ws-1',
+        taskId: 'task-1',
+        evidenceType: 'workspace_approval_requested',
+        sourceType: 'agent_loop_approval',
+      }),
+    );
   });
 
   it('pre-persists a parent task_run anchor before executing a subagent tool', async () => {
