@@ -102,6 +102,11 @@ type ManagedTelegramControlEvidenceInput = {
   sensitivity: 'internal' | 'confidential' | 'restricted';
   metadata: Record<string, unknown>;
 };
+type ManagedTelegramWebhookSetupOptions = {
+  actor: string;
+  replayRef: string;
+  summary: string;
+};
 
 export class ManagedTelegramBotError extends Error {
   constructor(
@@ -315,12 +320,39 @@ export class ManagedTelegramBotService {
 
     const managerBotToken = this.opts.managerBotToken;
     if (!managerBotToken) throw new ManagedTelegramBotError('TELEGRAM_BOT_TOKEN is required', 503);
-    const token = await getManagedBotToken(managerBotToken, telegramBotId);
-
     const managedBotId = randomUUID();
     const tokenSecretRef = tokenSecretRefFor(managedBotId);
+    const claimEvidence = await this.opts.db.transaction(async (tx) =>
+      appendManagedTelegramControlEvidence(tx as unknown as Db, {
+        workspaceId: request.workspaceId,
+        actor: `user:${request.requestedByUserId}`,
+        action: TELEGRAM_MANAGED_ACTIONS.CLAIM,
+        target: managedBotId,
+        evidenceType: 'managed_telegram_claim_requested',
+        title: 'Managed Telegram bot claim requested',
+        summary:
+          'A pending managed Telegram bot provisioning request matched a Telegram child bot before token retrieval or bot activation.',
+        replayRef: `managed-telegram-bot:${managedBotId}:claim`,
+        sensitivity: 'restricted',
+        metadata: managedTelegramClaimControlMetadata({
+          requestId: request.id,
+          managedBotId,
+          telegramBotId,
+          telegramBotUsername,
+          tokenSecretRef,
+          governance: claimGovernanceMetadata,
+        }),
+      }),
+    );
+    const token = await getManagedBotToken(managerBotToken, telegramBotId);
+
     const webhookSecret = randomBytes(32).toString('hex');
     const webhookSecretHash = hashSecret(webhookSecret);
+    const initialGovernanceMetadata = appendGovernanceMetadata(
+      claimGovernanceMetadata ? { claim: claimGovernanceMetadata } : undefined,
+      'claimEvidence',
+      managedTelegramControlEvidenceMetadata(claimEvidence),
+    );
 
     const [row] = await this.opts.db
       .insert(managedTelegramBots)
@@ -339,16 +371,19 @@ export class ManagedTelegramBotService {
         webhookSecretHash,
         welcomeCopy: DEFAULT_WELCOME,
         supportPrompt: DEFAULT_SUPPORT_PROMPT,
-        governanceMetadata: claimGovernanceMetadata
-          ? { claim: claimGovernanceMetadata }
-          : undefined,
+        governanceMetadata: initialGovernanceMetadata,
       })
       .returning();
     if (!row) throw new ManagedTelegramBotError('Failed to persist managed Telegram bot', 500);
 
     try {
       await this.secrets.set(request.workspaceId, tokenSecretRef, token);
-      const webhookGovernance = await this.configureChildWebhook(row, token, webhookSecret);
+      const webhookGovernance = await this.configureChildWebhook(row, token, webhookSecret, {
+        actor: `user:${request.requestedByUserId}`,
+        replayRef: `managed-telegram-bot:${row.id}:set-webhook-after-claim`,
+        summary:
+          'Managed Telegram child bot webhook setup was requested before external Telegram webhook configuration.',
+      });
       const [updated] = await this.opts.db
         .update(managedTelegramBots)
         .set({
@@ -589,7 +624,12 @@ export class ManagedTelegramBotService {
     await this.secrets.set(workspaceId, asSecretKind(bot.tokenSecretRef), newToken);
 
     const webhookSecret = randomBytes(32).toString('hex');
-    const webhookGovernance = await this.configureChildWebhook(bot, newToken, webhookSecret);
+    const webhookGovernance = await this.configureChildWebhook(bot, newToken, webhookSecret, {
+      actor: `user:${userId}`,
+      replayRef: `managed-telegram-bot:${bot.id}:set-webhook-after-token-rotation`,
+      summary:
+        'Managed Telegram child bot webhook setup was requested after token rotation and before external Telegram webhook configuration.',
+    });
     this.childBotCache.delete(bot.id);
 
     const [updated] = await this.opts.db
@@ -930,7 +970,12 @@ export class ManagedTelegramBotService {
     }
     const webhookSecret = randomBytes(32).toString('hex');
     try {
-      const webhookGovernance = await this.configureChildWebhook(row, token, webhookSecret);
+      const webhookGovernance = await this.configureChildWebhook(row, token, webhookSecret, {
+        actor: 'system:managed-telegram',
+        replayRef: `managed-telegram-bot:${row.id}:set-webhook-retry`,
+        summary:
+          'Managed Telegram child bot webhook retry was requested before external Telegram webhook configuration.',
+      });
       const [updated] = await this.opts.db
         .update(managedTelegramBots)
         .set({
@@ -1215,7 +1260,8 @@ export class ManagedTelegramBotService {
     row: ManagedBotRow,
     token: string,
     secret: string,
-  ): Promise<ManagedTelegramGovernanceMetadata | undefined> {
+    options: ManagedTelegramWebhookSetupOptions,
+  ): Promise<Record<string, unknown> | undefined> {
     const appUrl = stripTrailingSlash(this.opts.appUrl ?? process.env['APP_URL']);
     if (!appUrl)
       throw new ManagedTelegramBotError('APP_URL is required for child bot webhook setup', 503);
@@ -1228,11 +1274,26 @@ export class ManagedTelegramBotService {
     });
 
     const url = `${appUrl}/api/telegram/managed/${row.id}/webhook`;
-    await setWebhook(token, url, secret);
-    await setCommands(token);
-    return governed
+    const governance = governed
       ? managedTelegramGovernanceMetadata(TELEGRAM_MANAGED_ACTIONS.SET_WEBHOOK, governed)
       : undefined;
+    const evidence = await this.opts.db.transaction(async (tx) =>
+      appendManagedTelegramControlEvidence(tx as unknown as Db, {
+        workspaceId: row.workspaceId,
+        actor: options.actor,
+        action: TELEGRAM_MANAGED_ACTIONS.SET_WEBHOOK,
+        target: row.id,
+        evidenceType: 'managed_telegram_webhook_config_requested',
+        title: 'Managed Telegram webhook configuration requested',
+        summary: options.summary,
+        replayRef: options.replayRef,
+        sensitivity: 'restricted',
+        metadata: managedTelegramWebhookControlMetadata(row, url, governance),
+      }),
+    );
+    await setWebhook(token, url, secret);
+    await setCommands(token);
+    return managedTelegramWebhookGovernanceMetadata(governance, evidence);
   }
 
   private async getActiveBot(workspaceId: string) {
@@ -1597,6 +1658,72 @@ function managedTelegramElevatedControlMetadata(
     policyVersion: governance?.policyVersion ?? null,
     evidencePackId: governance?.evidencePackId ?? null,
     helmDocumentVersionPins: governance?.helmDocumentVersionPins ?? {},
+  };
+}
+
+function managedTelegramClaimControlMetadata(input: {
+  requestId: string;
+  managedBotId: string;
+  telegramBotId: string;
+  telegramBotUsername: string;
+  tokenSecretRef: string;
+  governance: ManagedTelegramGovernanceMetadata | undefined;
+}) {
+  return {
+    requestId: input.requestId,
+    managedBotId: input.managedBotId,
+    telegramBotIdHash: stableHash(input.telegramBotId),
+    telegramBotUsernameHash: stableHash(input.telegramBotUsername),
+    tokenSecretRefHash: stableHash(input.tokenSecretRef),
+    rawTelegramBotIdStoredInEvidence: false,
+    rawTelegramBotUsernameStoredInEvidence: false,
+    rawTokenSecretRefStoredInEvidence: false,
+    policyDecisionId: input.governance?.policyDecisionId ?? null,
+    policyVersion: input.governance?.policyVersion ?? null,
+    evidencePackId: input.governance?.evidencePackId ?? null,
+    helmDocumentVersionPins: input.governance?.helmDocumentVersionPins ?? {},
+  };
+}
+
+function managedTelegramWebhookControlMetadata(
+  row: ManagedBotRow,
+  webhookUrl: string,
+  governance: ManagedTelegramGovernanceMetadata | undefined,
+) {
+  return {
+    managedBotId: row.id,
+    telegramBotIdHash: stableHash(row.telegramBotId),
+    tokenSecretRefHash: stableHash(row.tokenSecretRef),
+    webhookUrlHash: stableHash(webhookUrl),
+    rawTelegramBotIdStoredInEvidence: false,
+    rawTokenSecretRefStoredInEvidence: false,
+    rawWebhookUrlStoredInEvidence: false,
+    rawWebhookSecretStoredInEvidence: false,
+    policyDecisionId: governance?.policyDecisionId ?? null,
+    policyVersion: governance?.policyVersion ?? null,
+    evidencePackId: governance?.evidencePackId ?? null,
+    helmDocumentVersionPins: governance?.helmDocumentVersionPins ?? {},
+  };
+}
+
+function managedTelegramWebhookGovernanceMetadata(
+  governance: ManagedTelegramGovernanceMetadata | undefined,
+  evidence: {
+    auditEventId: string;
+    evidenceItemId: string;
+  },
+) {
+  return {
+    ...(governance ?? {
+      surface: 'managed_telegram',
+      action: TELEGRAM_MANAGED_ACTIONS.SET_WEBHOOK,
+      policyDecisionId: null,
+      policyVersion: null,
+      helmDocumentVersionPins: {},
+      evidencePackId: null,
+      policyPin: null,
+    }),
+    evidence: managedTelegramControlEvidenceMetadata(evidence),
   };
 }
 
