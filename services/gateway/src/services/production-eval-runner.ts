@@ -52,6 +52,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'helm_governance') {
         return executeHelmGovernanceEval(db, input);
       }
+      if (input.evalId === 'decision_court_governed_model') {
+        return executeDecisionCourtGovernedModelEval(db, input);
+      }
       return failedRun(
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
@@ -188,6 +191,91 @@ async function executeHelmGovernanceEval(
           auditReceiptRefs: [deniedAuditRef],
           completedAt,
           metadata: helmReceiptStepMetadata(deniedOrEscalated),
+        },
+      ],
+    },
+  };
+}
+
+async function executeDecisionCourtGovernedModelEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(
+      and(
+        eq(evidenceItems.workspaceId, input.workspaceId),
+        eq(evidenceItems.evidenceType, 'decision_court_run'),
+      ),
+    )
+    .orderBy(desc(evidenceItems.observedAt))
+    .limit(50);
+
+  const evidence = evidenceRows.find((row) =>
+    isGovernedDecisionCourtEvidence(row, input.workspaceId),
+  );
+  if (!evidence) {
+    return failedRun(
+      input,
+      'Decision Court Governed Model Eval requires redacted decision_court_run evidence from a completed governed_llm_court run with model-call metadata',
+    );
+  }
+  if (!evidence.auditEventId) {
+    return failedRun(
+      input,
+      `Decision Court evidence ${evidence.id} is missing an audit_event_id link`,
+    );
+  }
+
+  const audits = await db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, evidence.auditEventId)))
+    .limit(1);
+  const audit = audits.find((row) =>
+    isGovernedDecisionCourtAudit(row, evidence, input.workspaceId),
+  );
+  if (!audit) {
+    return failedRun(
+      input,
+      `Decision Court evidence ${evidence.id} has no matching DECISION_COURT_RUN audit row`,
+    );
+  }
+
+  const metadata = evidence.metadata as Record<string, unknown>;
+  const evidenceReference = evidenceRef(evidence);
+  const auditReference = auditRef(audit);
+  const completedAt = new Date().toISOString();
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'decision_court_governed_model',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'decision_court',
+      runRef: input.runRef ?? `real-external-eval:decision-court:${randomUUID()}`,
+      summary:
+        'Decision Court governed model eval verified a completed governed_llm_court run with bull, bear, and referee model calls, HELM receipts, costs, final recommendation, linked evidence, and audit ledger entry.',
+      evidenceRefs: [evidenceReference],
+      auditReceiptRefs: [auditReference],
+      metadata: {
+        runnerRef: 'gateway:decision_court_governed_model:v1',
+        verifiedEvidenceItemId: evidence.id,
+        verifiedAuditEventId: audit.id,
+        verifiedPolicyDecisionIds: getStringArray(metadata, 'policyDecisionIds'),
+        verifiedPolicyVersions: getStringArray(metadata, 'policyVersions'),
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'governed-court-run-evidence',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: decisionCourtStepMetadata(metadata),
         },
       ],
     },
@@ -530,6 +618,118 @@ function isCompleteHelmReceiptPack(row: EvidencePackRow): boolean {
   );
 }
 
+function isGovernedDecisionCourtEvidence(row: EvidenceItemRow, workspaceId: string): boolean {
+  return Boolean(
+    row.evidenceType === 'decision_court_run' &&
+    row.sourceType === 'decision_court' &&
+    row.auditEventId &&
+    row.redactionState === 'redacted' &&
+    isSha256ContentHash(row.contentHash) &&
+    row.replayRef &&
+    isGovernedDecisionCourtMetadata(row.metadata, row.replayRef, workspaceId),
+  );
+}
+
+function isGovernedDecisionCourtAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  workspaceId: string,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.action === 'DECISION_COURT_RUN' &&
+    row.target === 'governed_llm_court' &&
+    row.verdict === 'completed' &&
+    isRecord(row.metadata) &&
+    row.metadata['evidenceItemId'] === evidence.id &&
+    isGovernedDecisionCourtMetadata(row.metadata, evidence.replayRef, workspaceId),
+  );
+}
+
+function isGovernedDecisionCourtMetadata(
+  metadata: unknown,
+  replayRef: string | null,
+  workspaceId: string,
+): boolean {
+  if (!isRecord(metadata)) return false;
+  return (
+    metadata['mode'] === 'governed_llm_court' &&
+    metadata['status'] === 'completed' &&
+    metadata['productionReady'] === false &&
+    metadata['promptVersion'] === 'decision-court-v1' &&
+    metadata['credentialBoundary'] === 'no_raw_credentials_or_session_payloads_in_prompt' &&
+    metadata['replayRef'] === replayRef &&
+    isNonEmptyArray(metadata['requestedOpportunityIds']) &&
+    isNonEmptyArray(metadata['ranking']) &&
+    isRecord(metadata['finalRecommendation']) &&
+    isNonEmptyArray(metadata['policyDecisionIds']) &&
+    isNonEmptyArray(metadata['policyVersions']) &&
+    isRecord(metadata['helmDocumentVersionPins']) &&
+    Object.keys(metadata['helmDocumentVersionPins']).length > 0 &&
+    hasDecisionCourtStages(metadata['stages']) &&
+    hasGovernedDecisionCourtModelCalls(metadata['modelCalls'], workspaceId)
+  );
+}
+
+function hasDecisionCourtStages(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  const stages = new Set(
+    value
+      .map((entry) => (isRecord(entry) && typeof entry['stage'] === 'string' ? entry['stage'] : ''))
+      .filter(Boolean),
+  );
+  return ['buildDocket', 'researchBull', 'researchBear', 'referee', 'synthesize'].every((stage) =>
+    stages.has(stage),
+  );
+}
+
+function hasGovernedDecisionCourtModelCalls(value: unknown, workspaceId: string): boolean {
+  if (!Array.isArray(value)) return false;
+  const calls = value.filter((call) =>
+    isCompletedGovernedDecisionCourtModelCall(call, workspaceId),
+  );
+  const participants = new Set(calls.map((call) => call['participant']));
+  return (
+    calls.length >= 3 &&
+    participants.has('bull') &&
+    participants.has('bear') &&
+    participants.has('referee')
+  );
+}
+
+function isCompletedGovernedDecisionCourtModelCall(
+  value: unknown,
+  workspaceId: string,
+): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const receipt = value['receipt'];
+  return (
+    value['status'] === 'completed' &&
+    ['bull', 'bear', 'referee'].includes(String(value['participant'])) &&
+    typeof value['opportunityId'] === 'string' &&
+    typeof value['prompt'] === 'string' &&
+    value['prompt'].trim().length > 0 &&
+    typeof value['output'] === 'string' &&
+    value['output'].trim().length > 0 &&
+    typeof value['model'] === 'string' &&
+    typeof value['tokensIn'] === 'number' &&
+    value['tokensIn'] > 0 &&
+    typeof value['tokensOut'] === 'number' &&
+    value['tokensOut'] > 0 &&
+    typeof value['costUsd'] === 'number' &&
+    value['costUsd'] >= 0 &&
+    typeof value['policyDecisionId'] === 'string' &&
+    typeof value['policyVersion'] === 'string' &&
+    isRecord(receipt) &&
+    receipt['decisionId'] === value['policyDecisionId'] &&
+    receipt['policyVersion'] === value['policyVersion'] &&
+    normalizeVerdict(String(receipt['verdict'] ?? '')) === 'allow' &&
+    typeof receipt['principal'] === 'string' &&
+    receipt['principal'].startsWith(`workspace:${workspaceId}`) &&
+    isDecisionHash(typeof receipt['decisionHash'] === 'string' ? receipt['decisionHash'] : null)
+  );
+}
+
 function isYcUrl(url: string, origin: string): boolean {
   return [url, origin].some((value) => {
     try {
@@ -649,6 +849,21 @@ function isDecisionHash(value: string | null): boolean {
   return typeof value === 'string' && /^[a-f0-9]{32,}$/u.test(value);
 }
 
+function isSha256ContentHash(value: string | null): boolean {
+  return typeof value === 'string' && /^sha256:[a-f0-9]{64}$/u.test(value);
+}
+
+function isNonEmptyArray(value: unknown): value is unknown[] {
+  return Array.isArray(value) && value.length > 0;
+}
+
+function getStringArray(metadata: Record<string, unknown>, key: string): string[] {
+  const value = metadata[key];
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
 function helmReceiptStepMetadata(pack: EvidencePackRow): Record<string, string | null> {
   return {
     evidencePackId: pack.id,
@@ -658,5 +873,24 @@ function helmReceiptStepMetadata(pack: EvidencePackRow): Record<string, string |
     action: pack.action,
     resource: pack.resource,
     decisionHash: pack.decisionHash,
+  };
+}
+
+function decisionCourtStepMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const calls = Array.isArray(metadata['modelCalls']) ? metadata['modelCalls'] : [];
+  return {
+    mode: metadata['mode'],
+    status: metadata['status'],
+    promptVersion: metadata['promptVersion'],
+    participantCount: new Set(
+      calls
+        .map((call) =>
+          isRecord(call) && typeof call['participant'] === 'string' ? call['participant'] : '',
+        )
+        .filter(Boolean),
+    ).size,
+    modelCallCount: calls.length,
+    policyDecisionIds: getStringArray(metadata, 'policyDecisionIds'),
+    policyVersions: getStringArray(metadata, 'policyVersions'),
   };
 }

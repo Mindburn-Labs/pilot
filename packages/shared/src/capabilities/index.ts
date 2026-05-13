@@ -192,6 +192,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gate 4 prevents silent fallback from governed_llm_court to heuristic reasoning',
       'Gateway persists Decision Court run records with mode, status, participants, prompts, model usage, costs, policy decisions, document pins, replay refs, and final recommendation metadata',
       'Gateway appends redacted decision_court_run evidence linked to the audit event for replayable court provenance and backfills audit metadata with the persisted evidence item id',
+      'Gateway real_external_eval runner for Decision Court Governed Model verifies a completed governed_llm_court run through redacted decision_court_run evidence, DECISION_COURT_RUN audit linkage, bull/bear/referee model-call receipts, costs, policy versions, and final recommendation metadata before creating promotion eligibility',
       'Tests cover unavailable, heuristic preview, governed calls with receipts, missing-governance denial, and referee failure',
     ],
     evalRequirement: 'Decision Court Governed Model Eval',

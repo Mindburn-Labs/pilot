@@ -210,6 +210,88 @@ function helmReceiptAuditMetadata(pack: EvidencePackRow): Record<string, string 
   };
 }
 
+function decisionCourtModelCall(participant: 'bull' | 'bear' | 'referee') {
+  const suffix = participant === 'bull' ? '1' : participant === 'bear' ? '2' : '3';
+  return {
+    participant,
+    opportunityId: 'opp-1',
+    prompt: `${participant} prompt`,
+    output:
+      participant === 'referee'
+        ? '{"verdict":"yes","confidence":82,"reasoning":"Strong fit."}'
+        : `${participant} output`,
+    status: 'completed',
+    model: 'anthropic/claude-sonnet-4',
+    tokensIn: 120 + Number(suffix),
+    tokensOut: 80 + Number(suffix),
+    costUsd: 0.001 + Number(`0.00${suffix}`),
+    policyDecisionId: `model-decision-${suffix}`,
+    policyVersion: 'founder-ops-v1',
+    receipt: {
+      decisionId: `model-decision-${suffix}`,
+      verdict: 'ALLOW',
+      policyVersion: 'founder-ops-v1',
+      decisionHash: suffix.repeat(64),
+      principal: `workspace:${workspaceId}/operator:decision_court`,
+    },
+  };
+}
+
+function decisionCourtMetadata(overrides: Record<string, unknown> = {}) {
+  const modelCalls = [
+    decisionCourtModelCall('bull'),
+    decisionCourtModelCall('bear'),
+    decisionCourtModelCall('referee'),
+  ];
+  return {
+    requestedOpportunityIds: ['opp-1'],
+    founderContextProvided: true,
+    mode: 'governed_llm_court',
+    status: 'completed',
+    productionReady: false,
+    finalRecommendation: {
+      opportunityId: 'opp-1',
+      rank: 1,
+      verdict: 'yes',
+      confidence: 82,
+      reasoning: 'Strong fit.',
+      bullCase: 'bull output',
+      bearCase: 'bear output',
+    },
+    ranking: [
+      {
+        opportunityId: 'opp-1',
+        rank: 1,
+        verdict: 'yes',
+        confidence: 82,
+        reasoning: 'Strong fit.',
+        bullCase: 'bull output',
+        bearCase: 'bear output',
+      },
+    ],
+    stages: [
+      { stage: 'buildDocket', durationMs: 1 },
+      { stage: 'researchBull', durationMs: 2 },
+      { stage: 'researchBear', durationMs: 3 },
+      { stage: 'referee', durationMs: 4 },
+      { stage: 'synthesize', durationMs: 1 },
+    ],
+    modelCalls,
+    policyDecisionIds: modelCalls.map((call) => call.policyDecisionId),
+    policyVersions: ['founder-ops-v1'],
+    helmDocumentVersionPins: {
+      decisionCourtPrompt: 'decision-court-v1',
+      'modelCall:1:bull:opp-1': 'founder-ops-v1',
+      'modelCall:2:bear:opp-1': 'founder-ops-v1',
+      'modelCall:3:referee:opp-1': 'founder-ops-v1',
+    },
+    promptVersion: 'decision-court-v1',
+    replayRef: 'decision-court:audit-decision-court',
+    credentialBoundary: 'no_raw_credentials_or_session_payloads_in_prompt',
+    ...overrides,
+  };
+}
+
 describe('createProductionEvalRunner', () => {
   it('passes helm_governance only from allow and restricted durable receipt evidence with audits', async () => {
     const allowed = helmReceiptPack({
@@ -329,6 +411,122 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain('DENY or ESCALATE');
+  });
+
+  it('passes decision_court_governed_model only from governed court evidence and audit rows', async () => {
+    const metadata = decisionCourtMetadata();
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-decision-court',
+            computerActionId: null,
+            evidenceType: 'decision_court_run',
+            sourceType: 'decision_court',
+            auditEventId: 'audit-decision-court',
+            redactionState: 'redacted',
+            contentHash: `sha256:${'d'.repeat(64)}`,
+            replayRef: 'decision-court:audit-decision-court',
+            metadata,
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-decision-court',
+            action: 'DECISION_COURT_RUN',
+            target: 'governed_llm_court',
+            verdict: 'completed',
+            metadata: { ...metadata, evidenceItemId: 'evidence-decision-court' },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'decision_court_governed_model',
+      capabilityKey: 'decision_court',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'decision_court_governed_model',
+      status: 'passed',
+      capabilityKey: 'decision_court',
+      evidenceRefs: ['decision-court:audit-decision-court'],
+      auditReceiptRefs: ['audit:audit-decision-court'],
+      metadata: {
+        runnerRef: 'gateway:decision_court_governed_model:v1',
+        verifiedEvidenceItemId: 'evidence-decision-court',
+        verifiedAuditEventId: 'audit-decision-court',
+        verifiedPolicyDecisionIds: ['model-decision-1', 'model-decision-2', 'model-decision-3'],
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'governed-court-run-evidence',
+        status: 'passed',
+        metadata: expect.objectContaining({
+          mode: 'governed_llm_court',
+          participantCount: 3,
+          modelCallCount: 3,
+        }),
+      }),
+    ]);
+  });
+
+  it('fails decision_court_governed_model when referee proof is missing', async () => {
+    const metadata = decisionCourtMetadata({
+      modelCalls: [decisionCourtModelCall('bull'), decisionCourtModelCall('bear')],
+      policyDecisionIds: ['model-decision-1', 'model-decision-2'],
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        evidence: [
+          evidenceItem({
+            id: 'evidence-decision-court',
+            computerActionId: null,
+            evidenceType: 'decision_court_run',
+            sourceType: 'decision_court',
+            auditEventId: 'audit-decision-court',
+            redactionState: 'redacted',
+            contentHash: `sha256:${'d'.repeat(64)}`,
+            replayRef: 'decision-court:audit-decision-court',
+            metadata,
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-decision-court',
+            action: 'DECISION_COURT_RUN',
+            target: 'governed_llm_court',
+            verdict: 'completed',
+            metadata: { ...metadata, evidenceItemId: 'evidence-decision-court' },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'decision_court_governed_model',
+      capabilityKey: 'decision_court',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('completed governed_llm_court run');
   });
 
   it('passes yc_logged_in_browser_extraction only from durable browser evidence and audit rows', async () => {
