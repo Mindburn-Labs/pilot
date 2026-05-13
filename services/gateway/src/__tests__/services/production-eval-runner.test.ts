@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  a2aMessages,
+  a2aThreads,
   agentHandoffs,
   auditLog,
   browserObservations,
@@ -24,6 +26,8 @@ type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type A2aThreadRow = typeof a2aThreads.$inferSelect;
+type A2aMessageRow = typeof a2aMessages.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
@@ -37,6 +41,8 @@ function createRunnerDb({
   packs = [],
   evidence = [],
   audits = [],
+  a2aThreadRows = [],
+  a2aMessageRows = [],
   taskRows = [],
   taskRunRows = [],
   handoffRows = [],
@@ -49,6 +55,8 @@ function createRunnerDb({
   packs?: EvidencePackRow[];
   evidence?: EvidenceItemRow[];
   audits?: AuditRow[];
+  a2aThreadRows?: A2aThreadRow[];
+  a2aMessageRows?: A2aMessageRow[];
   taskRows?: TaskRow[];
   taskRunRows?: TaskRunRow[];
   handoffRows?: AgentHandoffRow[];
@@ -70,19 +78,23 @@ function createRunnerDb({
                   ? evidence
                   : table === auditLog
                     ? audits
-                    : table === tasks
-                      ? taskRows
-                      : table === taskRuns
-                        ? taskRunRows
-                        : table === agentHandoffs
-                          ? handoffRows
-                          : table === opportunities
-                            ? opportunityRows
-                            : table === opportunityScores
-                              ? scoreRows
-                              : table === toolExecutions
-                                ? toolExecutionRows
-                                : [];
+                    : table === a2aThreads
+                      ? a2aThreadRows
+                      : table === a2aMessages
+                        ? a2aMessageRows
+                        : table === tasks
+                          ? taskRows
+                          : table === taskRuns
+                            ? taskRunRows
+                            : table === agentHandoffs
+                              ? handoffRows
+                              : table === opportunities
+                                ? opportunityRows
+                                : table === opportunityScores
+                                  ? scoreRows
+                                  : table === toolExecutions
+                                    ? toolExecutionRows
+                                    : [];
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -317,6 +329,38 @@ function auditRow(overrides: Partial<AuditRow>): AuditRow {
     reason: null,
     metadata: {},
     createdAt: new Date('2026-05-12T00:01:00.000Z'),
+    ...overrides,
+  };
+}
+
+function a2aThreadRow(overrides: Partial<A2aThreadRow>): A2aThreadRow {
+  return {
+    id: 'a2a-thread-1',
+    workspaceId,
+    externalTaskId: 'external-parallel-build-1',
+    pilotTaskId: 'task-foundation-1',
+    status: 'completed',
+    metadata: {
+      conductStatus: 'completed',
+      dispatchEvidenceItemId: 'evidence-a2a-dispatch',
+      restartVerified: true,
+    },
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
+    updatedAt: new Date('2026-05-12T00:05:00.000Z'),
+    completedAt: new Date('2026-05-12T00:05:00.000Z'),
+    ...overrides,
+  };
+}
+
+function a2aMessageRow(overrides: Partial<A2aMessageRow>): A2aMessageRow {
+  return {
+    id: 'a2a-message-1',
+    threadId: 'a2a-thread-1',
+    workspaceId,
+    role: 'user',
+    parts: [{ type: 'text', text: 'Build MVP and landing page in parallel' }],
+    sequence: 1,
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
     ...overrides,
   };
 }
@@ -961,6 +1005,290 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain('child receipt evidence');
+  });
+
+  it('passes multi_agent_parallel_build from restart-verified A2A state and brokered parallel agent evidence', async () => {
+    const task = taskRow({ id: 'task-parallel-build-1', mode: 'a2a' });
+    const thread = a2aThreadRow({
+      id: 'a2a-thread-parallel-build-1',
+      externalTaskId: 'external-parallel-build-1',
+      pilotTaskId: task.id,
+    });
+    const parent = taskRunRow({
+      id: 'task-run-build-parent-1',
+      taskId: task.id,
+      lineageKind: 'parent_action',
+      parentTaskRunId: null,
+      rootTaskRunId: null,
+      actionTool: 'subagent.parallel',
+      runSequence: 1,
+    });
+    const landingChild = taskRunRow({
+      id: 'task-run-build-landing-1',
+      taskId: task.id,
+      lineageKind: 'subagent_spawn',
+      parentTaskRunId: parent.id,
+      rootTaskRunId: parent.id,
+      spawnedByActionId: parent.id,
+      actionTool: 'artifact_writer',
+      operatorRole: 'frontend_builder',
+      runSequence: 2,
+    });
+    const analyticsChild = taskRunRow({
+      id: 'task-run-build-analytics-1',
+      taskId: task.id,
+      lineageKind: 'subagent_spawn',
+      parentTaskRunId: parent.id,
+      rootTaskRunId: parent.id,
+      spawnedByActionId: parent.id,
+      actionTool: 'analytics_config',
+      operatorRole: 'analytics_builder',
+      runSequence: 3,
+    });
+    const landingExecution = toolExecution({
+      id: 'tool-execution-landing-1',
+      actionId: 'action-landing-1',
+      taskRunId: landingChild.id,
+      toolKey: 'artifact_writer',
+      outputHash: 'sha256:landing-output',
+      sanitizedOutput: {
+        artifactDiffRef: 'artifact:landing-page:diff:1',
+        evidenceKinds: ['agent_run_log', 'artifact_diff'],
+      },
+      evidenceIds: ['evidence-tool-landing-1'],
+      policyDecisionId: 'decision-landing-1',
+      policyVersion: 'founder-ops-v1',
+      helmDocumentVersionPins: { toolPolicy: 'founder-ops-v1' },
+    });
+    const analyticsExecution = toolExecution({
+      id: 'tool-execution-analytics-1',
+      actionId: 'action-analytics-1',
+      taskRunId: analyticsChild.id,
+      toolKey: 'analytics_config',
+      outputHash: 'sha256:analytics-output',
+      sanitizedOutput: {
+        evidenceKinds: ['agent_run_log'],
+      },
+      evidenceIds: ['evidence-tool-analytics-1'],
+      policyDecisionId: 'decision-analytics-1',
+      policyVersion: 'founder-ops-v1',
+      helmDocumentVersionPins: { toolPolicy: 'founder-ops-v1' },
+    });
+    const dispatchEvidence = evidenceItem({
+      id: 'evidence-a2a-dispatch',
+      computerActionId: null,
+      taskId: task.id,
+      auditEventId: 'audit-a2a-dispatch',
+      evidenceType: 'a2a_task_dispatched',
+      sourceType: 'gateway_a2a_route',
+      sensitivity: 'internal',
+      replayRef: `a2a:${thread.externalTaskId}:dispatch:audit-a2a-dispatch`,
+      metadata: {
+        externalTaskId: thread.externalTaskId,
+        pilotTaskId: task.id,
+        evidenceContract: 'a2a_dispatch_evidence_required',
+      },
+    });
+    const landingEvidence = evidenceItem({
+      id: 'evidence-tool-landing-1',
+      computerActionId: null,
+      taskRunId: landingChild.id,
+      actionId: landingExecution.actionId,
+      toolExecutionId: landingExecution.id,
+      auditEventId: 'audit-tool-landing-1',
+      evidenceType: 'tool_execution_completed',
+      sourceType: 'tool_broker',
+      contentHash: landingExecution.outputHash,
+      replayRef: `tool:${landingExecution.id}`,
+      metadata: {
+        broker: 'tool_broker_v1',
+        toolKey: landingExecution.toolKey,
+        toolExecutionId: landingExecution.id,
+        status: 'completed',
+        policyDecisionId: landingExecution.policyDecisionId,
+        policyVersion: landingExecution.policyVersion,
+        requiredEvidence: ['agent_run_log', 'artifact_diff'],
+      },
+    });
+    const analyticsEvidence = evidenceItem({
+      id: 'evidence-tool-analytics-1',
+      computerActionId: null,
+      taskRunId: analyticsChild.id,
+      actionId: analyticsExecution.actionId,
+      toolExecutionId: analyticsExecution.id,
+      auditEventId: 'audit-tool-analytics-1',
+      evidenceType: 'tool_execution_completed',
+      sourceType: 'tool_broker',
+      contentHash: analyticsExecution.outputHash,
+      replayRef: `tool:${analyticsExecution.id}`,
+      metadata: {
+        broker: 'tool_broker_v1',
+        toolKey: analyticsExecution.toolKey,
+        toolExecutionId: analyticsExecution.id,
+        status: 'completed',
+        policyDecisionId: analyticsExecution.policyDecisionId,
+        policyVersion: analyticsExecution.policyVersion,
+        requiredEvidence: ['agent_run_log'],
+      },
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        a2aThreadRows: [thread],
+        a2aMessageRows: [
+          a2aMessageRow({ id: 'a2a-message-1', threadId: thread.id, sequence: 1 }),
+          a2aMessageRow({
+            id: 'a2a-message-2',
+            threadId: thread.id,
+            role: 'agent',
+            parts: [{ type: 'text', text: 'Parallel build completed with evidence.' }],
+            sequence: 2,
+          }),
+        ],
+        taskRows: [task],
+        taskRunRows: [parent, landingChild, analyticsChild],
+        handoffRows: [
+          agentHandoffRow({
+            id: 'handoff-landing-1',
+            taskId: task.id,
+            parentTaskRunId: parent.id,
+            childTaskRunId: landingChild.id,
+            toAgent: 'frontend_builder',
+          }),
+          agentHandoffRow({
+            id: 'handoff-analytics-1',
+            taskId: task.id,
+            parentTaskRunId: parent.id,
+            childTaskRunId: analyticsChild.id,
+            toAgent: 'analytics_builder',
+          }),
+        ],
+        toolExecutionRows: [landingExecution, analyticsExecution],
+        evidence: [dispatchEvidence, landingEvidence, analyticsEvidence],
+        audits: [
+          auditRow({
+            id: 'audit-a2a-dispatch',
+            action: 'A2A_TASK_SEND_DISPATCHED',
+            target: task.id,
+            verdict: 'allow',
+            metadata: {
+              externalTaskId: thread.externalTaskId,
+              pilotTaskId: task.id,
+              evidenceItemId: dispatchEvidence.id,
+            },
+          }),
+          auditRow({
+            id: 'audit-tool-landing-1',
+            action: 'TOOL_EXECUTION',
+            target: landingExecution.toolKey,
+            verdict: 'allow',
+            metadata: {
+              broker: 'tool_broker_v1',
+              toolKey: landingExecution.toolKey,
+              toolExecutionId: landingExecution.id,
+              evidenceItemId: landingEvidence.id,
+              policyDecisionId: landingExecution.policyDecisionId,
+              policyVersion: landingExecution.policyVersion,
+            },
+          }),
+          auditRow({
+            id: 'audit-tool-analytics-1',
+            action: 'TOOL_EXECUTION',
+            target: analyticsExecution.toolKey,
+            verdict: 'allow',
+            metadata: {
+              broker: 'tool_broker_v1',
+              toolKey: analyticsExecution.toolKey,
+              toolExecutionId: analyticsExecution.id,
+              evidenceItemId: analyticsEvidence.id,
+              policyDecisionId: analyticsExecution.policyDecisionId,
+              policyVersion: analyticsExecution.policyVersion,
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'multi_agent_parallel_build',
+      capabilityKey: 'a2a_durable_state',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'multi_agent_parallel_build',
+      status: 'passed',
+      capabilityKey: 'a2a_durable_state',
+      evidenceRefs: [
+        dispatchEvidence.replayRef,
+        landingEvidence.replayRef,
+        analyticsEvidence.replayRef,
+      ],
+      auditReceiptRefs: [
+        'audit:audit-a2a-dispatch',
+        'audit:audit-tool-landing-1',
+        'audit:audit-tool-analytics-1',
+      ],
+      metadata: {
+        runnerRef: 'gateway:multi_agent_parallel_build:v1',
+        verifiedA2aThreadId: thread.id,
+        verifiedPilotTaskId: task.id,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'durable-a2a-restart-replay',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'parallel-agent-tool-evidence',
+        status: 'passed',
+        metadata: expect.objectContaining({
+          handoffIds: ['handoff-landing-1', 'handoff-analytics-1'],
+          childTaskRunIds: [landingChild.id, analyticsChild.id],
+        }),
+      }),
+    ]);
+  });
+
+  it('fails multi_agent_parallel_build without restart-verified A2A state', async () => {
+    const task = taskRow({ id: 'task-parallel-build-1', mode: 'a2a' });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        a2aThreadRows: [
+          a2aThreadRow({
+            pilotTaskId: task.id,
+            metadata: {
+              conductStatus: 'completed',
+              dispatchEvidenceItemId: 'evidence-a2a-dispatch',
+              restartVerified: false,
+            },
+          }),
+        ],
+        taskRows: [task],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'multi_agent_parallel_build',
+      capabilityKey: 'a2a_durable_state',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('restart-verified A2A thread');
   });
 
   it('passes approval_resume_isolation from deterministic parent-only replay evidence', async () => {
