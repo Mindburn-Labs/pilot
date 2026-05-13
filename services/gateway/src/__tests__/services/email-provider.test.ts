@@ -48,6 +48,39 @@ describe('NoopProvider', () => {
       }),
     ).resolves.toBeUndefined();
   });
+
+  it('redacts recipient, code, and link URL from noop logs', async () => {
+    vi.resetModules();
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    vi.doMock('@pilot/shared/logger', () => ({
+      createLogger: vi.fn(() => logger),
+    }));
+
+    const { createEmailProvider } = await import('../../services/email-provider.js');
+    const provider = createEmailProvider({ provider: 'noop' });
+    await provider.sendMagicLink({
+      to: 'User@Example.com',
+      code: '123456',
+      linkUrl: 'https://app.example.com/login?email=User%40Example.com&code=123456',
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        toStoredInLogs: false,
+        codeStoredInLogs: false,
+        linkUrlStoredInLogs: false,
+      }),
+      expect.any(String),
+    );
+    const serializedLogs = JSON.stringify(logger.warn.mock.calls);
+    expect(serializedLogs).not.toContain('User@Example.com');
+    expect(serializedLogs).not.toContain('user@example.com');
+    expect(serializedLogs).not.toContain('123456');
+    expect(serializedLogs).not.toContain('https://app.example.com/login');
+
+    vi.doUnmock('@pilot/shared/logger');
+  });
 });
 
 describe('ResendProvider', () => {
@@ -82,6 +115,47 @@ describe('ResendProvider', () => {
     expect(payload.html).toContain('654321');
     expect(payload.text).toContain('https://app.example.com/login');
 
+    vi.doUnmock('resend');
+  });
+
+  it('redacts recipient from successful Resend logs', async () => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const mockSend = vi.fn().mockResolvedValue({ error: null });
+    vi.doMock('@pilot/shared/logger', () => ({
+      createLogger: vi.fn(() => logger),
+    }));
+    vi.doMock('resend', () => ({
+      Resend: vi.fn().mockImplementation(() => ({ emails: { send: mockSend } })),
+    }));
+
+    const { createEmailProvider } = await import('../../services/email-provider.js');
+    const provider = createEmailProvider({
+      provider: 'resend',
+      resendApiKey: 're_test',
+    });
+
+    await provider.sendMagicLink({
+      to: 'User@Example.com',
+      code: '654321',
+      linkUrl: 'https://app.example.com/login?email=User%40Example.com&code=654321',
+    });
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        toHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+        toStoredInLogs: false,
+        codeStoredInLogs: false,
+        linkUrlStoredInLogs: false,
+      }),
+      'Magic link email sent via Resend',
+    );
+    const serializedLogs = JSON.stringify(logger.info.mock.calls);
+    expect(serializedLogs).not.toContain('User@Example.com');
+    expect(serializedLogs).not.toContain('user@example.com');
+    expect(serializedLogs).not.toContain('654321');
+    expect(serializedLogs).not.toContain('https://app.example.com/login');
+
+    vi.doUnmock('@pilot/shared/logger');
     vi.doUnmock('resend');
   });
 
