@@ -24,7 +24,7 @@ import {
   toolExecutions,
 } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
-import { PRODUCTION_READY_EXECUTION_MODE } from '@pilot/shared/eval';
+import { PRODUCTION_READY_EXECUTION_MODE, pilotProductionEvalSuite } from '@pilot/shared/eval';
 import { createProductionEvalRunner } from '../../services/production-eval-runner.js';
 
 const workspaceId = '00000000-0000-4000-8000-000000000001';
@@ -5188,6 +5188,28 @@ describe('createProductionEvalRunner', () => {
     expect(result.run.failureReason).toContain('external-world outcome proof');
     expect(result.run.evidenceRefs).toEqual([]);
     expect(result.run.auditReceiptRefs).toEqual([]);
+  });
+
+  it('has trusted real_external_eval dispatch for every registered production eval scenario', async () => {
+    const runner = createProductionEvalRunner(createRunnerDb({}));
+
+    for (const scenario of pilotProductionEvalSuite) {
+      const result = await runner.execute({
+        workspaceId,
+        evalId: scenario.id,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        evidenceRefs: [],
+        auditReceiptRefs: [],
+        evidenceCoverage: [],
+        auditCoverage: [],
+        steps: [],
+      });
+
+      expect(result.run.status).toBe('failed');
+      expect(result.run.failureReason ?? '').not.toContain(
+        'No trusted real_external_eval runner is implemented',
+      );
+    }
   });
 
   it('fails unsupported real_external_eval scenarios instead of fabricating a pass', async () => {
