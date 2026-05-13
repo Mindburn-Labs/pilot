@@ -1372,6 +1372,304 @@ function domainToDeploymentFixture({
   };
 }
 
+function stripeSetupPrepFixture({
+  includePrepEvidence = true,
+}: { includePrepEvidence?: boolean } = {}): {
+  browser: BrowserObservationRow[];
+  missionNodeRows: MissionNodeRow[];
+  toolExecutionRows: ToolExecutionRow[];
+  artifactRows: ArtifactRow[];
+  evidence: EvidenceItemRow[];
+  audits: AuditRow[];
+} {
+  const node = missionNodeRow({
+    id: 'mission-node-stripe-setup-1',
+    missionId: 'mission-stripe-setup-1',
+    nodeKey: 'stripe_setup_prep',
+    stage: 'stripe_setup_prep',
+    title: 'Stripe setup preparation',
+    objective: 'Prepare Stripe products, prices, webhook plan, and human-required gates.',
+    requiredAgents: ['Finance Agent', 'Backend Engineer Agent', 'Legal Workflow Agent'],
+    requiredSkills: ['payment_setup_planning', 'pricing_hypothesis', 'webhook_design'],
+    requiredTools: ['stripe_connector', 'artifact_writer', 'browser_read_extract'],
+    requiredEvidence: ['pricing rationale', 'Stripe setup checklist', 'human gate list'],
+    helmPolicyClasses: ['financial', 'legal', 'credential_handling', 'audit'],
+    escalationConditions: [
+      'Identity verification, bank information, charges, payouts, or legal attestations are required',
+    ],
+    acceptanceCriteria: [
+      'Stripe prep artifact exists',
+      'Human-required steps are isolated',
+      'No raw credentials or financial secrets are stored',
+    ],
+  });
+  const humanGates = [
+    'identity_verification',
+    'bank_information',
+    'payouts',
+    'charges',
+    'legal_attestation',
+  ];
+  const artifact = artifactRow({
+    id: 'artifact-stripe-setup-prep-1',
+    type: 'application',
+    name: 'Stripe setup prep packet',
+    description: 'Non-executing Stripe setup checklist, pricing rationale, and human gates.',
+    storagePath: 'artifacts/stripe/setup-prep.md',
+    mimeType: 'text/markdown',
+    sizeBytes: 4096,
+    metadata: {
+      evalId: 'stripe_setup_prep',
+      lifecycleStage: 'stripe_setup_prep',
+      missionNodeId: node.id,
+      pricingRationaleRef: 'artifact:stripe-pricing-rationale',
+      stripeSetupChecklistRef: 'artifact:stripe-checklist',
+      webhookPlanRef: 'artifact:stripe-webhook-plan',
+      humanGateListRef: 'artifact:stripe-human-gates',
+      productionReady: false,
+      restrictedActionsExecuted: false,
+      financialSecretsStoredInArtifact: false,
+      rawConnectorSecretsStoredInArtifact: false,
+    },
+  });
+  const execution = toolExecution({
+    id: 'tool-execution-stripe-prep-1',
+    actionId: 'action-stripe-prep-1',
+    toolKey: 'stripe_setup_prep',
+    inputHash: 'sha256:stripe-setup-input',
+    sanitizedInput: { mode: 'stripe_setup_prep', missionNodeId: node.id },
+    outputHash: `sha256:${'8'.repeat(64)}`,
+    sanitizedOutput: {
+      mode: 'stripe_setup_prep',
+      missionNodeId: node.id,
+      artifactId: artifact.id,
+      productionReady: false,
+      restrictedActionsExecuted: false,
+      financialSecretsStoredInOutput: false,
+      rawConnectorSecretsStoredInOutput: false,
+      products: [{ name: 'Pilot monthly plan', mode: 'subscription' }],
+      prices: [{ nickname: 'monthly', currency: 'usd', interval: 'month' }],
+      webhookPlan: {
+        endpoint: '/api/stripe/webhook',
+        events: ['checkout.session.completed', 'customer.subscription.updated'],
+      },
+      setupChecklist: ['create product draft', 'define price draft', 'configure webhook draft'],
+      humanGates,
+      requiredEscalations: humanGates,
+    },
+    evidenceIds: ['evidence-stripe-tool'],
+    policyDecisionId: 'stripe-financial-decision-1',
+    policyVersion: 'founder-ops-v1',
+    helmDocumentVersionPins: {
+      financialPolicy: 'founder-ops-v1',
+      credentialHandlingPolicy: 'founder-ops-v1',
+    },
+  });
+  const browser = browserObservation({
+    id: 'browser-observation-stripe-1',
+    url: 'https://docs.stripe.com/payments/checkout',
+    origin: 'https://docs.stripe.com',
+    title: 'Stripe Checkout docs',
+    objective: 'Read Stripe setup docs without exporting credentials',
+    domHash: `sha256:${'9'.repeat(64)}`,
+    screenshotHash: `sha256:${'a'.repeat(64)}`,
+    screenshotRef: 'browser/stripe/setup-prep.png',
+    redactedDomSnapshot: '<html><main>Stripe setup docs</main></html>',
+    extractedData: {
+      products: ['subscription'],
+      pricingModels: ['monthly_recurring'],
+      webhookEvents: ['checkout.session.completed', 'customer.subscription.updated'],
+      humanGates,
+    },
+    redactions: [],
+    metadata: {
+      credentialBoundary: browserCredentialBoundary,
+      helmDecisionId: 'stripe-browser-decision-1',
+      helmPolicyVersion: 'founder-ops-v1',
+      rawCookiesExported: false,
+      rawFinancialSecretsStored: false,
+    },
+  });
+  const prepReplayRef = `stripe-setup-prep:${node.id}`;
+
+  return {
+    browser: [browser],
+    missionNodeRows: [node],
+    toolExecutionRows: [execution],
+    artifactRows: [artifact],
+    evidence: [
+      evidenceItem({
+        id: 'evidence-stripe-tool',
+        computerActionId: null,
+        actionId: execution.actionId,
+        toolExecutionId: execution.id,
+        evidenceType: 'tool_execution_completed',
+        sourceType: 'tool_broker',
+        auditEventId: 'audit-stripe-tool',
+        contentHash: execution.outputHash,
+        replayRef: `tool:${execution.id}`,
+        metadata: {
+          broker: 'tool_broker_v1',
+          toolKey: execution.toolKey,
+          toolExecutionId: execution.id,
+          status: 'completed',
+          policyDecisionId: execution.policyDecisionId,
+          policyVersion: execution.policyVersion,
+          requiredEvidence: [
+            'stripe_setup_checklist',
+            'pricing_rationale',
+            'webhook_plan',
+            'human_gate_list',
+          ],
+          restrictedActionsExecuted: false,
+          financialSecretsStoredInEvidence: false,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-stripe-browser',
+        computerActionId: null,
+        browserObservationId: browser.id,
+        evidenceType: 'browser_observation',
+        sourceType: 'gateway_browser_session',
+        auditEventId: 'audit-stripe-browser',
+        sensitivity: 'sensitive',
+        contentHash: browser.domHash,
+        storageRef: browser.screenshotRef,
+        replayRef: `browser:${browser.sessionId}:3`,
+        metadata: {
+          sessionId: browser.sessionId,
+          grantId: browser.grantId,
+          browserActionId: browser.browserActionId,
+          url: browser.url,
+          origin: browser.origin,
+          credentialBoundary: browserCredentialBoundary,
+          helmDecisionId: 'stripe-browser-decision-1',
+          helmPolicyVersion: 'founder-ops-v1',
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-stripe-artifact',
+        computerActionId: null,
+        artifactId: artifact.id,
+        evidenceType: 'artifact_created',
+        sourceType: 'tool_registry',
+        auditEventId: 'audit-stripe-artifact',
+        sensitivity: 'internal',
+        contentHash: `sha256:${'b'.repeat(64)}`,
+        storageRef: artifact.storagePath,
+        replayRef: `artifact:${artifact.id}:1`,
+        metadata: {
+          evalId: 'stripe_setup_prep',
+          lifecycleStage: 'stripe_setup_prep',
+          missionNodeId: node.id,
+          artifactType: artifact.type,
+          version: 1,
+          tool: 'create_artifact',
+          financialSecretsStoredInEvidence: false,
+          rawConnectorSecretsStoredInEvidence: false,
+        },
+      }),
+      ...(includePrepEvidence
+        ? [
+            evidenceItem({
+              id: 'evidence-stripe-prep',
+              computerActionId: null,
+              missionId: node.missionId,
+              artifactId: artifact.id,
+              toolExecutionId: execution.id,
+              browserObservationId: browser.id,
+              evidenceType: 'stripe_setup_prep_recorded',
+              sourceType: 'startup_lifecycle',
+              auditEventId: 'audit-stripe-prep',
+              sensitivity: 'restricted',
+              contentHash: `sha256:${'c'.repeat(64)}`,
+              replayRef: prepReplayRef,
+              metadata: {
+                missionNodeId: node.id,
+                artifactId: artifact.id,
+                toolExecutionId: execution.id,
+                browserObservationId: browser.id,
+                humanGates,
+                helmPolicyClasses: ['financial', 'legal', 'credential_handling', 'audit'],
+                restrictedActionsExecuted: false,
+                financialSecretsStoredInEvidence: false,
+                rawConnectorSecretsStoredInEvidence: false,
+              },
+            }),
+          ]
+        : []),
+    ],
+    audits: [
+      auditRow({
+        id: 'audit-stripe-tool',
+        action: 'TOOL_EXECUTION',
+        target: execution.toolKey,
+        verdict: 'allow',
+        metadata: {
+          broker: 'tool_broker_v1',
+          toolKey: execution.toolKey,
+          toolExecutionId: execution.id,
+          evidenceItemId: 'evidence-stripe-tool',
+          policyDecisionId: execution.policyDecisionId,
+          policyVersion: execution.policyVersion,
+        },
+      }),
+      auditRow({
+        id: 'audit-stripe-browser',
+        action: 'BROWSER_OBSERVATION_CAPTURED',
+        actor: `browser:${browser.sessionId}`,
+        target: browser.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceItemId: 'evidence-stripe-browser',
+          helmDecisionId: 'stripe-browser-decision-1',
+          helmPolicyVersion: 'founder-ops-v1',
+        },
+      }),
+      auditRow({
+        id: 'audit-stripe-artifact',
+        action: 'ARTIFACT_CREATED',
+        target: artifact.id,
+        verdict: 'created',
+        metadata: {
+          evidenceItemId: 'evidence-stripe-artifact',
+          evidenceType: 'artifact_created',
+          replayRef: `artifact:${artifact.id}:1`,
+          artifactId: artifact.id,
+          artifactType: artifact.type,
+          version: 1,
+        },
+      }),
+      ...(includePrepEvidence
+        ? [
+            auditRow({
+              id: 'audit-stripe-prep',
+              action: 'STRIPE_SETUP_PREP_RECORDED',
+              target: node.id,
+              verdict: 'recorded',
+              metadata: {
+                evidenceItemId: 'evidence-stripe-prep',
+                evidenceType: 'stripe_setup_prep_recorded',
+                missionNodeId: node.id,
+                artifactId: artifact.id,
+                toolExecutionId: execution.id,
+                browserObservationId: browser.id,
+                humanGates,
+                helmPolicyClasses: ['financial', 'legal', 'credential_handling', 'audit'],
+                financialPolicyDecisionId: 'stripe-financial-decision-1',
+                financialPolicyVersion: 'founder-ops-v1',
+                legalPolicyDecisionId: 'stripe-legal-decision-1',
+                legalPolicyVersion: 'founder-ops-v1',
+                restrictedActionsExecuted: false,
+                financialSecretsStoredInEvidence: false,
+              },
+            }),
+          ]
+        : []),
+    ],
+  };
+}
+
 function helmReceiptMetadata(pack: EvidencePackRow): Record<string, string | null> {
   return {
     decisionId: pack.decisionId,
@@ -1558,6 +1856,79 @@ function skillInvocationAudit(
 }
 
 describe('createProductionEvalRunner', () => {
+  it('passes stripe_setup_prep from lifecycle, tool, browser, artifact, human-gate, and audit evidence', async () => {
+    const fixture = stripeSetupPrepFixture();
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'stripe_setup_prep',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'stripe_setup_prep',
+      status: 'passed',
+      capabilityKey: 'startup_lifecycle',
+      evidenceRefs: expect.arrayContaining([
+        'stripe-setup-prep:mission-node-stripe-setup-1',
+        'tool:tool-execution-stripe-prep-1',
+        'browser:00000000-0000-4000-8000-000000000011:3',
+        'artifact:artifact-stripe-setup-prep-1:1',
+      ]),
+      auditReceiptRefs: expect.arrayContaining([
+        'audit:audit-stripe-prep',
+        'audit:audit-stripe-tool',
+        'audit:audit-stripe-browser',
+        'audit:audit-stripe-artifact',
+      ]),
+      metadata: {
+        runnerRef: 'gateway:stripe_setup_prep:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedMissionNodeId: 'mission-node-stripe-setup-1',
+        verifiedToolExecutionId: 'tool-execution-stripe-prep-1',
+        verifiedBrowserObservationId: 'browser-observation-stripe-1',
+        verifiedArtifactId: 'artifact-stripe-setup-prep-1',
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({ stepKey: 'completed-stripe-lifecycle-node', status: 'passed' }),
+      expect.objectContaining({
+        stepKey: 'brokered-stripe-plan-and-browser-research',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'artifact-human-gates-and-secret-boundary',
+        status: 'passed',
+      }),
+    ]);
+  });
+
+  it('fails stripe_setup_prep without isolated human-gate prep evidence', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb(stripeSetupPrepFixture({ includePrepEvidence: false })),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'stripe_setup_prep',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('isolated human gates');
+  });
+
   it('passes domain_to_deployment from build, test, DNS/hosting, deployment, browser, rollback evidence, and audit rows', async () => {
     const fixture = domainToDeploymentFixture();
     const runner = createProductionEvalRunner(createRunnerDb(fixture));
@@ -3702,7 +4073,7 @@ describe('createProductionEvalRunner', () => {
 
     const result = await runner.execute({
       workspaceId,
-      evalId: 'stripe_setup_prep',
+      evalId: 'company_formation_prep',
       executionMode: PRODUCTION_READY_EXECUTION_MODE,
       evidenceRefs: [],
       auditReceiptRefs: [],
@@ -3713,7 +4084,7 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain(
-      'No trusted real_external_eval runner is implemented for stripe_setup_prep',
+      'No trusted real_external_eval runner is implemented for company_formation_prep',
     );
   });
 });

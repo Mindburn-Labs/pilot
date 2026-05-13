@@ -219,7 +219,8 @@ export type CapabilityEvalReadinessInventory = z.infer<
   typeof CapabilityEvalReadinessInventorySchema
 >;
 
-export const PRODUCTION_READY_EXECUTION_MODE = 'real_external_eval' as const satisfies PilotEvalExecutionMode;
+export const PRODUCTION_READY_EXECUTION_MODE =
+  'real_external_eval' as const satisfies PilotEvalExecutionMode;
 
 export const pilotProductionEvalSuite: readonly PilotEvalScenario[] = [
   {
@@ -624,7 +625,7 @@ const capabilityRequiredEvalIds: Partial<Record<CapabilityKey, readonly PilotEva
   approval_resume: ['approval_resume_isolation'],
   evidence_ledger: ['helm_governance', 'recovery'],
   command_center: ['command_center_real_state_ux'],
-  startup_lifecycle: ['full_startup_launch'],
+  startup_lifecycle: ['full_startup_launch', 'stripe_setup_prep'],
   founder_off_grid: ['founder_off_grid'],
   polsia_outperformance: ['polsia_outperformance'],
 };

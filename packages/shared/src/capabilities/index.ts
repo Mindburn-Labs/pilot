@@ -501,8 +501,9 @@ const capabilityRecords = validateCapabilityRecords([
       'Gateway exposes /api/startup-lifecycle/missions/:missionId/recover to persist a pre-recovery runtime checkpoint and apply safe internal failed-node retry state without starting execution',
       'Gateway exposes /api/startup-lifecycle/missions/:missionId/rollback to persist a pre-rollback runtime checkpoint and reopen failed, blocked, or awaiting-approval lifecycle nodes without reversing external effects',
       'Gateway real_external_eval runner for Full Startup Launch verifies a completed lifecycle mission DAG, required launch stages, linked task runs, brokered tool evidence, artifact provenance, live deployment and health evidence, checkpoint evidence, and audit receipts before creating promotion eligibility',
+      'Gateway real_external_eval runner for Stripe Setup Prep verifies completed lifecycle node evidence, brokered Stripe setup planning, read-only Stripe browser extraction, redacted setup artifact, isolated human gates, no raw financial secrets, and financial/legal audit receipts before creating promotion eligibility',
     ],
-    evalRequirement: 'Full Startup Launch Eval',
+    evalRequirement: 'Full Startup Launch Eval and Stripe Setup Prep Eval',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,
   },
   {

@@ -765,17 +765,17 @@ describe('evalRoutes', () => {
       execute: vi.fn(
         async (input: {
           workspaceId: string;
-          evalId: 'full_startup_launch';
-          capabilityKey?: 'startup_lifecycle';
+          evalId: 'decision_court_governed_model';
+          capabilityKey?: 'decision_court';
           executionMode: typeof PRODUCTION_READY_EXECUTION_MODE;
         }) => ({
           run: {
             workspaceId: input.workspaceId,
             evalId: input.evalId,
             status: 'passed' as const,
-            capabilityKey: 'startup_lifecycle' as const,
-            evidenceRefs: ['evidence:real-startup-launch'],
-            auditReceiptRefs: ['audit:real-startup-launch'],
+            capabilityKey: 'decision_court' as const,
+            evidenceRefs: ['evidence:real-decision-court'],
+            auditReceiptRefs: ['audit:real-decision-court'],
             metadata: {
               executionMode: 'control_plane_proof_check',
               runnerRef: 'trusted-runner:test',
@@ -803,8 +803,8 @@ describe('evalRoutes', () => {
       'POST',
       '/execute',
       {
-        evalId: 'full_startup_launch',
-        capabilityKey: 'startup_lifecycle',
+        evalId: 'decision_court_governed_model',
+        capabilityKey: 'decision_court',
         executionMode: PRODUCTION_READY_EXECUTION_MODE,
       },
       wsHeader,
@@ -821,8 +821,8 @@ describe('evalRoutes', () => {
     expect(productionEvalRunner.execute).toHaveBeenCalledWith(
       expect.objectContaining({
         workspaceId,
-        evalId: 'full_startup_launch',
-        capabilityKey: 'startup_lifecycle',
+        evalId: 'decision_court_governed_model',
+        capabilityKey: 'decision_court',
         executionMode: PRODUCTION_READY_EXECUTION_MODE,
       }),
     );
@@ -832,32 +832,32 @@ describe('evalRoutes', () => {
     expect(body.promotionChecks).toEqual([
       expect.objectContaining({
         canPromote: true,
-        capability: expect.objectContaining({ key: 'startup_lifecycle' }),
+        capability: expect.objectContaining({ key: 'decision_court' }),
       }),
     ]);
     expect(body.promotions).toEqual([
       expect.objectContaining({
-        capabilityKey: 'startup_lifecycle',
+        capabilityKey: 'decision_court',
         promotedState: 'production_ready',
         status: 'eligible',
       }),
     ]);
     expect(body.productionReadyRegistryMutation).toBe(false);
     expect(inserts.find((insert) => insert.table === evalRuns)?.value).toMatchObject({
-      evalId: 'full_startup_launch',
+      evalId: 'decision_court_governed_model',
       status: 'passed',
-      capabilityKey: 'startup_lifecycle',
+      capabilityKey: 'decision_court',
       metadata: {
         runnerRef: 'trusted-runner:test',
         executionMode: PRODUCTION_READY_EXECUTION_MODE,
       },
     });
     expect(inserts.find((insert) => insert.table === capabilityPromotions)?.value).toMatchObject({
-      capabilityKey: 'startup_lifecycle',
+      capabilityKey: 'decision_court',
       promotedState: 'production_ready',
       status: 'eligible',
-      evidenceRefs: ['evidence:real-startup-launch'],
-      auditReceiptRefs: ['audit:real-startup-launch'],
+      evidenceRefs: ['evidence:real-decision-court'],
+      auditReceiptRefs: ['audit:real-decision-court'],
     });
   });
 
@@ -1042,7 +1042,7 @@ describe('evalRoutes', () => {
     }>(res, 200);
 
     expect(body.check.canPromote).toBe(false);
-    expect(body.check.requiredEval).toBe('Full Startup Launch Eval');
+    expect(body.check.requiredEval).toBe('Full Startup Launch Eval and Stripe Setup Prep Eval');
     expect(body.check.blockers.join(' ')).toContain('No eval run submitted');
   });
 
@@ -1059,6 +1059,16 @@ describe('evalRoutes', () => {
           metadata: realExternalMetadata,
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
+        {
+          evalId: 'stripe_setup_prep',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: 'startup_lifecycle',
+          evidenceRefs: ['evidence:stripe-setup-prep'],
+          auditReceiptRefs: ['audit:stripe-setup-prep'],
+          metadata: realExternalMetadata,
+          completedAt: new Date('2026-05-05T00:00:01.000Z'),
+        },
       ],
     ]);
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
@@ -1074,6 +1084,7 @@ describe('evalRoutes', () => {
       check: {
         canPromote: boolean;
         matchedEvalId: string;
+        matchedEvalIds: string[];
         evidenceRefs: string[];
         auditReceiptRefs: string[];
       };
@@ -1081,8 +1092,15 @@ describe('evalRoutes', () => {
 
     expect(body.check.canPromote).toBe(true);
     expect(body.check.matchedEvalId).toBe('full_startup_launch');
-    expect(body.check.evidenceRefs).toEqual(['evidence:startup-launch']);
-    expect(body.check.auditReceiptRefs).toEqual(['audit:startup-launch']);
+    expect(body.check.matchedEvalIds).toEqual(['full_startup_launch', 'stripe_setup_prep']);
+    expect(body.check.evidenceRefs).toEqual([
+      'evidence:startup-launch',
+      'evidence:stripe-setup-prep',
+    ]);
+    expect(body.check.auditReceiptRefs).toEqual([
+      'audit:startup-launch',
+      'audit:stripe-setup-prep',
+    ]);
   });
 
   it('ignores submitted eval runs for production promotion checks', async () => {
@@ -1135,6 +1153,19 @@ describe('evalRoutes', () => {
           },
           completedAt: new Date('2026-05-05T00:00:00.000Z'),
         },
+        {
+          evalId: 'stripe_setup_prep',
+          workspaceId,
+          status: 'passed',
+          capabilityKey: null,
+          evidenceRefs: ['evidence:stripe-setup-prep'],
+          auditReceiptRefs: ['audit:stripe-setup-prep'],
+          metadata: {
+            ...realExternalMetadata,
+            capabilityKeys: ['startup_lifecycle'],
+          },
+          completedAt: new Date('2026-05-05T00:00:01.000Z'),
+        },
       ],
     ]);
     const { fetch } = testApp(evalRoutes, createMockDeps({ db: db as never }));
@@ -1150,6 +1181,7 @@ describe('evalRoutes', () => {
       check: {
         canPromote: boolean;
         matchedEvalId: string;
+        matchedEvalIds: string[];
         evidenceRefs: string[];
         auditReceiptRefs: string[];
       };
@@ -1157,8 +1189,15 @@ describe('evalRoutes', () => {
 
     expect(body.check.canPromote).toBe(true);
     expect(body.check.matchedEvalId).toBe('full_startup_launch');
-    expect(body.check.evidenceRefs).toEqual(['evidence:startup-launch']);
-    expect(body.check.auditReceiptRefs).toEqual(['audit:startup-launch']);
+    expect(body.check.matchedEvalIds).toEqual(['full_startup_launch', 'stripe_setup_prep']);
+    expect(body.check.evidenceRefs).toEqual([
+      'evidence:startup-launch',
+      'evidence:stripe-setup-prep',
+    ]);
+    expect(body.check.auditReceiptRefs).toEqual([
+      'audit:startup-launch',
+      'audit:stripe-setup-prep',
+    ]);
   });
 
   it('blocks multi-eval promotion checks until every required eval has passed', async () => {
