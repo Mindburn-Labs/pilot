@@ -115,7 +115,7 @@ YC session state is stored separately from OAuth tokens. It powers authenticated
 
 ## Email (Transactional)
 
-Required in production to send magic-link login codes. In development, the `noop` provider logs the code and returns it in the HTTP response.
+Required in production to send magic-link login codes. In development, the `noop` provider does not send email; the local auth route returns the code in the HTTP response and provider logs include only redacted delivery metadata.
 
 | Variable         | Required    | Default                        | Description                                                   |
 | ---------------- | ----------- | ------------------------------ | ------------------------------------------------------------- |

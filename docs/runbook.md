@@ -21,7 +21,7 @@ On-call response procedures, diagnostic commands, and rollback playbooks for ope
 Symptoms: users report not receiving email magic link, or verify returns 401 despite correct code.
 
 - Check `/health` → `checks.db` true?
-- Check `EMAIL_PROVIDER` config — if it reverted to `noop`, codes aren't being sent.
+- Check `EMAIL_PROVIDER` config — if it reverted to `noop`, emails are not sent; only local development auth responses expose the code.
   ```bash
   ssh root@$DO_DROPLET_IP 'cd /opt/pilot/current && docker compose -f infra/digitalocean/docker-compose.yml exec pilot env | grep EMAIL'
   ```
