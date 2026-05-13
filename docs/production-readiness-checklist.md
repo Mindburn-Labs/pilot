@@ -31,7 +31,7 @@ This checklist is operational. It does not make production autonomy claims. A ca
 | `approval_resume`            | `implemented` | Approval Resume Isolation Regression proving deterministic parent-only replay and child-row exclusion                                                                             |
 | `evidence_ledger`            | `prototype`   | HELM Governance Eval plus Recovery Eval proving every meaningful action has durable evidence/audit linkage or fails closed                                                        |
 | `command_center`             | `prototype`   | Command Center Real-State UX Eval proving durable state surfaces answer what Pilot is doing, why allowed, evidence, outcome, and founder requirements                             |
-| `startup_lifecycle`          | `prototype`   | Full Startup Launch Eval over compiled lifecycle DAGs, escalation contracts, recovery, and acceptance criteria                                                                    |
+| `startup_lifecycle`          | `prototype`   | Full Startup Launch Eval and Stripe Setup Prep Eval over compiled lifecycle DAGs, escalation contracts, recovery, payment prep, and acceptance criteria                           |
 | `founder_off_grid`           | `blocked`     | Controlled Founder-Off-Grid Eval with budget/risk limits, escalation inbox, recovery, emergency stop, evidence, and receipts                                                      |
 | `polsia_outperformance`      | `blocked`     | Polsia Outperformance Proof plus external-world autonomy eval results                                                                                                             |
 

@@ -58,6 +58,25 @@ const FULL_STARTUP_LAUNCH_REQUIRED_STAGES = [
 const FULL_STARTUP_MIN_TOOL_PROOFS = 3;
 const DOMAIN_TO_DEPLOYMENT_BUILD_TERMS = ['build', 'compile', 'bundle'] as const;
 const DOMAIN_TO_DEPLOYMENT_TEST_TERMS = ['test', 'lint', 'typecheck'] as const;
+const STRIPE_SETUP_REQUIRED_TOOLS = [
+  'stripe_connector',
+  'artifact_writer',
+  'browser_read_extract',
+] as const;
+const STRIPE_SETUP_REQUIRED_POLICY_CLASSES = [
+  'financial',
+  'legal',
+  'credential_handling',
+  'audit',
+] as const;
+const STRIPE_SETUP_ESCALATION_TERMS = ['identity', 'bank', 'charge', 'payout', 'legal'] as const;
+const STRIPE_SETUP_REQUIRED_HUMAN_GATES = [
+  'identity_verification',
+  'bank_information',
+  'payouts',
+  'charges',
+  'legal_attestation',
+] as const;
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
@@ -97,6 +116,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       }
       if (input.evalId === 'domain_to_deployment') {
         return executeDomainToDeploymentEval(db, input);
+      }
+      if (input.evalId === 'stripe_setup_prep') {
+        return executeStripeSetupPrepEval(db, input);
       }
       if (input.evalId === 'safe_computer_sandbox_action') {
         return executeSafeComputerSandboxEval(db, input);
@@ -314,6 +336,143 @@ async function executeDomainToDeploymentEval(
           completedAt,
           metadata: {
             deploymentId: proof.deployment.id,
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function executeStripeSetupPrepEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const nodeRows = await db
+    .select()
+    .from(missionNodes)
+    .where(eq(missionNodes.workspaceId, input.workspaceId))
+    .orderBy(desc(missionNodes.completedAt), desc(missionNodes.updatedAt), desc(missionNodes.id))
+    .limit(500);
+  const executionRows = await db
+    .select()
+    .from(toolExecutions)
+    .where(eq(toolExecutions.workspaceId, input.workspaceId))
+    .orderBy(desc(toolExecutions.completedAt), desc(toolExecutions.id))
+    .limit(500);
+  const browserRows = await db
+    .select()
+    .from(browserObservations)
+    .where(eq(browserObservations.workspaceId, input.workspaceId))
+    .orderBy(desc(browserObservations.observedAt), desc(browserObservations.replayIndex))
+    .limit(500);
+  const artifactRows = await db
+    .select()
+    .from(artifacts)
+    .where(eq(artifacts.workspaceId, input.workspaceId))
+    .orderBy(desc(artifacts.updatedAt), desc(artifacts.id))
+    .limit(500);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(2000);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(2000);
+
+  const proof = findStripeSetupPrepProof({
+    workspaceId: input.workspaceId,
+    nodeRows,
+    executionRows,
+    browserRows,
+    artifactRows,
+    evidenceRows,
+    auditRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Stripe Setup Prep Eval requires a completed stripe_setup_prep lifecycle node, brokered Stripe setup tool evidence, read-only Stripe browser extraction, redacted setup artifact, isolated human gates, no raw financial secrets, and durable financial/legal audit receipts',
+    );
+  }
+
+  const evidenceRefs = [
+    evidenceRef(proof.prepEvidence),
+    evidenceRef(proof.toolEvidence),
+    evidenceRef(proof.browserEvidence),
+    evidenceRef(proof.artifactEvidence),
+  ];
+  const auditReceiptRefs = [
+    auditRef(proof.prepAudit),
+    auditRef(proof.toolAudit),
+    auditRef(proof.browserAudit),
+    auditRef(proof.artifactAudit),
+  ];
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'stripe_setup_prep',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'startup_lifecycle',
+      runRef: input.runRef ?? `real-external-eval:stripe-setup-prep:${randomUUID()}`,
+      summary:
+        'Stripe Setup Prep Eval verified a completed lifecycle node, brokered Stripe setup plan, read-only Stripe browser extraction, redacted artifact, isolated human gates, no raw financial secrets, and financial/legal audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:stripe_setup_prep:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedMissionNodeId: proof.node.id,
+        verifiedToolExecutionId: proof.toolExecution.id,
+        verifiedBrowserObservationId: proof.browserObservation.id,
+        verifiedArtifactId: proof.artifact.id,
+        verifiedHumanGates: getStringArray(proof.prepEvidence.metadata, 'humanGates'),
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'completed-stripe-lifecycle-node',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.prepEvidence)],
+          auditReceiptRefs: [auditRef(proof.prepAudit)],
+          completedAt,
+          metadata: {
+            missionNodeId: proof.node.id,
+            missionId: proof.node.missionId,
+            requiredTools: proof.node.requiredTools,
+            helmPolicyClasses: proof.node.helmPolicyClasses,
+          },
+        },
+        {
+          stepKey: 'brokered-stripe-plan-and-browser-research',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.toolEvidence), evidenceRef(proof.browserEvidence)],
+          auditReceiptRefs: [auditRef(proof.toolAudit), auditRef(proof.browserAudit)],
+          completedAt,
+          metadata: {
+            toolExecutionId: proof.toolExecution.id,
+            toolKey: proof.toolExecution.toolKey,
+            browserObservationId: proof.browserObservation.id,
+            browserOrigin: proof.browserObservation.origin,
+          },
+        },
+        {
+          stepKey: 'artifact-human-gates-and-secret-boundary',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.artifactEvidence), evidenceRef(proof.prepEvidence)],
+          auditReceiptRefs: [auditRef(proof.artifactAudit), auditRef(proof.prepAudit)],
+          completedAt,
+          metadata: {
+            artifactId: proof.artifact.id,
+            humanGates: getStringArray(proof.prepEvidence.metadata, 'humanGates'),
+            restrictedActionsExecuted: false,
+            financialSecretsStoredInEvidence: false,
           },
         },
       ],
@@ -2908,6 +3067,369 @@ type DomainComputerProof = {
   audit: AuditRow;
 };
 
+type StripeSetupPrepProof = {
+  node: MissionNodeRow;
+  toolExecution: ToolExecutionRow;
+  toolEvidence: EvidenceItemRow;
+  toolAudit: AuditRow;
+  browserObservation: BrowserObservationRow;
+  browserEvidence: EvidenceItemRow;
+  browserAudit: AuditRow;
+  artifact: ArtifactRow;
+  artifactEvidence: EvidenceItemRow;
+  artifactAudit: AuditRow;
+  prepEvidence: EvidenceItemRow;
+  prepAudit: AuditRow;
+};
+
+function findStripeSetupPrepProof(params: {
+  workspaceId: string;
+  nodeRows: MissionNodeRow[];
+  executionRows: ToolExecutionRow[];
+  browserRows: BrowserObservationRow[];
+  artifactRows: ArtifactRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): StripeSetupPrepProof | undefined {
+  for (const node of params.nodeRows) {
+    if (!isStripeSetupPrepNode(node)) continue;
+
+    const artifact = params.artifactRows.find((row) => isStripeSetupArtifact(row, node));
+    if (!artifact) continue;
+    const artifactEvidence = params.evidenceRows.find((row) =>
+      isStripeSetupArtifactEvidence(row, artifact, node),
+    );
+    if (!artifactEvidence) continue;
+    const artifactAudit = params.auditRows.find((row) =>
+      isFullStartupArtifactAudit(row, artifactEvidence, artifact),
+    );
+    if (!artifactAudit) continue;
+
+    const toolExecution = params.executionRows.find((row) =>
+      isStripeSetupToolExecution(row, node, artifact),
+    );
+    if (!toolExecution) continue;
+    const toolEvidence = params.evidenceRows.find((row) =>
+      isStripeSetupToolEvidence(row, toolExecution),
+    );
+    if (!toolEvidence) continue;
+    const toolAudit = params.auditRows.find((row) =>
+      isStripeSetupToolAudit(row, toolEvidence, toolExecution),
+    );
+    if (!toolAudit) continue;
+
+    const browser = findStripeSetupBrowserProof({
+      browserRows: params.browserRows,
+      evidenceRows: params.evidenceRows,
+      auditRows: params.auditRows,
+    });
+    if (!browser) continue;
+
+    const prepEvidence = params.evidenceRows.find((row) =>
+      isStripeSetupPrepEvidence(row, node, artifact, toolExecution, browser.observation),
+    );
+    if (!prepEvidence) continue;
+    const prepAudit = params.auditRows.find((row) =>
+      isStripeSetupPrepAudit(row, prepEvidence, node, artifact, toolExecution, browser.observation),
+    );
+    if (!prepAudit) continue;
+
+    return {
+      node,
+      toolExecution,
+      toolEvidence,
+      toolAudit,
+      browserObservation: browser.observation,
+      browserEvidence: browser.evidence,
+      browserAudit: browser.audit,
+      artifact,
+      artifactEvidence,
+      artifactAudit,
+      prepEvidence,
+      prepAudit,
+    };
+  }
+  return undefined;
+}
+
+function isStripeSetupPrepNode(row: MissionNodeRow): boolean {
+  return Boolean(
+    row.stage === 'stripe_setup_prep' &&
+    row.status === 'completed' &&
+    row.completedAt &&
+    arrayContainsAll(row.requiredTools, [...STRIPE_SETUP_REQUIRED_TOOLS]) &&
+    arrayContainsAll(row.helmPolicyClasses, [...STRIPE_SETUP_REQUIRED_POLICY_CLASSES]) &&
+    stringArrayContainsAllTerms(row.requiredEvidence, ['pricing', 'stripe setup', 'human gate']) &&
+    stringArrayContainsAllTerms(row.escalationConditions, [...STRIPE_SETUP_ESCALATION_TERMS]),
+  );
+}
+
+function isStripeSetupArtifact(row: ArtifactRow, node: MissionNodeRow): boolean {
+  const metadata = isRecord(row.metadata) ? row.metadata : undefined;
+  return Boolean(
+    row.workspaceId === node.workspaceId &&
+    ['application', 'copy', 'pdf'].includes(row.type) &&
+    row.storagePath &&
+    metadata &&
+    (metadata['evalId'] === 'stripe_setup_prep' ||
+      metadata['lifecycleStage'] === 'stripe_setup_prep' ||
+      metadata['missionNodeId'] === node.id) &&
+    metadata['productionReady'] === false &&
+    metadata['restrictedActionsExecuted'] === false &&
+    metadata['financialSecretsStoredInArtifact'] === false &&
+    metadata['rawConnectorSecretsStoredInArtifact'] === false &&
+    hasMetadataString(metadata, 'pricingRationaleRef') &&
+    hasMetadataString(metadata, 'stripeSetupChecklistRef') &&
+    hasMetadataString(metadata, 'webhookPlanRef') &&
+    hasMetadataString(metadata, 'humanGateListRef'),
+  );
+}
+
+function isStripeSetupArtifactEvidence(
+  row: EvidenceItemRow,
+  artifact: ArtifactRow,
+  node: MissionNodeRow,
+): boolean {
+  return Boolean(
+    isFullStartupArtifactEvidence(row, artifact) &&
+    (row.sensitivity === 'internal' || row.sensitivity === 'restricted') &&
+    hasMetadataValue(row.metadata, 'tool', 'create_artifact') &&
+    (hasMetadataValue(row.metadata, 'evalId', 'stripe_setup_prep') ||
+      hasMetadataValue(row.metadata, 'lifecycleStage', 'stripe_setup_prep') ||
+      hasMetadataValue(row.metadata, 'missionNodeId', node.id)) &&
+    isRecord(row.metadata) &&
+    row.metadata['financialSecretsStoredInEvidence'] === false &&
+    row.metadata['rawConnectorSecretsStoredInEvidence'] === false,
+  );
+}
+
+function isStripeSetupToolExecution(
+  row: ToolExecutionRow,
+  node: MissionNodeRow,
+  artifact: ArtifactRow,
+): boolean {
+  return Boolean(
+    ['stripe_setup_prep', 'stripe_connector'].includes(row.toolKey) &&
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.outputHash &&
+    row.idempotencyKey &&
+    Array.isArray(row.evidenceIds) &&
+    row.evidenceIds.length > 0 &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
+    isStripeSetupToolOutput(row.sanitizedOutput, node, artifact),
+  );
+}
+
+function isStripeSetupToolOutput(
+  value: unknown,
+  node: MissionNodeRow,
+  artifact: ArtifactRow,
+): boolean {
+  if (!isRecord(value)) return false;
+  return Boolean(
+    value['mode'] === 'stripe_setup_prep' &&
+    value['missionNodeId'] === node.id &&
+    value['artifactId'] === artifact.id &&
+    value['productionReady'] === false &&
+    value['restrictedActionsExecuted'] === false &&
+    value['financialSecretsStoredInOutput'] === false &&
+    value['rawConnectorSecretsStoredInOutput'] === false &&
+    isNonEmptyArray(value['products']) &&
+    isNonEmptyArray(value['prices']) &&
+    isRecord(value['webhookPlan']) &&
+    isNonEmptyArray(value['setupChecklist']) &&
+    arrayContainsAll(value['humanGates'], [...STRIPE_SETUP_REQUIRED_HUMAN_GATES]) &&
+    arrayContainsAll(value['requiredEscalations'], [...STRIPE_SETUP_REQUIRED_HUMAN_GATES]),
+  );
+}
+
+function isStripeSetupToolEvidence(row: EvidenceItemRow, execution: ToolExecutionRow): boolean {
+  return Boolean(
+    row.toolExecutionId === execution.id &&
+    row.actionId === execution.actionId &&
+    row.evidenceType === 'tool_execution_completed' &&
+    row.sourceType === 'tool_broker' &&
+    row.auditEventId &&
+    row.replayRef === `tool:${execution.id}` &&
+    row.contentHash === execution.outputHash &&
+    Array.isArray(execution.evidenceIds) &&
+    execution.evidenceIds.includes(row.id) &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'stripe_setup_checklist') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'pricing_rationale') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'webhook_plan') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'human_gate_list') &&
+    isRecord(row.metadata) &&
+    row.metadata['restrictedActionsExecuted'] === false &&
+    row.metadata['financialSecretsStoredInEvidence'] === false,
+  );
+}
+
+function isStripeSetupToolAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  execution: ToolExecutionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === execution.workspaceId &&
+    row.action === 'TOOL_EXECUTION' &&
+    row.target === execution.toolKey &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+  );
+}
+
+function findStripeSetupBrowserProof(params: {
+  browserRows: BrowserObservationRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}):
+  | {
+      observation: BrowserObservationRow;
+      evidence: EvidenceItemRow;
+      audit: AuditRow;
+    }
+  | undefined {
+  for (const observation of params.browserRows) {
+    if (!isStripeSetupBrowserObservation(observation)) continue;
+    const evidence = params.evidenceRows.find(
+      (row) => row.browserObservationId === observation.id && findBrowserEvidence(row),
+    );
+    if (!evidence) continue;
+    const audit = params.auditRows.find((row) =>
+      isStripeSetupBrowserAudit(row, evidence, observation),
+    );
+    if (!audit) continue;
+    return { observation, evidence, audit };
+  }
+  return undefined;
+}
+
+function isStripeSetupBrowserObservation(row: BrowserObservationRow): boolean {
+  return Boolean(
+    isStripeUrl(row.url, row.origin) &&
+    row.domHash &&
+    row.redactedDomSnapshot &&
+    row.screenshotHash &&
+    row.screenshotRef &&
+    row.replayIndex !== null &&
+    row.replayIndex !== undefined &&
+    isRecord(row.extractedData) &&
+    isNonEmptyArray(row.extractedData['products']) &&
+    isNonEmptyArray(row.extractedData['pricingModels']) &&
+    isNonEmptyArray(row.extractedData['webhookEvents']) &&
+    arrayContainsAll(row.extractedData['humanGates'], [...STRIPE_SETUP_REQUIRED_HUMAN_GATES]) &&
+    Array.isArray(row.redactions) &&
+    hasMetadataValue(row.metadata, 'credentialBoundary', BROWSER_CREDENTIAL_BOUNDARY) &&
+    hasMetadataString(row.metadata, 'helmDecisionId') &&
+    hasMetadataString(row.metadata, 'helmPolicyVersion') &&
+    isRecord(row.metadata) &&
+    row.metadata['rawCookiesExported'] === false &&
+    row.metadata['rawFinancialSecretsStored'] === false,
+  );
+}
+
+function isStripeSetupBrowserAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  observation: BrowserObservationRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === observation.workspaceId &&
+    row.action === 'BROWSER_OBSERVATION_CAPTURED' &&
+    row.target === observation.id &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataString(row.metadata, 'helmDecisionId') &&
+    hasMetadataString(row.metadata, 'helmPolicyVersion'),
+  );
+}
+
+function isStripeSetupPrepEvidence(
+  row: EvidenceItemRow,
+  node: MissionNodeRow,
+  artifact: ArtifactRow,
+  execution: ToolExecutionRow,
+  observation: BrowserObservationRow,
+): boolean {
+  return Boolean(
+    row.workspaceId === node.workspaceId &&
+    row.missionId === node.missionId &&
+    row.artifactId === artifact.id &&
+    row.toolExecutionId === execution.id &&
+    row.browserObservationId === observation.id &&
+    row.evidenceType === 'stripe_setup_prep_recorded' &&
+    row.sourceType === 'startup_lifecycle' &&
+    row.auditEventId &&
+    row.replayRef === `stripe-setup-prep:${node.id}` &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'restricted' &&
+    hasMetadataValue(row.metadata, 'missionNodeId', node.id) &&
+    hasMetadataValue(row.metadata, 'artifactId', artifact.id) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'browserObservationId', observation.id) &&
+    arrayContainsAll(isRecord(row.metadata) ? row.metadata['humanGates'] : undefined, [
+      ...STRIPE_SETUP_REQUIRED_HUMAN_GATES,
+    ]) &&
+    arrayContainsAll(isRecord(row.metadata) ? row.metadata['helmPolicyClasses'] : undefined, [
+      ...STRIPE_SETUP_REQUIRED_POLICY_CLASSES,
+    ]) &&
+    isRecord(row.metadata) &&
+    row.metadata['restrictedActionsExecuted'] === false &&
+    row.metadata['financialSecretsStoredInEvidence'] === false &&
+    row.metadata['rawConnectorSecretsStoredInEvidence'] === false,
+  );
+}
+
+function isStripeSetupPrepAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  node: MissionNodeRow,
+  artifact: ArtifactRow,
+  execution: ToolExecutionRow,
+  observation: BrowserObservationRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === node.workspaceId &&
+    row.action === 'STRIPE_SETUP_PREP_RECORDED' &&
+    row.target === node.id &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'stripe_setup_prep_recorded') &&
+    hasMetadataValue(row.metadata, 'missionNodeId', node.id) &&
+    hasMetadataValue(row.metadata, 'artifactId', artifact.id) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'browserObservationId', observation.id) &&
+    hasMetadataString(row.metadata, 'financialPolicyDecisionId') &&
+    hasMetadataString(row.metadata, 'financialPolicyVersion') &&
+    hasMetadataString(row.metadata, 'legalPolicyDecisionId') &&
+    hasMetadataString(row.metadata, 'legalPolicyVersion') &&
+    arrayContainsAll(isRecord(row.metadata) ? row.metadata['humanGates'] : undefined, [
+      ...STRIPE_SETUP_REQUIRED_HUMAN_GATES,
+    ]) &&
+    arrayContainsAll(isRecord(row.metadata) ? row.metadata['helmPolicyClasses'] : undefined, [
+      ...STRIPE_SETUP_REQUIRED_POLICY_CLASSES,
+    ]) &&
+    isRecord(row.metadata) &&
+    row.metadata['restrictedActionsExecuted'] === false &&
+    row.metadata['financialSecretsStoredInEvidence'] === false,
+  );
+}
+
 type DomainToDeploymentProof = {
   target: DeployTargetRow;
   targetEvidence: EvidenceItemRow;
@@ -4089,6 +4611,18 @@ function isYcUrl(url: string, origin: string): boolean {
   });
 }
 
+function isStripeUrl(url: string, origin: string): boolean {
+  return [url, origin].some((value) => {
+    try {
+      const parsed = new URL(value);
+      const hostname = parsed.hostname.toLowerCase();
+      return hostname === 'stripe.com' || hostname.endsWith('.stripe.com');
+    } catch {
+      return false;
+    }
+  });
+}
+
 function isSameOriginOrUrl(candidate: string, expected: string): boolean {
   try {
     const candidateUrl = new URL(candidate);
@@ -4100,6 +4634,15 @@ function isSameOriginOrUrl(candidate: string, expected: string): boolean {
   } catch {
     return false;
   }
+}
+
+function stringArrayContainsAllTerms(value: unknown, terms: readonly string[]): boolean {
+  if (!Array.isArray(value)) return false;
+  return terms.every((term) =>
+    value.some(
+      (entry) => typeof entry === 'string' && entry.toLowerCase().includes(term.toLowerCase()),
+    ),
+  );
 }
 
 function hasPolicyMetadata(row: ComputerActionRow): boolean {
@@ -4258,7 +4801,8 @@ function arrayContainsAll(value: unknown, expected: string[]): boolean {
   return Array.isArray(value) && expected.every((entry) => value.includes(entry));
 }
 
-function getStringArray(metadata: Record<string, unknown>, key: string): string[] {
+function getStringArray(metadata: unknown, key: string): string[] {
+  if (!isRecord(metadata)) return [];
   const value = metadata[key];
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === 'string')
