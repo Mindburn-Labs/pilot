@@ -976,7 +976,7 @@ export class ManagedTelegramBotService {
     await ctx.reply('Thanks. Your message reached the founder team.');
     if (!message) return;
     if (!draft) {
-      await this.notifySupportMessage(row, message).catch(() => {});
+      await this.notifySupportMessage(row, message);
       return;
     }
 
@@ -1005,7 +1005,7 @@ export class ManagedTelegramBotService {
         );
         return;
       } catch (err) {
-        if (sendAudit) await this.markSendAuditFailed(message, sendAudit, err).catch(() => {});
+        if (sendAudit) await this.markSendAuditFailed(message, sendAudit, err);
         if (telegramSent) throw err;
         // Fall back to approval below.
       }
@@ -1065,7 +1065,34 @@ export class ManagedTelegramBotService {
 
   private async notifySupportMessage(row: ManagedBotRow, message: ManagedMessageRow) {
     if (!this.supportNotifier) return;
-    await this.supportNotifier(row.workspaceId, message.id, row.telegramBotUsername);
+    try {
+      await this.supportNotifier(row.workspaceId, message.id, row.telegramBotUsername);
+    } catch (err) {
+      await this.recordMessageSideEffectFailure({
+        message,
+        actor: `managed_telegram_bot:${row.id}`,
+        action: 'TELEGRAM_CHILD_SUPPORT_NOTIFICATION_FAILED',
+        evidenceType: 'managed_telegram_support_notification_failed',
+        title: 'Managed Telegram support notification failed',
+        summary:
+          'A managed Telegram support message was captured, but founder notification delivery failed after intake evidence was persisted.',
+        replayRef: `managed-telegram-message:${message.id}:support-notification-failed`,
+        governanceKey: 'supportNotificationFailedEvidence',
+        failureMetadata: {
+          managedBotId: row.id,
+          messageId: message.id,
+          telegramBotUsernameHash: stableHash(row.telegramBotUsername),
+          telegramChatIdHash: stableHash(message.telegramChatId),
+          telegramUserIdHash: stableHash(message.telegramUserId),
+          notificationChannel: 'support_notifier',
+          notificationStatus: 'failed',
+          error: errorMessage(err),
+          rawTelegramIdentityStoredInEvidence: false,
+          rawNotifierPayloadStoredInEvidence: false,
+        },
+        error: err,
+      });
+    }
   }
 
   private async buildSupportDraft(
@@ -1103,6 +1130,7 @@ export class ManagedTelegramBotService {
   private async requestReplyApproval(message: ManagedMessageRow, draft: string) {
     const reason = `Support reply draft for Telegram user ${message.telegramUserId}`;
     let approvalId: string | undefined;
+    let approvalGovernanceMetadata = message.governanceMetadata;
     await this.opts.db.transaction(async (tx) => {
       const db = tx as unknown as Db;
       const approvalEvidence = await appendManagedTelegramControlEvidence(db, {
@@ -1130,6 +1158,11 @@ export class ManagedTelegramBotService {
         })
         .returning();
       approvalId = approval?.id;
+      approvalGovernanceMetadata = appendGovernanceMetadata(
+        message.governanceMetadata,
+        'approvalRequestEvidence',
+        managedTelegramControlEvidenceMetadata(approvalEvidence),
+      );
 
       await db
         .update(managedTelegramBotMessages)
@@ -1137,11 +1170,7 @@ export class ManagedTelegramBotService {
           approvalId,
           replyText: draft,
           replyStatus: 'awaiting_approval',
-          governanceMetadata: appendGovernanceMetadata(
-            message.governanceMetadata,
-            'approvalRequestEvidence',
-            managedTelegramControlEvidenceMetadata(approvalEvidence),
-          ),
+          governanceMetadata: approvalGovernanceMetadata,
           updatedAt: new Date(),
         })
         .where(
@@ -1153,13 +1182,91 @@ export class ManagedTelegramBotService {
     });
 
     if (approvalId && this.approvalNotifier) {
-      await this.approvalNotifier(
-        message.workspaceId,
-        approvalId,
-        TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
-        reason,
-      ).catch(() => {});
+      try {
+        await this.approvalNotifier(
+          message.workspaceId,
+          approvalId,
+          TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+          reason,
+        );
+      } catch (err) {
+        await this.recordMessageSideEffectFailure({
+          message: { ...message, governanceMetadata: approvalGovernanceMetadata },
+          actor: `managed_telegram_bot:${message.managedBotId}`,
+          action: 'TELEGRAM_CHILD_SEND_APPROVAL_NOTIFICATION_FAILED',
+          evidenceType: 'managed_telegram_send_approval_notification_failed',
+          title: 'Managed Telegram send approval notification failed',
+          summary:
+            'A managed Telegram send approval was created, but founder notification delivery failed after approval evidence was persisted.',
+          replayRef: `managed-telegram-message:${message.id}:approval-notification-failed`,
+          governanceKey: 'approvalNotificationFailedEvidence',
+          failureMetadata: {
+            managedBotId: message.managedBotId,
+            messageId: message.id,
+            approvalId,
+            telegramChatIdHash: stableHash(message.telegramChatId),
+            telegramUserIdHash: stableHash(message.telegramUserId),
+            notificationChannel: 'approval_notifier',
+            notificationStatus: 'failed',
+            error: errorMessage(err),
+            rawTelegramIdentityStoredInEvidence: false,
+            rawNotifierPayloadStoredInEvidence: false,
+          },
+          error: err,
+        });
+      }
     }
+  }
+
+  private async recordMessageSideEffectFailure(input: {
+    message: ManagedMessageRow;
+    actor: string;
+    action: string;
+    evidenceType: string;
+    title: string;
+    summary: string;
+    replayRef: string;
+    governanceKey: string;
+    failureMetadata: Record<string, unknown>;
+    error: unknown;
+  }) {
+    const failureEvidence = await this.opts.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      const evidence = await appendManagedTelegramControlEvidence(db, {
+        workspaceId: input.message.workspaceId,
+        actor: input.actor,
+        action: input.action,
+        target: input.message.id,
+        evidenceType: input.evidenceType,
+        title: input.title,
+        summary: input.summary,
+        replayRef: input.replayRef,
+        sensitivity: 'confidential',
+        metadata: input.failureMetadata,
+        auditVerdict: 'failed',
+        auditReason: errorMessage(input.error),
+      });
+
+      await db
+        .update(managedTelegramBotMessages)
+        .set({
+          error: errorMessage(input.error),
+          governanceMetadata: appendGovernanceMetadata(
+            input.message.governanceMetadata,
+            input.governanceKey,
+            managedTelegramControlEvidenceMetadata(evidence),
+          ),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(managedTelegramBotMessages.id, input.message.id),
+            eq(managedTelegramBotMessages.workspaceId, input.message.workspaceId),
+          ),
+        );
+      return evidence;
+    });
+    return failureEvidence;
   }
 
   private async sendMessageRow(
@@ -1366,8 +1473,40 @@ export class ManagedTelegramBotService {
       }),
     );
     await setWebhook(token, url, secret);
-    await setCommands(token);
-    return managedTelegramWebhookGovernanceMetadata(governance, evidence);
+    let commandFailureEvidence:
+      | {
+          auditEventId: string;
+          evidenceItemId: string;
+        }
+      | undefined;
+    try {
+      await setCommands(token);
+    } catch (err) {
+      commandFailureEvidence = await this.opts.db.transaction(async (tx) =>
+        appendManagedTelegramControlEvidence(tx as unknown as Db, {
+          workspaceId: row.workspaceId,
+          actor: options.actor,
+          action: TELEGRAM_MANAGED_ACTIONS.SET_WEBHOOK,
+          target: row.id,
+          evidenceType: 'managed_telegram_commands_setup_failed',
+          title: 'Managed Telegram command setup failed',
+          summary:
+            'Telegram webhook setup completed, but child bot command registration failed and was recorded for retry.',
+          replayRef: `${options.replayRef}:commands-setup-failed`,
+          sensitivity: 'restricted',
+          metadata: {
+            ...managedTelegramWebhookControlMetadata(row, url, governance),
+            setupAction: 'setMyCommands',
+            setupStatus: 'failed',
+            error: errorMessage(err),
+            rawTelegramApiResponseStoredInEvidence: false,
+          },
+          auditVerdict: 'failed',
+          auditReason: errorMessage(err),
+        }),
+      );
+    }
+    return managedTelegramWebhookGovernanceMetadata(governance, evidence, commandFailureEvidence);
   }
 
   private async getActiveBot(workspaceId: string) {
@@ -1510,7 +1649,7 @@ async function setCommands(token: string) {
       { command: 'start', description: 'Open launch and support options' },
       { command: 'help', description: 'Get help' },
     ],
-  }).catch(() => {});
+  });
 }
 
 async function sendTelegramMessage(token: string, chatId: string, text: string) {
@@ -1786,6 +1925,10 @@ function managedTelegramWebhookGovernanceMetadata(
     auditEventId: string;
     evidenceItemId: string;
   },
+  commandFailureEvidence?: {
+    auditEventId: string;
+    evidenceItemId: string;
+  },
 ) {
   return {
     ...(governance ?? {
@@ -1798,6 +1941,9 @@ function managedTelegramWebhookGovernanceMetadata(
       policyPin: null,
     }),
     evidence: managedTelegramControlEvidenceMetadata(evidence),
+    commandSetupFailedEvidence: commandFailureEvidence
+      ? managedTelegramControlEvidenceMetadata(commandFailureEvidence)
+      : undefined,
   };
 }
 
