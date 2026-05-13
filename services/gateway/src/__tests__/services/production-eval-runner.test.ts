@@ -9,6 +9,7 @@ import {
   computerActions,
   deployHealth,
   deployments,
+  deployTargets,
   evidenceItems,
   evidencePacks,
   missionEdges,
@@ -55,6 +56,7 @@ type TaskRow = typeof tasks.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
 type ArtifactRow = typeof artifacts.$inferSelect;
+type DeployTargetRow = typeof deployTargets.$inferSelect;
 type DeploymentRow = typeof deployments.$inferSelect;
 type DeployHealthRow = typeof deployHealth.$inferSelect;
 type OpportunityRow = typeof opportunities.$inferSelect;
@@ -77,6 +79,7 @@ function createRunnerDb({
   taskRunRows = [],
   handoffRows = [],
   artifactRows = [],
+  deployTargetRows = [],
   deploymentRows = [],
   deployHealthRows = [],
   opportunityRows = [],
@@ -98,6 +101,7 @@ function createRunnerDb({
   taskRunRows?: TaskRunRow[];
   handoffRows?: AgentHandoffRow[];
   artifactRows?: ArtifactRow[];
+  deployTargetRows?: DeployTargetRow[];
   deploymentRows?: DeploymentRow[];
   deployHealthRows?: DeployHealthRow[];
   opportunityRows?: OpportunityRow[];
@@ -138,17 +142,19 @@ function createRunnerDb({
                                       ? handoffRows
                                       : table === artifacts
                                         ? artifactRows
-                                        : table === deployments
-                                          ? deploymentRows
-                                          : table === deployHealth
-                                            ? deployHealthRows
-                                            : table === opportunities
-                                              ? opportunityRows
-                                              : table === opportunityScores
-                                                ? scoreRows
-                                                : table === toolExecutions
-                                                  ? toolExecutionRows
-                                                  : [];
+                                        : table === deployTargets
+                                          ? deployTargetRows
+                                          : table === deployments
+                                            ? deploymentRows
+                                            : table === deployHealth
+                                              ? deployHealthRows
+                                              : table === opportunities
+                                                ? opportunityRows
+                                                : table === opportunityScores
+                                                  ? scoreRows
+                                                  : table === toolExecutions
+                                                    ? toolExecutionRows
+                                                    : [];
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -347,6 +353,24 @@ function artifactRow(overrides: Partial<ArtifactRow> = {}): ArtifactRow {
     currentVersion: 1,
     createdAt: new Date('2026-05-12T00:12:00.000Z'),
     updatedAt: new Date('2026-05-12T00:12:00.000Z'),
+    ...overrides,
+  };
+}
+
+function deployTargetRow(overrides: Partial<DeployTargetRow> = {}): DeployTargetRow {
+  return {
+    id: 'deploy-target-1',
+    workspaceId,
+    name: 'digitalocean-production',
+    provider: 'digitalocean',
+    config: {
+      domain: 'launch.example.com',
+      dnsProvider: 'cloudflare',
+      dnsRecordRef: 'dns-record-launch-1',
+    },
+    isActive: true,
+    createdAt: new Date('2026-05-12T00:10:00.000Z'),
+    updatedAt: new Date('2026-05-12T00:10:00.000Z'),
     ...overrides,
   };
 }
@@ -965,6 +989,389 @@ function fullStartupLaunchFixture({ includeHealth = true }: { includeHealth?: bo
   };
 }
 
+function domainToDeploymentFixture({
+  includeRollback = true,
+}: { includeRollback?: boolean } = {}): {
+  actions: ComputerActionRow[];
+  browser: BrowserObservationRow[];
+  deployTargetRows: DeployTargetRow[];
+  artifactRows: ArtifactRow[];
+  deploymentRows: DeploymentRow[];
+  deployHealthRows: DeployHealthRow[];
+  evidence: EvidenceItemRow[];
+  audits: AuditRow[];
+} {
+  const target = deployTargetRow();
+  const artifact = artifactRow({
+    id: 'artifact-domain-landing-1',
+    metadata: { evalId: 'domain_to_deployment' },
+  });
+  const deployment = deploymentRow({
+    id: 'deployment-domain-1',
+    targetId: target.id,
+    artifactId: artifact.id,
+    url: 'https://launch.example.com',
+    metadata: {
+      providerId: 'do-app-domain-1',
+      providerDeploymentId: 'provider-domain-deployment-1',
+      governance: launchGovernanceMetadata('DEPLOY', 'deploy-decision-domain-1'),
+    },
+  });
+  const health = deployHealthRow({
+    id: 'deploy-health-domain-1',
+    deploymentId: deployment.id,
+  });
+  const buildAction = computerAction({
+    id: 'computer-domain-build-1',
+    objective: 'Build landing page for domain-to-deployment eval',
+    command: 'npm',
+    args: ['run', 'build'],
+    outputHash: `sha256:${'b'.repeat(64)}`,
+    policyDecisionId: 'computer-build-decision-domain-1',
+    policyVersion: 'founder-ops-v1',
+    metadata: {
+      evalId: 'domain_to_deployment',
+      stage: 'build',
+      artifactId: artifact.id,
+      deploymentId: deployment.id,
+    },
+  });
+  const testAction = computerAction({
+    id: 'computer-domain-test-1',
+    objective: 'Run test gate for domain-to-deployment eval',
+    command: 'npm',
+    args: ['test'],
+    outputHash: `sha256:${'c'.repeat(64)}`,
+    policyDecisionId: 'computer-test-decision-domain-1',
+    policyVersion: 'founder-ops-v1',
+    metadata: {
+      evalId: 'domain_to_deployment',
+      stage: 'test',
+      artifactId: artifact.id,
+      deploymentId: deployment.id,
+    },
+  });
+  const browser = browserObservation({
+    id: 'browser-observation-domain-1',
+    url: deployment.url!,
+    origin: 'https://launch.example.com',
+    title: 'Launch landing page',
+    objective: 'Verify live deployment renders',
+    domHash: `sha256:${'d'.repeat(64)}`,
+    screenshotHash: `sha256:${'5'.repeat(64)}`,
+    screenshotRef: 'browser/domain-to-deployment/screenshot.png',
+    redactedDomSnapshot: '<html><main>Launch</main></html>',
+    extractedData: {
+      headline: 'Launch evidence automation startup',
+      deploymentId: deployment.id,
+    },
+    redactions: [],
+    metadata: {
+      credentialBoundary: browserCredentialBoundary,
+      helmDecisionId: 'browser-decision-domain-1',
+      helmPolicyVersion: 'founder-ops-v1',
+      deploymentId: deployment.id,
+    },
+  });
+  const deployReplayRef = 'launch:workspace:deploy:audit-domain-deploy';
+  const healthReplayRef = 'launch:workspace:deploy_health_check:audit-domain-health';
+  const rollbackReplayRef = `launch:${workspaceId}:deploy_rollback_plan:audit-domain-rollback-plan`;
+  const deploymentGovernance = launchGovernanceMetadata('DEPLOY', 'deploy-decision-domain-1');
+  const healthGovernance = launchGovernanceMetadata(
+    'DEPLOY_HEALTH_CHECK',
+    'health-decision-domain-1',
+  );
+
+  return {
+    actions: [buildAction, testAction],
+    browser: [browser],
+    deployTargetRows: [target],
+    artifactRows: [artifact],
+    deploymentRows: [deployment],
+    deployHealthRows: [health],
+    evidence: [
+      evidenceItem({
+        id: 'evidence-domain-build',
+        computerActionId: buildAction.id,
+        evidenceType: 'computer_action',
+        sourceType: 'operator_computer_use',
+        auditEventId: 'audit-domain-build',
+        contentHash: buildAction.outputHash,
+        replayRef: `computer:${buildAction.id}:0`,
+        metadata: {
+          evalId: 'domain_to_deployment',
+          stage: 'build',
+          status: 'completed',
+          artifactId: artifact.id,
+          deploymentId: deployment.id,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-domain-test',
+        computerActionId: testAction.id,
+        evidenceType: 'computer_action',
+        sourceType: 'operator_computer_use',
+        auditEventId: 'audit-domain-test',
+        contentHash: testAction.outputHash,
+        replayRef: `computer:${testAction.id}:1`,
+        metadata: {
+          evalId: 'domain_to_deployment',
+          stage: 'test',
+          status: 'completed',
+          artifactId: artifact.id,
+          deploymentId: deployment.id,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-domain-target',
+        computerActionId: null,
+        evidenceType: 'deploy_target_created',
+        sourceType: 'gateway_launch',
+        auditEventId: 'audit-domain-target',
+        sensitivity: 'restricted',
+        contentHash: null,
+        replayRef: `deploy-target:${workspaceId}:${target.id}:created`,
+        metadata: {
+          targetId: target.id,
+          targetName: target.name,
+          provider: target.provider,
+          configKeys: ['dnsProvider', 'dnsRecordRef', 'domain'],
+          configValuesStoredInEvidence: false,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-domain-artifact',
+        computerActionId: null,
+        artifactId: artifact.id,
+        evidenceType: 'artifact_created',
+        sourceType: 'tool_registry',
+        auditEventId: 'audit-domain-artifact',
+        sensitivity: 'internal',
+        contentHash: `sha256:${'6'.repeat(64)}`,
+        storageRef: artifact.storagePath,
+        replayRef: `artifact:${artifact.id}:1`,
+        metadata: {
+          artifactType: artifact.type,
+          version: 1,
+          mimeType: artifact.mimeType,
+          sizeBytes: artifact.sizeBytes,
+          storageMode: 'inline_artifact_metadata',
+          tool: 'create_artifact',
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-domain-deploy',
+        computerActionId: null,
+        evidenceType: 'launch_deployment_requested',
+        sourceType: 'gateway_launch',
+        auditEventId: 'audit-domain-deploy',
+        sensitivity: 'restricted',
+        contentHash: null,
+        replayRef: deployReplayRef,
+        metadata: {
+          evidenceType: 'launch_deployment_requested',
+          replayRef: deployReplayRef,
+          action: 'DEPLOY',
+          executionStatus: 'pending',
+          targetId: target.id,
+          provider: target.provider,
+          imageProvided: true,
+          secretValuesStoredInEvidence: false,
+          governance: deploymentGovernance,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-domain-health',
+        computerActionId: null,
+        evidenceType: 'launch_deployment_health_check_requested',
+        sourceType: 'gateway_launch',
+        auditEventId: 'audit-domain-health',
+        sensitivity: 'restricted',
+        contentHash: null,
+        replayRef: healthReplayRef,
+        metadata: {
+          evidenceType: 'launch_deployment_health_check_requested',
+          replayRef: healthReplayRef,
+          action: 'DEPLOY_HEALTH_CHECK',
+          executionStatus: 'pending',
+          deploymentId: deployment.id,
+          healthCheckId: health.id,
+          secretValuesStoredInEvidence: false,
+          governance: healthGovernance,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-domain-browser',
+        computerActionId: null,
+        browserObservationId: browser.id,
+        evidenceType: 'browser_observation',
+        sourceType: 'gateway_browser_session',
+        auditEventId: 'audit-domain-browser',
+        sensitivity: 'sensitive',
+        contentHash: browser.domHash,
+        storageRef: browser.screenshotRef,
+        replayRef: `browser:${browser.sessionId}:3`,
+        metadata: {
+          sessionId: browser.sessionId,
+          grantId: browser.grantId,
+          browserActionId: browser.browserActionId,
+          url: browser.url,
+          origin: browser.origin,
+          credentialBoundary: browserCredentialBoundary,
+          helmDecisionId: 'browser-decision-domain-1',
+          helmPolicyVersion: 'founder-ops-v1',
+          deploymentId: deployment.id,
+        },
+      }),
+      ...(includeRollback
+        ? [
+            evidenceItem({
+              id: 'evidence-domain-rollback-plan',
+              computerActionId: null,
+              evidenceType: 'launch_deployment_rollback_plan_recorded',
+              sourceType: 'gateway_launch',
+              auditEventId: 'audit-domain-rollback-plan',
+              sensitivity: 'restricted',
+              contentHash: `sha256:${'7'.repeat(64)}`,
+              replayRef: rollbackReplayRef,
+              metadata: {
+                evidenceType: 'launch_deployment_rollback_plan_recorded',
+                replayRef: rollbackReplayRef,
+                deploymentId: deployment.id,
+                targetVersion: 'launch-v0',
+                rollbackPlanRef: 'artifact:rollback-plan-domain-1',
+                secretValuesStoredInEvidence: false,
+              },
+            }),
+          ]
+        : []),
+    ],
+    audits: [
+      auditRow({
+        id: 'audit-domain-build',
+        action: 'OPERATOR_COMPUTER_USE',
+        target: buildAction.id,
+        verdict: 'allow',
+        metadata: {
+          computerActionId: buildAction.id,
+          evidenceItemId: 'evidence-domain-build',
+          stage: 'build',
+        },
+      }),
+      auditRow({
+        id: 'audit-domain-test',
+        action: 'OPERATOR_COMPUTER_USE',
+        target: testAction.id,
+        verdict: 'allow',
+        metadata: {
+          computerActionId: testAction.id,
+          evidenceItemId: 'evidence-domain-test',
+          stage: 'test',
+        },
+      }),
+      auditRow({
+        id: 'audit-domain-target',
+        action: 'DEPLOY_TARGET_CREATED',
+        target: target.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceType: 'deploy_target_created',
+          evidenceItemId: 'evidence-domain-target',
+          replayRef: `deploy-target:${workspaceId}:${target.id}:created`,
+          targetId: target.id,
+          targetName: target.name,
+          provider: target.provider,
+          configKeys: ['dnsProvider', 'dnsRecordRef', 'domain'],
+          configValuesStoredInEvidence: false,
+        },
+      }),
+      auditRow({
+        id: 'audit-domain-artifact',
+        action: 'ARTIFACT_CREATED',
+        target: artifact.id,
+        verdict: 'created',
+        metadata: {
+          evidenceItemId: 'evidence-domain-artifact',
+          evidenceType: 'artifact_created',
+          replayRef: `artifact:${artifact.id}:1`,
+          artifactId: artifact.id,
+          artifactType: artifact.type,
+          version: 1,
+        },
+      }),
+      auditRow({
+        id: 'audit-domain-deploy',
+        action: 'DEPLOY',
+        target: `${target.provider}:${target.id}`,
+        verdict: 'allow',
+        metadata: {
+          evidenceItemId: 'evidence-domain-deploy',
+          evidenceType: 'launch_deployment_requested',
+          replayRef: deployReplayRef,
+          action: 'DEPLOY',
+          executionStatus: 'completed',
+          deploymentId: deployment.id,
+          providerDeploymentId: 'provider-domain-deployment-1',
+          providerStatus: 'live',
+          urlRecorded: true,
+          governance: deploymentGovernance,
+        },
+      }),
+      auditRow({
+        id: 'audit-domain-health',
+        action: 'DEPLOY_HEALTH_CHECK',
+        target: deployment.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceItemId: 'evidence-domain-health',
+          evidenceType: 'launch_deployment_health_check_requested',
+          replayRef: healthReplayRef,
+          action: 'DEPLOY_HEALTH_CHECK',
+          executionStatus: 'completed',
+          deploymentId: deployment.id,
+          healthStatus: health.status,
+          providerStatus: 'healthy',
+          governance: healthGovernance,
+        },
+      }),
+      auditRow({
+        id: 'audit-domain-browser',
+        action: 'BROWSER_OBSERVATION_CAPTURED',
+        actor: `browser:${browser.sessionId}`,
+        target: browser.id,
+        verdict: 'allow',
+        metadata: {
+          grantId: browser.grantId,
+          browserActionId: browser.browserActionId,
+          url: browser.url,
+          origin: browser.origin,
+          helmDecisionId: 'browser-decision-domain-1',
+          helmPolicyVersion: 'founder-ops-v1',
+          evidenceItemId: 'evidence-domain-browser',
+        },
+      }),
+      ...(includeRollback
+        ? [
+            auditRow({
+              id: 'audit-domain-rollback-plan',
+              action: 'DEPLOY_ROLLBACK_PLAN',
+              target: deployment.id,
+              verdict: 'recorded',
+              metadata: {
+                evidenceItemId: 'evidence-domain-rollback-plan',
+                evidenceType: 'launch_deployment_rollback_plan_recorded',
+                replayRef: rollbackReplayRef,
+                deploymentId: deployment.id,
+                targetVersion: 'launch-v0',
+                rollbackPlanRef: 'artifact:rollback-plan-domain-1',
+              },
+            }),
+          ]
+        : []),
+    ],
+  };
+}
+
 function helmReceiptMetadata(pack: EvidencePackRow): Record<string, string | null> {
   return {
     decisionId: pack.decisionId,
@@ -1151,6 +1558,85 @@ function skillInvocationAudit(
 }
 
 describe('createProductionEvalRunner', () => {
+  it('passes domain_to_deployment from build, test, DNS/hosting, deployment, browser, rollback evidence, and audit rows', async () => {
+    const fixture = domainToDeploymentFixture();
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'domain_to_deployment',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'domain_to_deployment',
+      status: 'passed',
+      evidenceRefs: expect.arrayContaining([
+        'computer:computer-domain-build-1:0',
+        'computer:computer-domain-test-1:1',
+        `deploy-target:${workspaceId}:deploy-target-1:created`,
+        'artifact:artifact-domain-landing-1:1',
+        'launch:workspace:deploy:audit-domain-deploy',
+        'launch:workspace:deploy_health_check:audit-domain-health',
+        'browser:00000000-0000-4000-8000-000000000011:3',
+        `launch:${workspaceId}:deploy_rollback_plan:audit-domain-rollback-plan`,
+      ]),
+      auditReceiptRefs: expect.arrayContaining([
+        'audit:audit-domain-build',
+        'audit:audit-domain-test',
+        'audit:audit-domain-target',
+        'audit:audit-domain-artifact',
+        'audit:audit-domain-deploy',
+        'audit:audit-domain-health',
+        'audit:audit-domain-browser',
+        'audit:audit-domain-rollback-plan',
+      ]),
+      metadata: {
+        runnerRef: 'gateway:domain_to_deployment:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedDeployTargetId: 'deploy-target-1',
+        verifiedArtifactId: 'artifact-domain-landing-1',
+        verifiedDeploymentId: 'deployment-domain-1',
+        verifiedDeployHealthId: 'deploy-health-domain-1',
+        verifiedBrowserObservationId: 'browser-observation-domain-1',
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({ stepKey: 'build-and-test-evidence', status: 'passed' }),
+      expect.objectContaining({ stepKey: 'dns-hosting-target-evidence', status: 'passed' }),
+      expect.objectContaining({
+        stepKey: 'artifact-deployment-health-browser-proof',
+        status: 'passed',
+      }),
+      expect.objectContaining({ stepKey: 'rollback-plan-evidence', status: 'passed' }),
+    ]);
+  });
+
+  it('fails domain_to_deployment without rollback-plan evidence', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb(domainToDeploymentFixture({ includeRollback: false })),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'domain_to_deployment',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('rollback-plan evidence');
+  });
+
   it('passes full_startup_launch from completed mission DAG, tools, artifact, deployment, health, evidence, and audit rows', async () => {
     const fixture = fullStartupLaunchFixture();
     const runner = createProductionEvalRunner(createRunnerDb(fixture));
@@ -3216,7 +3702,7 @@ describe('createProductionEvalRunner', () => {
 
     const result = await runner.execute({
       workspaceId,
-      evalId: 'domain_to_deployment',
+      evalId: 'stripe_setup_prep',
       executionMode: PRODUCTION_READY_EXECUTION_MODE,
       evidenceRefs: [],
       auditReceiptRefs: [],
@@ -3227,7 +3713,7 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain(
-      'No trusted real_external_eval runner is implemented for domain_to_deployment',
+      'No trusted real_external_eval runner is implemented for stripe_setup_prep',
     );
   });
 });
