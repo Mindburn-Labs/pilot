@@ -190,6 +190,30 @@ export function connectorRoutes(deps: GatewayDeps) {
     const ownership = await requireOwnedGrant(deps, c, name, grantId);
     if (ownership instanceof Response) return ownership;
 
+    const tokenIntent = await appendConnectorEvidenceProof(deps, {
+      workspaceId: ownership.workspaceId,
+      connector,
+      evidenceType: 'connector_token_store_requested',
+      title: `Connector token store requested: ${connector.name}`,
+      summary: `Encrypted token storage was requested for ${name}`,
+      replayRef: `connector:${name}:token-store-requested:${grantId}`,
+      hashContent: {
+        connectorId: name,
+        grantId,
+        hasRefreshToken: Boolean(refreshToken),
+        expiresAt: expiresAt ?? null,
+        requestedAction: 'store_connector_token',
+      },
+      metadata: {
+        grantId,
+        hasRefreshToken: Boolean(refreshToken),
+        expiresAt: expiresAt ?? null,
+        effectOrder: 'before_token_store',
+        requestedAction: 'store_connector_token',
+        credentialBoundary: 'encrypted_at_rest_no_token_material_in_evidence',
+      },
+    });
+
     await deps.connectors.storeToken(
       grantId,
       accessToken,
@@ -216,7 +240,11 @@ export function connectorRoutes(deps: GatewayDeps) {
         credentialBoundary: 'encrypted_at_rest_no_token_material_in_evidence',
       },
     });
-    return c.json({ stored: true, evidenceItemId });
+    return c.json({
+      stored: true,
+      evidenceItemId,
+      requestEvidenceItemId: tokenIntent.evidenceItemId,
+    });
   });
 
   app.post('/:name/session', async (c) => {
@@ -238,6 +266,30 @@ export function connectorRoutes(deps: GatewayDeps) {
 
     const ownership = await requireOwnedGrant(deps, c, name, parsed.data.grantId);
     if (ownership instanceof Response) return ownership;
+
+    const sessionIntent = await appendConnectorEvidenceProof(deps, {
+      workspaceId: ownership.workspaceId,
+      connector,
+      evidenceType: 'connector_session_store_requested',
+      title: `Connector session store requested: ${connector.name}`,
+      summary: `Encrypted browser session storage was requested for ${name}`,
+      replayRef: `connector:${name}:session-store-requested:${parsed.data.grantId}`,
+      hashContent: {
+        connectorId: name,
+        grantId: parsed.data.grantId,
+        sessionType: parsed.data.sessionType,
+        metadataKeys: sortedKeys(parsed.data.metadata),
+        requestedAction: 'store_connector_session',
+      },
+      metadata: {
+        grantId: parsed.data.grantId,
+        sessionType: parsed.data.sessionType,
+        metadataKeys: sortedKeys(parsed.data.metadata),
+        effectOrder: 'before_session_store',
+        requestedAction: 'store_connector_session',
+        credentialBoundary: 'session_encrypted_at_rest_no_cookie_export_in_evidence',
+      },
+    });
 
     await deps.connectors.storeSession(
       parsed.data.grantId,
@@ -265,7 +317,11 @@ export function connectorRoutes(deps: GatewayDeps) {
         credentialBoundary: 'session_encrypted_at_rest_no_cookie_export_in_evidence',
       },
     });
-    return c.json({ stored: true, evidenceItemId });
+    return c.json({
+      stored: true,
+      evidenceItemId,
+      requestEvidenceItemId: sessionIntent.evidenceItemId,
+    });
   });
 
   app.post('/:name/session/validate', async (c) => {

@@ -393,16 +393,40 @@ describe('connectorRoutes', () => {
         },
         wsHeader,
       );
-      const body = await expectJson<{ stored: boolean; evidenceItemId: string }>(res, 200);
+      const body = await expectJson<{
+        stored: boolean;
+        evidenceItemId: string;
+        requestEvidenceItemId: string;
+      }>(res, 200);
       expect(body.stored).toBe(true);
-      expect(body.evidenceItemId).toBe('evidence-item-1');
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
       expect(connectors.storeToken).toHaveBeenCalledWith(
         'grant-1',
         'ghp_abc123',
         undefined,
         undefined,
       );
+      const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        connectors.storeToken.mock.invocationCallOrder[0]!,
+      );
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_token_store_requested',
+        replayRef: 'connector:github:token-store-requested:grant-1',
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          grantId: 'grant-1',
+          effectOrder: 'before_token_store',
+          requestedAction: 'store_connector_token',
+          credentialBoundary: 'encrypted_at_rest_no_token_material_in_evidence',
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_token_stored',
         replayRef: 'connector:github:token:grant-1',
@@ -413,6 +437,27 @@ describe('connectorRoutes', () => {
         }),
       });
       expect(JSON.stringify(evidence)).not.toContain('ghp_abc123');
+    });
+
+    it('does not store token when request evidence persistence fails', async () => {
+      const connectors = createConnectorsMock();
+      connectors.getGrantByWorkspaceConnector.mockResolvedValue(ownedGrant);
+      const deps = createMockDeps({ connectors: connectors as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch(
+        'POST',
+        '/github/token',
+        {
+          grantId: 'grant-1',
+          accessToken: 'ghp_abc123',
+        },
+        wsHeader,
+      );
+
+      expect(res.status).toBe(500);
+      expect(connectors.storeToken).not.toHaveBeenCalled();
     });
 
     it('rejects token storage for a cross-workspace grantId', async () => {
@@ -461,16 +506,41 @@ describe('connectorRoutes', () => {
         },
         wsHeader,
       );
-      const body = await expectJson<{ stored: boolean; evidenceItemId: string }>(res, 200);
+      const body = await expectJson<{
+        stored: boolean;
+        evidenceItemId: string;
+        requestEvidenceItemId: string;
+      }>(res, 200);
       expect(body.stored).toBe(true);
-      expect(body.evidenceItemId).toBe('evidence-item-1');
+      expect(body.requestEvidenceItemId).toBe('evidence-item-1');
+      expect(body.evidenceItemId).toBe('evidence-item-2');
       expect(connectors.storeSession).toHaveBeenCalledWith(
         grantId,
         { cookies: [] },
         'browser_storage_state',
         undefined,
       );
+      const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        connectors.storeSession.mock.invocationCallOrder[0]!,
+      );
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_session_store_requested',
+        replayRef: `connector:yc:session-store-requested:${grantId}`,
+        metadata: expect.objectContaining({
+          connectorId: 'yc',
+          grantId,
+          sessionType: 'browser_storage_state',
+          effectOrder: 'before_session_store',
+          requestedAction: 'store_connector_session',
+          credentialBoundary: 'session_encrypted_at_rest_no_cookie_export_in_evidence',
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_session_stored',
         replayRef: `connector:yc:session:${grantId}`,
@@ -482,6 +552,32 @@ describe('connectorRoutes', () => {
         }),
       });
       expect(JSON.stringify(evidence)).not.toContain('cookies');
+    });
+
+    it('does not store session when request evidence persistence fails', async () => {
+      const connectors = createConnectorsMock();
+      connectors.getGrantByWorkspaceConnector.mockResolvedValue({
+        ...ownedGrant,
+        id: '00000000-0000-4000-8000-000000000001',
+      });
+      const deps = createMockDeps({ connectors: connectors as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+      const grantId = '00000000-0000-4000-8000-000000000001';
+
+      const res = await fetch(
+        'POST',
+        '/yc/session',
+        {
+          grantId,
+          sessionData: { cookies: [] },
+          sessionType: 'browser_storage_state',
+        },
+        wsHeader,
+      );
+
+      expect(res.status).toBe(500);
+      expect(connectors.storeSession).not.toHaveBeenCalled();
     });
 
     it('rejects session storage for a cross-workspace grantId', async () => {
