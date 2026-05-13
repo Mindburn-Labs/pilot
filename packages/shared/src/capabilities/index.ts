@@ -274,6 +274,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Browser session creation and active-tab grant APIs fail closed without HELM governance and persist access-boundary decision metadata before read/extract can occur',
       'Browser actions and observations persist URL, origin, title, redacted DOM, DOM hash, screenshot refs, extracted data, redactions, replay ordering, and HELM evidence pack id',
       'Gateway /api/browser-sessions/observations fails closed when HELM is not configured',
+      'Gateway real_external_eval runner for YC Logged-In Browser Extraction verifies durable browser_observations rows through linked evidence_items and BROWSER_OBSERVATION_CAPTURED audit_log rows before creating promotion eligibility',
     ],
     evalRequirement: 'YC Logged-In Browser Extraction Eval',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,
