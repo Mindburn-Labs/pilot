@@ -1,6 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { appendEvidenceItem } from '@pilot/db';
 import { type Db } from '@pilot/db/client';
-import { evidencePacks } from '@pilot/db/schema';
+import { auditLog, evidencePacks } from '@pilot/db/schema';
 import { type HelmReceipt } from '@pilot/helm-client';
 
 export async function persistHelmReceipt(db: Db, receipt: HelmReceipt) {
@@ -13,6 +14,7 @@ export async function persistHelmReceipt(db: Db, receipt: HelmReceipt) {
 
   await db.transaction(async (tx) => {
     const receiptDb = tx as unknown as Db;
+    const auditEventId = randomUUID();
     const [pack] = await receiptDb
       .insert(evidencePacks)
       .values({
@@ -34,8 +36,29 @@ export async function persistHelmReceipt(db: Db, receipt: HelmReceipt) {
       throw new Error(`Cannot index HELM receipt evidence: ${receipt.decisionId}`);
     }
 
+    await receiptDb.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId,
+      action: 'HELM_RECEIPT_PERSISTED',
+      actor: 'helm-client',
+      target: receipt.decisionId,
+      verdict: receipt.verdict,
+      reason: receipt.reason ?? null,
+      metadata: {
+        evidencePackId: pack.id,
+        decisionId: receipt.decisionId,
+        verdict: receipt.verdict,
+        policyVersion: receipt.policyVersion,
+        action: receipt.action,
+        resource: receipt.resource,
+        principal: receipt.principal,
+        receiptId: receipt.receiptId ?? null,
+      },
+    });
+
     await appendEvidenceItem(receiptDb, {
       workspaceId,
+      auditEventId,
       evidencePackId: pack.id,
       evidenceType: 'helm_receipt',
       sourceType: 'helm_client',
