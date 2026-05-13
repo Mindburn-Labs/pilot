@@ -92,6 +92,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'multi_agent_parallel_build') {
         return executeMultiAgentParallelBuildEval(db, input);
       }
+      if (input.evalId === 'command_center_real_state_ux') {
+        return executeCommandCenterRealStateUxEval(db, input);
+      }
       return failedRun(
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
@@ -809,6 +812,107 @@ async function executeMultiAgentParallelBuildEval(
             childTaskRunIds: proof.childRuns.map((row) => row.id),
             toolExecutionIds: proof.toolProofs.map((item) => item.execution.id),
             agentNames,
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function executeCommandCenterRealStateUxEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(1000);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(1000);
+
+  const evidence = evidenceRows.find((row) => isCommandCenterRealStateUxEvidence(row));
+  const audit = evidence
+    ? auditRows.find((row) => isCommandCenterRealStateUxAudit(row, evidence))
+    : undefined;
+
+  if (!evidence || !audit) {
+    return failedRun(
+      input,
+      'Command Center Real-State UX Eval requires durable command-center API fixture, UI screenshot, accessibility report, non-production capability labels, replay evidence, and a linked audit receipt',
+    );
+  }
+
+  const metadata = evidence.metadata as Record<string, unknown>;
+  const evidenceReference = evidenceRef(evidence);
+  const auditReference = auditRef(audit);
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'command_center_real_state_ux',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'command_center',
+      runRef: input.runRef ?? `real-external-eval:command-center-real-state-ux:${randomUUID()}`,
+      summary:
+        'Verified command-center real-state UX evidence for durable API state, screenshot proof, accessibility report, non-production labels, replay surfaces, and linked audit receipt.',
+      evidenceRefs: [evidenceReference],
+      auditReceiptRefs: [auditReference],
+      metadata: {
+        runnerRef: 'gateway:command_center_real_state_ux:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedEvidenceItemId: evidence.id,
+        verifiedAuditEventId: audit.id,
+        apiResponseFixtureRef: metadata['apiResponseFixtureRef'],
+        uiScreenshotRef: metadata['uiScreenshotRef'],
+        accessibilityReportRef: metadata['accessibilityReportRef'],
+        durableStateSurfaces: metadata['durableStateSurfaces'],
+        capabilityStatesRendered: metadata['capabilityStatesRendered'],
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'durable-command-center-api-fixture',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: {
+            apiResponseFixtureRef: metadata['apiResponseFixtureRef'],
+            apiResponseFixtureHash: metadata['apiResponseFixtureHash'],
+            durableStateSurfaces: metadata['durableStateSurfaces'],
+          },
+        },
+        {
+          stepKey: 'ui-screenshot-and-replay-surfaces',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: {
+            uiScreenshotRef: metadata['uiScreenshotRef'],
+            uiScreenshotHash: metadata['uiScreenshotHash'],
+            replayRef: evidence.replayRef,
+          },
+        },
+        {
+          stepKey: 'accessibility-and-claim-control',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: {
+            accessibilityReportRef: metadata['accessibilityReportRef'],
+            accessibilityReportHash: metadata['accessibilityReportHash'],
+            capabilityStatesRendered: metadata['capabilityStatesRendered'],
+            routeLocalMockState: metadata['routeLocalMockState'],
+            productionReadyClaims: metadata['productionReadyClaims'],
           },
         },
       ],
@@ -2326,6 +2430,64 @@ function hasArtifactDiffProof(proof: {
   );
 }
 
+function isCommandCenterRealStateUxEvidence(row: EvidenceItemRow): boolean {
+  if (
+    row.evidenceType !== 'command_center_real_state_ux' ||
+    row.sourceType !== 'command_center_eval' ||
+    row.redactionState !== 'redacted' ||
+    row.sensitivity !== 'internal' ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash) ||
+    !isRecord(row.metadata)
+  ) {
+    return false;
+  }
+
+  return (
+    row.metadata['commandCenterEvalVersion'] === 'command-center-real-state-ux.v1' &&
+    row.metadata['executionMode'] === PRODUCTION_READY_EXECUTION_MODE &&
+    row.metadata['capabilityMatrixRendered'] === true &&
+    row.metadata['routeLocalMockState'] === false &&
+    row.metadata['productionReadyClaims'] === false &&
+    hasMetadataString(row.metadata, 'apiResponseFixtureRef') &&
+    isSha256ContentHash(stringMetadata(row.metadata, 'apiResponseFixtureHash')) &&
+    hasMetadataString(row.metadata, 'uiScreenshotRef') &&
+    isSha256ContentHash(stringMetadata(row.metadata, 'uiScreenshotHash')) &&
+    hasMetadataString(row.metadata, 'accessibilityReportRef') &&
+    isSha256ContentHash(stringMetadata(row.metadata, 'accessibilityReportHash')) &&
+    arrayContainsAll(row.metadata['capabilityStatesRendered'], ['prototype', 'blocked']) &&
+    arrayContainsAll(row.metadata['durableStateSurfaces'], [
+      'mission_graph',
+      'agent_lanes',
+      'action_timeline',
+      'evidence_drawer',
+      'receipt_chips',
+      'browser_computer_replay',
+      'permission_graph',
+      'eval_status',
+      'capability_matrix',
+    ])
+  );
+}
+
+function isCommandCenterRealStateUxAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'COMMAND_CENTER_REAL_STATE_UX_EVAL' &&
+    row.target === 'command_center' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'command_center_real_state_ux') &&
+    hasMetadataValue(row.metadata, 'sourceType', 'command_center_eval') &&
+    hasMetadataValue(row.metadata, 'commandCenterEvalVersion', 'command-center-real-state-ux.v1') &&
+    hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
 function failedRun(
   input: TrustedRealExternalEvalInput,
   reason: string,
@@ -2747,6 +2909,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function hasMetadataString(metadata: unknown, key: string): boolean {
   return isRecord(metadata) && typeof metadata[key] === 'string' && metadata[key].length > 0;
+}
+
+function stringMetadata(metadata: unknown, key: string): string | null {
+  return isRecord(metadata) && typeof metadata[key] === 'string' ? metadata[key] : null;
 }
 
 function hasMetadataValue(metadata: unknown, key: string, expected: string): boolean {
