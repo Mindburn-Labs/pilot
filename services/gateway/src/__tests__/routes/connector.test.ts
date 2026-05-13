@@ -812,7 +812,27 @@ describe('connectorRoutes', () => {
 
       expect(res.status).toBe(200);
       expect(html).toContain('Connected github successfully');
+      expect(deps.oauth.inspectCallbackState).toHaveBeenCalledWith('secret-state');
+      const handleCallback = deps.oauth.handleCallback as ReturnType<typeof vi.fn>;
+      const insertMock = deps.db.insert as unknown as ReturnType<typeof vi.fn>;
+      const firstEvidenceInsertIndex = insertMock.mock.calls.findIndex(
+        (call) => call[0] === evidenceItems,
+      );
+      expect(insertMock.mock.invocationCallOrder[firstEvidenceInsertIndex]!).toBeLessThan(
+        handleCallback.mock.invocationCallOrder[0]!,
+      );
       expect(evidence[0]).toMatchObject({
+        workspaceId: 'ws-1',
+        evidenceType: 'connector_oauth_callback_requested',
+        replayRef: expect.stringMatching(/^connector:github:oauth:callback-requested:/),
+        metadata: expect.objectContaining({
+          connectorId: 'github',
+          effectOrder: 'before_oauth_callback',
+          requestedAction: 'complete_connector_oauth_callback',
+          credentialBoundary: 'oauth_callback_no_raw_code_or_state_evidence',
+        }),
+      });
+      expect(evidence[1]).toMatchObject({
         workspaceId: 'ws-1',
         evidenceType: 'connector_oauth_connected',
         replayRef: 'connector:github:oauth:callback:grant-1',
@@ -824,6 +844,18 @@ describe('connectorRoutes', () => {
       });
       expect(JSON.stringify(evidence)).not.toContain('secret-code');
       expect(JSON.stringify(evidence)).not.toContain('secret-state');
+    });
+
+    it('does not complete OAuth callback when request evidence persistence fails', async () => {
+      const deps = createMockDeps({ connectors: createConnectorsMock() as any });
+      captureEvidenceItemInserts(deps, { failEvidence: true });
+      const { fetch } = testApp(connectorRoutes, deps);
+
+      const res = await fetch('GET', '/github/oauth/callback?code=secret-code&state=secret-state');
+
+      expect(res.status).toBe(500);
+      expect(deps.oauth.inspectCallbackState).toHaveBeenCalledWith('secret-state');
+      expect(deps.oauth.handleCallback).not.toHaveBeenCalled();
     });
   });
 

@@ -104,6 +104,10 @@ export function createMockDeps(
         grantId: 'grant-1',
         scopes: ['repo'],
       })),
+      inspectCallbackState: vi.fn(() => ({
+        connectorId: 'github',
+        workspaceId: 'ws-1',
+      })),
       refreshToken: vi.fn(async () => 'new-token'),
     } as any,
     ...overrides,

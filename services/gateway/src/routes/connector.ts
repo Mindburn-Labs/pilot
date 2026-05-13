@@ -560,6 +560,42 @@ export function connectorRoutes(deps: GatewayDeps) {
       return c.json({ error: 'Missing code or state parameter' }, 400);
     }
 
+    let callbackState: { connectorId: string; workspaceId: string };
+    try {
+      callbackState = deps.oauth.inspectCallbackState(state);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'OAuth callback failed';
+      return c.html(oauthResultPage(false, message));
+    }
+
+    const stateHash = hashJson({ state });
+    await appendConnectorEvidenceProof(deps, {
+      workspaceId: callbackState.workspaceId,
+      connector: {
+        id: callbackState.connectorId,
+        name: callbackState.connectorId,
+        description: callbackState.connectorId,
+        authType: 'oauth2',
+        requiredScopes: [],
+        requiresApproval: true,
+      },
+      evidenceType: 'connector_oauth_callback_requested',
+      title: `Connector OAuth callback requested: ${callbackState.connectorId}`,
+      summary: `OAuth callback completion was requested for ${callbackState.connectorId}`,
+      replayRef: `connector:${callbackState.connectorId}:oauth:callback-requested:${stateHash.slice(7, 23)}`,
+      hashContent: {
+        connectorId: callbackState.connectorId,
+        stateHash,
+        requestedAction: 'complete_connector_oauth_callback',
+      },
+      metadata: {
+        stateHash,
+        effectOrder: 'before_oauth_callback',
+        requestedAction: 'complete_connector_oauth_callback',
+        credentialBoundary: 'oauth_callback_no_raw_code_or_state_evidence',
+      },
+    });
+
     try {
       const result = await deps.oauth.handleCallback({ code, state });
       await appendConnectorEvidence(deps, {
