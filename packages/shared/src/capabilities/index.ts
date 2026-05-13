@@ -324,6 +324,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gate 1 adds a2a_threads and a2a_messages with workspace-scoped persistence',
       'Gateway A2A tasks/send persists threads/messages and tasks/get reloads ordered messages from the database',
       'Route tests reconstruct durable A2A state after route re-instantiation',
+      'Gateway real_external_eval runner for Multi-Agent Parallel Build verifies restart-marked A2A threads, ordered durable messages, dispatch evidence/audit, multiple completed handoffs, child runs, and brokered tool evidence before creating promotion eligibility',
     ],
     evalRequirement: 'Multi-Agent Parallel Build Eval',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,

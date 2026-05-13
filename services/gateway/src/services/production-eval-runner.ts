@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
+  a2aMessages,
+  a2aThreads,
   agentHandoffs,
   auditLog,
   browserObservations,
@@ -37,6 +39,8 @@ type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type A2aThreadRow = typeof a2aThreads.$inferSelect;
+type A2aMessageRow = typeof a2aMessages.$inferSelect;
 type TaskRow = typeof tasks.$inferSelect;
 type TaskRunRow = typeof taskRuns.$inferSelect;
 type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
@@ -84,6 +88,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       }
       if (input.evalId === 'recovery') {
         return executeRecoveryEval(db, input);
+      }
+      if (input.evalId === 'multi_agent_parallel_build') {
+        return executeMultiAgentParallelBuildEval(db, input);
       }
       return failedRun(
         input,
@@ -648,6 +655,160 @@ async function executeRecoveryEval(
             checkpointReplayRef: checkpoint.replayRef,
             recoveryApplyReplayRef: recoveryApply.replayRef,
             recoveredNodeKeys: applyMetadata['recoveredNodeKeys'],
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function executeMultiAgentParallelBuildEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const threadRows = await db
+    .select()
+    .from(a2aThreads)
+    .where(eq(a2aThreads.workspaceId, input.workspaceId))
+    .orderBy(desc(a2aThreads.updatedAt), desc(a2aThreads.id))
+    .limit(100);
+  const taskRows = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.workspaceId, input.workspaceId))
+    .orderBy(desc(tasks.createdAt))
+    .limit(100);
+  const taskIds = taskRows.map((row) => row.id);
+  if (threadRows.length === 0 || taskIds.length === 0) {
+    return failedRun(
+      input,
+      'Multi-Agent Parallel Build Eval requires durable A2A thread state linked to a workspace task',
+    );
+  }
+
+  const messageRows = await db
+    .select()
+    .from(a2aMessages)
+    .where(eq(a2aMessages.workspaceId, input.workspaceId))
+    .orderBy(desc(a2aMessages.createdAt), desc(a2aMessages.sequence), desc(a2aMessages.id))
+    .limit(1000);
+  const runRows = await db
+    .select()
+    .from(taskRuns)
+    .where(inArray(taskRuns.taskId, taskIds))
+    .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id))
+    .limit(1000);
+  const handoffRows = await db
+    .select()
+    .from(agentHandoffs)
+    .where(eq(agentHandoffs.workspaceId, input.workspaceId))
+    .orderBy(desc(agentHandoffs.createdAt), desc(agentHandoffs.id))
+    .limit(500);
+  const executionRows = await db
+    .select()
+    .from(toolExecutions)
+    .where(eq(toolExecutions.workspaceId, input.workspaceId))
+    .orderBy(desc(toolExecutions.completedAt), desc(toolExecutions.id))
+    .limit(1000);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(1000);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(1000);
+
+  const proof = findMultiAgentParallelBuildProof({
+    workspaceId: input.workspaceId,
+    threadRows,
+    messageRows,
+    taskRows,
+    runRows,
+    handoffRows,
+    executionRows,
+    evidenceRows,
+    auditRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Multi-Agent Parallel Build Eval requires a completed restart-verified A2A thread, ordered durable messages, dispatch evidence/audit, at least two completed agent handoffs, completed child runs, and brokered tool evidence/audit including artifact diffs',
+    );
+  }
+
+  const evidenceRefs = [
+    evidenceRef(proof.dispatchEvidence),
+    ...proof.toolProofs.map((item) => evidenceRef(item.evidence)),
+  ];
+  const auditReceiptRefs = [
+    auditRef(proof.dispatchAudit),
+    ...proof.toolProofs.map((item) => auditRef(item.audit)),
+  ];
+  const completedAt = new Date().toISOString();
+  const agentNames = uniqueSorted(proof.handoffs.map((row) => row.toAgent));
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'multi_agent_parallel_build',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'a2a_durable_state',
+      runRef: input.runRef ?? `real-external-eval:multi-agent-parallel-build:${randomUUID()}`,
+      summary:
+        'Multi-Agent Parallel Build Eval verified restart-marked A2A state, durable message replay, multiple completed handoffs, child runs, and brokered tool evidence with audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:multi_agent_parallel_build:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedA2aThreadId: proof.thread.id,
+        verifiedExternalTaskId: proof.thread.externalTaskId,
+        verifiedPilotTaskId: proof.task.id,
+        verifiedMessageSequences: proof.messages.map((row) => row.sequence),
+        verifiedAgentHandoffIds: proof.handoffs.map((row) => row.id),
+        verifiedChildTaskRunIds: proof.childRuns.map((row) => row.id),
+        verifiedToolExecutionIds: proof.toolProofs.map((item) => item.execution.id),
+        verifiedEvidenceItemIds: [
+          proof.dispatchEvidence.id,
+          ...proof.toolProofs.map((item) => item.evidence.id),
+        ],
+        verifiedAuditEventIds: [
+          proof.dispatchAudit.id,
+          ...proof.toolProofs.map((item) => item.audit.id),
+        ],
+        agentNames,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'durable-a2a-restart-replay',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.dispatchEvidence)],
+          auditReceiptRefs: [auditRef(proof.dispatchAudit)],
+          completedAt,
+          metadata: {
+            a2aThreadId: proof.thread.id,
+            externalTaskId: proof.thread.externalTaskId,
+            pilotTaskId: proof.task.id,
+            messageSequences: proof.messages.map((row) => row.sequence),
+          },
+        },
+        {
+          stepKey: 'parallel-agent-tool-evidence',
+          status: 'passed',
+          evidenceRefs: proof.toolProofs.map((item) => evidenceRef(item.evidence)),
+          auditReceiptRefs: proof.toolProofs.map((item) => auditRef(item.audit)),
+          completedAt,
+          metadata: {
+            handoffIds: proof.handoffs.map((row) => row.id),
+            childTaskRunIds: proof.childRuns.map((row) => row.id),
+            toolExecutionIds: proof.toolProofs.map((item) => item.execution.id),
+            agentNames,
           },
         },
       ],
@@ -1899,6 +2060,269 @@ function isPreRecoveryCheckpointAudit(row: AuditRow, evidence: EvidenceItemRow):
     hasMetadataValue(row.metadata, 'checkpointKind', 'pre_recovery') &&
     hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
     hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+type MultiAgentParallelBuildProof = {
+  thread: A2aThreadRow;
+  task: TaskRow;
+  messages: A2aMessageRow[];
+  dispatchEvidence: EvidenceItemRow;
+  dispatchAudit: AuditRow;
+  handoffs: AgentHandoffRow[];
+  childRuns: TaskRunRow[];
+  toolProofs: Array<{
+    execution: ToolExecutionRow;
+    evidence: EvidenceItemRow;
+    audit: AuditRow;
+  }>;
+};
+
+function findMultiAgentParallelBuildProof(params: {
+  workspaceId: string;
+  threadRows: A2aThreadRow[];
+  messageRows: A2aMessageRow[];
+  taskRows: TaskRow[];
+  runRows: TaskRunRow[];
+  handoffRows: AgentHandoffRow[];
+  executionRows: ToolExecutionRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): MultiAgentParallelBuildProof | undefined {
+  for (const thread of params.threadRows) {
+    if (!isRestartVerifiedA2aThread(thread)) continue;
+    const task = params.taskRows.find((row) => row.id === thread.pilotTaskId);
+    if (!task) continue;
+
+    const messages = params.messageRows
+      .filter((row) => row.threadId === thread.id && row.workspaceId === params.workspaceId)
+      .sort((a, b) => a.sequence - b.sequence || a.id.localeCompare(b.id));
+    if (!hasDeterministicA2aMessages(messages)) continue;
+
+    const dispatchEvidence = params.evidenceRows.find((row) => isA2aDispatchEvidence(row, thread));
+    if (!dispatchEvidence) continue;
+    const dispatchAudit = params.auditRows.find((row) =>
+      isA2aDispatchAudit(row, dispatchEvidence, thread),
+    );
+    if (!dispatchAudit) continue;
+
+    const handoffs = params.handoffRows.filter(
+      (row) =>
+        row.workspaceId === params.workspaceId &&
+        row.taskId === task.id &&
+        row.handoffKind === 'subagent_spawn' &&
+        row.status === 'completed' &&
+        row.parentTaskRunId &&
+        row.childTaskRunId &&
+        row.completedAt,
+    );
+    const distinctAgents = uniqueSorted(handoffs.map((row) => row.toAgent));
+    if (handoffs.length < 2 || distinctAgents.length < 2) continue;
+
+    const selectedHandoffs: AgentHandoffRow[] = [];
+    const childRuns: TaskRunRow[] = [];
+    const toolProofs: MultiAgentParallelBuildProof['toolProofs'] = [];
+    for (const handoff of handoffs) {
+      if (selectedHandoffs.some((row) => row.toAgent === handoff.toAgent)) continue;
+      const childRun = params.runRows.find((row) => isParallelBuildChildRun(row, handoff));
+      if (!childRun) continue;
+      const proof = findParallelBuildToolProof({
+        childRun,
+        executionRows: params.executionRows,
+        evidenceRows: params.evidenceRows,
+        auditRows: params.auditRows,
+      });
+      if (!proof) continue;
+      selectedHandoffs.push(handoff);
+      childRuns.push(childRun);
+      toolProofs.push(proof);
+      if (selectedHandoffs.length >= 2 && toolProofs.some((item) => hasArtifactDiffProof(item))) {
+        return {
+          thread,
+          task,
+          messages,
+          dispatchEvidence,
+          dispatchAudit,
+          handoffs: selectedHandoffs,
+          childRuns,
+          toolProofs,
+        };
+      }
+    }
+  }
+  return undefined;
+}
+
+function isRestartVerifiedA2aThread(row: A2aThreadRow): boolean {
+  if (
+    row.status !== 'completed' ||
+    !row.completedAt ||
+    !row.pilotTaskId ||
+    typeof row.externalTaskId !== 'string' ||
+    row.externalTaskId.length === 0 ||
+    !isRecord(row.metadata)
+  ) {
+    return false;
+  }
+  return (
+    row.metadata['conductStatus'] === 'completed' &&
+    row.metadata['restartVerified'] === true &&
+    typeof row.metadata['dispatchEvidenceItemId'] === 'string' &&
+    row.metadata['dispatchEvidenceItemId'].length > 0
+  );
+}
+
+function hasDeterministicA2aMessages(rows: A2aMessageRow[]): boolean {
+  if (rows.length < 2) return false;
+  const roles = new Set(rows.map((row) => row.role));
+  if (!roles.has('user') || !roles.has('agent')) return false;
+  return rows.every((row, index) => {
+    if (row.sequence !== index + 1) return false;
+    return Array.isArray(row.parts) && row.parts.length > 0;
+  });
+}
+
+function isA2aDispatchEvidence(row: EvidenceItemRow, thread: A2aThreadRow): boolean {
+  if (!isRecord(thread.metadata)) return false;
+  return Boolean(
+    row.workspaceId === thread.workspaceId &&
+    row.taskId === thread.pilotTaskId &&
+    row.id === thread.metadata['dispatchEvidenceItemId'] &&
+    row.evidenceType === 'a2a_task_dispatched' &&
+    row.sourceType === 'gateway_a2a_route' &&
+    row.redactionState === 'redacted' &&
+    row.sensitivity === 'internal' &&
+    row.auditEventId &&
+    row.replayRef?.startsWith(`a2a:${thread.externalTaskId}:dispatch:`) &&
+    hasMetadataValue(row.metadata, 'externalTaskId', thread.externalTaskId) &&
+    hasMetadataValue(row.metadata, 'pilotTaskId', thread.pilotTaskId ?? '') &&
+    hasMetadataValue(row.metadata, 'evidenceContract', 'a2a_dispatch_evidence_required'),
+  );
+}
+
+function isA2aDispatchAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  thread: A2aThreadRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === thread.workspaceId &&
+    row.action === 'A2A_TASK_SEND_DISPATCHED' &&
+    row.target === thread.pilotTaskId &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'externalTaskId', thread.externalTaskId) &&
+    hasMetadataValue(row.metadata, 'pilotTaskId', thread.pilotTaskId ?? '') &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id),
+  );
+}
+
+function isParallelBuildChildRun(row: TaskRunRow, handoff: AgentHandoffRow): boolean {
+  return Boolean(
+    row.id === handoff.childTaskRunId &&
+    row.taskId === handoff.taskId &&
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.parentTaskRunId === handoff.parentTaskRunId &&
+    row.rootTaskRunId &&
+    row.lineageKind === 'subagent_spawn' &&
+    row.runSequence > 0,
+  );
+}
+
+function findParallelBuildToolProof(params: {
+  childRun: TaskRunRow;
+  executionRows: ToolExecutionRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}):
+  | {
+      execution: ToolExecutionRow;
+      evidence: EvidenceItemRow;
+      audit: AuditRow;
+    }
+  | undefined {
+  for (const execution of params.executionRows) {
+    if (!isParallelBuildToolExecution(execution, params.childRun)) continue;
+    const evidence = params.evidenceRows.find((row) => isParallelBuildToolEvidence(row, execution));
+    if (!evidence) continue;
+    const audit = params.auditRows.find((row) =>
+      isParallelBuildToolAudit(row, evidence, execution),
+    );
+    if (!audit) continue;
+    return { execution, evidence, audit };
+  }
+  return undefined;
+}
+
+function isParallelBuildToolExecution(row: ToolExecutionRow, childRun: TaskRunRow): boolean {
+  return Boolean(
+    row.taskRunId === childRun.id &&
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.toolKey !== 'finish' &&
+    row.outputHash &&
+    row.actionId &&
+    row.idempotencyKey &&
+    Array.isArray(row.evidenceIds) &&
+    row.evidenceIds.length > 0 &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins),
+  );
+}
+
+function isParallelBuildToolEvidence(row: EvidenceItemRow, execution: ToolExecutionRow): boolean {
+  return Boolean(
+    row.toolExecutionId === execution.id &&
+    row.taskRunId === execution.taskRunId &&
+    row.actionId === execution.actionId &&
+    row.evidenceType === 'tool_execution_completed' &&
+    row.sourceType === 'tool_broker' &&
+    row.auditEventId &&
+    row.replayRef === `tool:${execution.id}` &&
+    row.contentHash === execution.outputHash &&
+    Array.isArray(execution.evidenceIds) &&
+    execution.evidenceIds.includes(row.id) &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'agent_run_log'),
+  );
+}
+
+function isParallelBuildToolAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  execution: ToolExecutionRow,
+): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.action === 'TOOL_EXECUTION' &&
+    row.target === execution.toolKey &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+  );
+}
+
+function hasArtifactDiffProof(proof: {
+  execution: ToolExecutionRow;
+  evidence: EvidenceItemRow;
+}): boolean {
+  return (
+    metadataArrayIncludes(proof.evidence.metadata, 'requiredEvidence', 'artifact_diff') ||
+    metadataArrayIncludes(proof.execution.sanitizedOutput, 'evidenceKinds', 'artifact_diff') ||
+    hasMetadataString(proof.execution.sanitizedOutput, 'artifactDiffRef') ||
+    getArrayLength(
+      isRecord(proof.execution.sanitizedOutput) ? proof.execution.sanitizedOutput : {},
+      'artifactDiffRefs',
+    ) > 0
   );
 }
 
