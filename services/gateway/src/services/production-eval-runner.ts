@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import {
+  agentHandoffs,
   auditLog,
   browserObservations,
   computerActions,
@@ -8,6 +9,8 @@ import {
   evidencePacks,
   opportunities,
   opportunityScores,
+  taskRuns,
+  tasks,
   toolExecutions,
 } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
@@ -34,6 +37,9 @@ type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type TaskRow = typeof tasks.$inferSelect;
+type TaskRunRow = typeof taskRuns.$inferSelect;
+type AgentHandoffRow = typeof agentHandoffs.$inferSelect;
 type OpportunityRow = typeof opportunities.$inferSelect;
 type OpportunityScoreRow = typeof opportunityScores.$inferSelect;
 type ToolExecutionRow = typeof toolExecutions.$inferSelect;
@@ -64,10 +70,224 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       if (input.evalId === 'pmf_discovery') {
         return executePmfDiscoveryEval(db, input);
       }
+      if (input.evalId === 'proof_dag_lineage') {
+        return executeProofDagLineageEval(db, input);
+      }
+      if (input.evalId === 'approval_resume_isolation') {
+        return executeApprovalResumeIsolationEval(db, input);
+      }
       return failedRun(
         input,
         `No trusted real_external_eval runner is implemented for ${input.evalId}`,
       );
+    },
+  };
+}
+
+async function executeProofDagLineageEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const taskRows = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.workspaceId, input.workspaceId))
+    .orderBy(desc(tasks.createdAt))
+    .limit(100);
+  const taskIds = taskRows.map((row) => row.id);
+  if (taskIds.length === 0) {
+    return failedRun(
+      input,
+      'Proof DAG Lineage Regression requires a workspace-scoped task with parent and subagent run records',
+    );
+  }
+
+  const runRows = await db
+    .select()
+    .from(taskRuns)
+    .where(inArray(taskRuns.taskId, taskIds))
+    .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id))
+    .limit(500);
+  const handoffRows = await db
+    .select()
+    .from(agentHandoffs)
+    .where(eq(agentHandoffs.workspaceId, input.workspaceId))
+    .orderBy(desc(agentHandoffs.createdAt), desc(agentHandoffs.id))
+    .limit(200);
+  const packRows = await db
+    .select()
+    .from(evidencePacks)
+    .where(eq(evidencePacks.workspaceId, input.workspaceId))
+    .orderBy(desc(evidencePacks.receivedAt), desc(evidencePacks.id))
+    .limit(500);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(500);
+
+  const proof = findSubagentProofDagProof({
+    workspaceId: input.workspaceId,
+    taskRows,
+    runRows,
+    handoffRows,
+    packRows,
+    evidenceRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Proof DAG Lineage Regression requires parent task_run, subagent spawn task_run, child subagent action row, durable agent_handoff, SUBAGENT_SPAWN evidence, and child receipt evidence linked by parent_evidence_pack_id',
+    );
+  }
+
+  const spawnEvidenceReference = evidenceRef(proof.spawnEvidence);
+  const childEvidenceReference = evidenceRef(proof.childReceiptEvidence);
+  const spawnReceiptReference = evidencePackRef(proof.spawnPack);
+  const childReceiptReference = evidencePackRef(proof.childReceiptPack);
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'proof_dag_lineage',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'subagent_lineage',
+      runRef: input.runRef ?? `real-external-eval:proof-dag-lineage:${randomUUID()}`,
+      summary:
+        'Proof DAG Lineage Regression verified parent run, subagent spawn run, child action run, agent handoff, spawn evidence, and child receipt evidence as a durable proof DAG.',
+      evidenceRefs: [spawnEvidenceReference, childEvidenceReference],
+      auditReceiptRefs: [spawnReceiptReference, childReceiptReference],
+      metadata: {
+        runnerRef: 'gateway:proof_dag_lineage:v1',
+        verifiedTaskId: proof.task.id,
+        verifiedParentTaskRunId: proof.parentRun.id,
+        verifiedSpawnTaskRunId: proof.spawnRun.id,
+        verifiedChildTaskRunId: proof.childRun.id,
+        verifiedAgentHandoffId: proof.handoff.id,
+        verifiedSpawnEvidencePackId: proof.spawnPack.id,
+        verifiedChildEvidencePackId: proof.childReceiptPack.id,
+        verifiedEvidenceItemIds: [proof.spawnEvidence.id, proof.childReceiptEvidence.id],
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'parent-subagent-proof-dag',
+          status: 'passed',
+          evidenceRefs: [spawnEvidenceReference, childEvidenceReference],
+          auditReceiptRefs: [spawnReceiptReference, childReceiptReference],
+          completedAt,
+          metadata: {
+            taskId: proof.task.id,
+            parentTaskRunId: proof.parentRun.id,
+            spawnTaskRunId: proof.spawnRun.id,
+            childTaskRunId: proof.childRun.id,
+            handoffId: proof.handoff.id,
+            spawnDecisionId: proof.spawnPack.decisionId,
+            childDecisionId: proof.childReceiptPack.decisionId,
+          },
+        },
+      ],
+    },
+  };
+}
+
+async function executeApprovalResumeIsolationEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const taskRows = await db
+    .select()
+    .from(tasks)
+    .where(eq(tasks.workspaceId, input.workspaceId))
+    .orderBy(desc(tasks.createdAt))
+    .limit(100);
+  const taskIds = taskRows.map((row) => row.id);
+  if (taskIds.length === 0) {
+    return failedRun(
+      input,
+      'Approval Resume Isolation Regression requires a workspace-scoped task with replay history',
+    );
+  }
+
+  const runRows = await db
+    .select()
+    .from(taskRuns)
+    .where(inArray(taskRuns.taskId, taskIds))
+    .orderBy(desc(taskRuns.startedAt), desc(taskRuns.id))
+    .limit(500);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(500);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(500);
+
+  const proof = findApprovalResumeIsolationProof({
+    taskRows,
+    runRows,
+    evidenceRows,
+    auditRows,
+  });
+  if (!proof) {
+    return failedRun(
+      input,
+      'Approval Resume Isolation Regression requires deterministic parent-only task_runs, at least one excluded child/subagent row, and audit-linked task_resume_dispatched evidence with matching priorActionCount',
+    );
+  }
+
+  const evidenceReference = evidenceRef(proof.evidence);
+  const auditReference = auditRef(proof.audit);
+  const completedAt = new Date().toISOString();
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'approval_resume_isolation',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'approval_resume',
+      runRef: input.runRef ?? `real-external-eval:approval-resume:${randomUUID()}`,
+      summary:
+        'Approval Resume Isolation Regression verified deterministic parent-only replay rows, excluded child rows, and audit-linked resume dispatch evidence.',
+      evidenceRefs: [evidenceReference],
+      auditReceiptRefs: [auditReference],
+      metadata: {
+        runnerRef: 'gateway:approval_resume_isolation:v1',
+        verifiedTaskId: proof.task.id,
+        parentReplayTaskRunIds: proof.parentRows.map((row) => row.id),
+        excludedChildTaskRunIds: proof.childRows.map((row) => row.id),
+        verifiedEvidenceItemId: proof.evidence.id,
+        verifiedAuditEventId: proof.audit.id,
+        priorActionCount: proof.parentRows.length,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'deterministic-parent-only-resume',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: {
+            taskId: proof.task.id,
+            priorActionCount: proof.parentRows.length,
+            excludedChildRowCount: proof.childRows.length,
+            replayOrder: proof.parentRows.map((row) => ({
+              taskRunId: row.id,
+              runSequence: row.runSequence,
+              actionTool: row.actionTool,
+            })),
+          },
+        },
+      ],
     },
   };
 }
@@ -690,6 +910,264 @@ async function executeSafeComputerSandboxEval(
   };
 }
 
+function findSubagentProofDagProof(params: {
+  workspaceId: string;
+  taskRows: TaskRow[];
+  runRows: TaskRunRow[];
+  handoffRows: AgentHandoffRow[];
+  packRows: EvidencePackRow[];
+  evidenceRows: EvidenceItemRow[];
+}):
+  | {
+      task: TaskRow;
+      parentRun: TaskRunRow;
+      spawnRun: TaskRunRow;
+      childRun: TaskRunRow;
+      handoff: AgentHandoffRow;
+      spawnPack: EvidencePackRow;
+      childReceiptPack: EvidencePackRow;
+      spawnEvidence: EvidenceItemRow;
+      childReceiptEvidence: EvidenceItemRow;
+    }
+  | undefined {
+  for (const task of params.taskRows) {
+    const taskRunRows = params.runRows.filter((row) => row.taskId === task.id);
+    const parentRuns = taskRunRows.filter(isParentReplayRun);
+    for (const parentRun of parentRuns) {
+      const spawnRun = taskRunRows.find((row) => isSubagentSpawnRun(row, parentRun.id));
+      if (!spawnRun) continue;
+      const childRun = taskRunRows.find((row) =>
+        isSubagentChildActionRun(row, parentRun.id, spawnRun.id),
+      );
+      if (!childRun) continue;
+      const handoff = params.handoffRows.find(
+        (row) =>
+          row.workspaceId === params.workspaceId &&
+          row.taskId === task.id &&
+          row.parentTaskRunId === parentRun.id &&
+          row.childTaskRunId === spawnRun.id &&
+          row.handoffKind === 'subagent_spawn',
+      );
+      if (!handoff) continue;
+      const spawnPack = params.packRows.find((row) => isSubagentSpawnEvidencePack(row, spawnRun));
+      if (!spawnPack) continue;
+      const spawnEvidence = params.evidenceRows.find((row) =>
+        isSubagentSpawnEvidenceItem(row, spawnPack),
+      );
+      if (!spawnEvidence) continue;
+      const childReceiptPack = params.packRows.find((row) =>
+        isChildReceiptEvidencePack(row, childRun, spawnPack),
+      );
+      if (!childReceiptPack) continue;
+      const childReceiptEvidence = params.evidenceRows.find((row) =>
+        isChildReceiptEvidenceItem(row, childRun, childReceiptPack),
+      );
+      if (!childReceiptEvidence) continue;
+
+      return {
+        task,
+        parentRun,
+        spawnRun,
+        childRun,
+        handoff,
+        spawnPack,
+        childReceiptPack,
+        spawnEvidence,
+        childReceiptEvidence,
+      };
+    }
+  }
+  return undefined;
+}
+
+function findApprovalResumeIsolationProof(params: {
+  taskRows: TaskRow[];
+  runRows: TaskRunRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}):
+  | {
+      task: TaskRow;
+      parentRows: TaskRunRow[];
+      childRows: TaskRunRow[];
+      evidence: EvidenceItemRow;
+      audit: AuditRow;
+    }
+  | undefined {
+  for (const task of params.taskRows) {
+    const taskRunRows = params.runRows.filter((row) => row.taskId === task.id);
+    const parentRows = taskRunRows.filter(isParentReplayRun).sort(compareTaskRunReplayOrder);
+    const childRows = taskRunRows.filter((row) => !isParentReplayRun(row));
+    if (parentRows.length < 2 || childRows.length === 0) continue;
+    if (!isDeterministicReplayOrder(parentRows)) continue;
+
+    const evidence = params.evidenceRows.find((row) =>
+      isTaskResumeDispatchEvidence(row, task.id, parentRows.length),
+    );
+    if (!evidence || !evidence.auditEventId) continue;
+    const audit = params.auditRows.find((row) =>
+      isTaskResumeDispatchAudit(row, evidence, task.id, parentRows.length),
+    );
+    if (!audit) continue;
+    return { task, parentRows, childRows, evidence, audit };
+  }
+  return undefined;
+}
+
+function isParentReplayRun(row: TaskRunRow): boolean {
+  return (
+    row.lineageKind === 'parent_action' &&
+    row.parentTaskRunId === null &&
+    typeof row.actionTool === 'string' &&
+    row.actionTool.length > 0
+  );
+}
+
+function isSubagentSpawnRun(row: TaskRunRow, parentTaskRunId: string): boolean {
+  return (
+    row.lineageKind === 'subagent_spawn' &&
+    row.parentTaskRunId === parentTaskRunId &&
+    row.rootTaskRunId === parentTaskRunId &&
+    row.actionTool === 'subagent.spawn' &&
+    typeof row.spawnedByActionId === 'string' &&
+    row.spawnedByActionId.length > 0 &&
+    typeof row.operatorRole === 'string' &&
+    row.operatorRole.length > 0
+  );
+}
+
+function isSubagentChildActionRun(
+  row: TaskRunRow,
+  parentTaskRunId: string,
+  spawnTaskRunId: string,
+): boolean {
+  return (
+    row.lineageKind === 'subagent_action' &&
+    row.rootTaskRunId === parentTaskRunId &&
+    row.parentTaskRunId === spawnTaskRunId &&
+    typeof row.actionTool === 'string' &&
+    row.actionTool.length > 0
+  );
+}
+
+function isSubagentSpawnEvidencePack(row: EvidencePackRow, spawnRun: TaskRunRow): boolean {
+  return (
+    row.taskRunId === spawnRun.id &&
+    row.action === 'SUBAGENT_SPAWN' &&
+    normalizeVerdict(row.verdict) === 'allow' &&
+    typeof row.decisionId === 'string' &&
+    row.decisionId.length > 0 &&
+    typeof row.policyVersion === 'string' &&
+    row.policyVersion.length > 0 &&
+    row.principal.startsWith(`workspace:${row.workspaceId}/operator:`)
+  );
+}
+
+function isSubagentSpawnEvidenceItem(row: EvidenceItemRow, pack: EvidencePackRow): boolean {
+  return (
+    row.evidencePackId === pack.id &&
+    row.evidenceType === 'subagent_spawn_receipt' &&
+    row.sourceType === 'conductor' &&
+    row.replayRef === `helm:${pack.decisionId}` &&
+    hasMetadataValue(row.metadata, 'decisionId', pack.decisionId) &&
+    hasMetadataValue(row.metadata, 'policyVersion', pack.policyVersion) &&
+    hasMetadataValue(row.metadata, 'action', 'SUBAGENT_SPAWN')
+  );
+}
+
+function isChildReceiptEvidencePack(
+  row: EvidencePackRow,
+  childRun: TaskRunRow,
+  spawnPack: EvidencePackRow,
+): boolean {
+  return (
+    row.taskRunId === childRun.id &&
+    row.parentEvidencePackId === spawnPack.id &&
+    row.action !== 'SUBAGENT_SPAWN' &&
+    normalizeVerdict(row.verdict) === 'allow' &&
+    typeof row.decisionId === 'string' &&
+    row.decisionId.length > 0 &&
+    typeof row.policyVersion === 'string' &&
+    row.policyVersion.length > 0 &&
+    row.principal.startsWith(`workspace:${row.workspaceId}/operator:`)
+  );
+}
+
+function isChildReceiptEvidenceItem(
+  row: EvidenceItemRow,
+  childRun: TaskRunRow,
+  pack: EvidencePackRow,
+): boolean {
+  return (
+    row.taskRunId === childRun.id &&
+    row.evidencePackId === pack.id &&
+    (row.evidenceType === 'llm_inference_receipt' || row.evidenceType === 'tool_receipt') &&
+    row.sourceType === 'agent_loop' &&
+    row.replayRef === `helm:${pack.decisionId}` &&
+    hasMetadataValue(row.metadata, 'decisionId', pack.decisionId) &&
+    hasMetadataValue(row.metadata, 'policyVersion', pack.policyVersion) &&
+    hasMetadataValue(row.metadata, 'parentEvidencePackId', pack.parentEvidencePackId ?? '')
+  );
+}
+
+function compareTaskRunReplayOrder(a: TaskRunRow, b: TaskRunRow): number {
+  return (
+    a.runSequence - b.runSequence ||
+    a.startedAt.getTime() - b.startedAt.getTime() ||
+    a.id.localeCompare(b.id)
+  );
+}
+
+function isDeterministicReplayOrder(rows: TaskRunRow[]): boolean {
+  return rows.every(
+    (row, index) => index === 0 || compareTaskRunReplayOrder(rows[index - 1]!, row) <= 0,
+  );
+}
+
+function isTaskResumeDispatchEvidence(
+  row: EvidenceItemRow,
+  taskId: string,
+  priorActionCount: number,
+): boolean {
+  return (
+    row.evidenceType === 'task_resume_dispatched' &&
+    row.sourceType === 'task_resume_worker' &&
+    row.auditEventId !== null &&
+    typeof row.replayRef === 'string' &&
+    row.replayRef.length > 0 &&
+    hasMetadataValue(row.metadata, 'taskId', taskId) &&
+    hasMetadataValue(
+      row.metadata,
+      'evidenceContract',
+      'task_resume_dispatch_before_orchestrator_resume',
+    ) &&
+    hasMetadataValue(
+      row.metadata,
+      'credentialBoundary',
+      'no_raw_credentials_or_session_payloads_in_evidence',
+    ) &&
+    hasMetadataNumber(row.metadata, 'priorActionCount', priorActionCount)
+  );
+}
+
+function isTaskResumeDispatchAudit(
+  row: AuditRow,
+  evidence: EvidenceItemRow,
+  taskId: string,
+  priorActionCount: number,
+): boolean {
+  return (
+    row.id === evidence.auditEventId &&
+    row.action === 'TASK_RESUME_DISPATCHED' &&
+    row.target === taskId &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'taskId', taskId) &&
+    hasMetadataNumber(row.metadata, 'priorActionCount', priorActionCount) &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '')
+  );
+}
+
 function failedRun(
   input: TrustedRealExternalEvalInput,
   reason: string,
@@ -890,33 +1368,30 @@ function isProductionPmfOpportunityScore(
 ): boolean {
   return Boolean(
     opportunity &&
-      row.opportunityId === opportunity.id &&
-      (opportunity.status === 'scored' || opportunity.status === 'selected') &&
-      row.scoringMethod !== 'heuristic' &&
-      row.scoringMethod.trim().length > 0 &&
-      isScoreNumber(row.overallScore) &&
-      isScoreNumber(row.founderFitScore) &&
-      isScoreNumber(row.marketSignal) &&
-      isScoreNumber(row.feasibility) &&
-      isScoreNumber(row.timing) &&
-      hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins),
+    row.opportunityId === opportunity.id &&
+    (opportunity.status === 'scored' || opportunity.status === 'selected') &&
+    row.scoringMethod !== 'heuristic' &&
+    row.scoringMethod.trim().length > 0 &&
+    isScoreNumber(row.overallScore) &&
+    isScoreNumber(row.founderFitScore) &&
+    isScoreNumber(row.marketSignal) &&
+    isScoreNumber(row.feasibility) &&
+    isScoreNumber(row.timing) &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins),
   );
 }
 
-function isProductionPmfScoreToolExecution(
-  row: ToolExecutionRow,
-  opportunityId: string,
-): boolean {
+function isProductionPmfScoreToolExecution(row: ToolExecutionRow, opportunityId: string): boolean {
   return Boolean(
     row.toolKey === 'score_opportunity' &&
-      row.status === 'completed' &&
-      row.completedAt &&
-      row.outputHash &&
-      row.idempotencyKey &&
-      Array.isArray(row.evidenceIds) &&
-      row.evidenceIds.length > 0 &&
-      hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
-      isEvidenceBackedScoreOutput(row.sanitizedOutput, opportunityId),
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.outputHash &&
+    row.idempotencyKey &&
+    Array.isArray(row.evidenceIds) &&
+    row.evidenceIds.length > 0 &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
+    isEvidenceBackedScoreOutput(row.sanitizedOutput, opportunityId),
   );
 }
 
@@ -964,28 +1439,25 @@ function hasEvidenceCitations(value: unknown): boolean {
   });
 }
 
-function isPmfToolExecutionEvidence(
-  row: EvidenceItemRow,
-  execution: ToolExecutionRow,
-): boolean {
+function isPmfToolExecutionEvidence(row: EvidenceItemRow, execution: ToolExecutionRow): boolean {
   return Boolean(
     row.toolExecutionId === execution.id &&
-      row.actionId === execution.actionId &&
-      row.evidenceType === 'tool_execution_completed' &&
-      row.sourceType === 'tool_broker' &&
-      row.auditEventId &&
-      row.replayRef === `tool:${execution.id}` &&
-      row.contentHash === execution.outputHash &&
-      Array.isArray(execution.evidenceIds) &&
-      execution.evidenceIds.includes(row.id) &&
-      hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
-      hasMetadataValue(row.metadata, 'toolKey', 'score_opportunity') &&
-      hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
-      hasMetadataValue(row.metadata, 'status', 'completed') &&
-      hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
-      hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
-      metadataArrayIncludes(row.metadata, 'requiredEvidence', 'opportunity_score') &&
-      metadataArrayIncludes(row.metadata, 'requiredEvidence', 'citations'),
+    row.actionId === execution.actionId &&
+    row.evidenceType === 'tool_execution_completed' &&
+    row.sourceType === 'tool_broker' &&
+    row.auditEventId &&
+    row.replayRef === `tool:${execution.id}` &&
+    row.contentHash === execution.outputHash &&
+    Array.isArray(execution.evidenceIds) &&
+    execution.evidenceIds.includes(row.id) &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', 'score_opportunity') &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'opportunity_score') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'citations'),
   );
 }
 
@@ -996,15 +1468,15 @@ function isPmfToolExecutionAudit(
 ): boolean {
   return Boolean(
     row.id === evidence.auditEventId &&
-      row.action === 'TOOL_EXECUTION' &&
-      row.target === 'score_opportunity' &&
-      row.verdict === 'allow' &&
-      hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
-      hasMetadataValue(row.metadata, 'toolKey', 'score_opportunity') &&
-      hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
-      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
-      hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
-      hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
+    row.action === 'TOOL_EXECUTION' &&
+    row.target === 'score_opportunity' &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', 'score_opportunity') &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? ''),
   );
 }
 
@@ -1107,6 +1579,10 @@ function auditRef(row: AuditRow): string {
   return `audit:${row.id}`;
 }
 
+function evidencePackRef(row: EvidencePackRow): string {
+  return `helm:${row.decisionId}`;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -1116,6 +1592,10 @@ function hasMetadataString(metadata: unknown, key: string): boolean {
 }
 
 function hasMetadataValue(metadata: unknown, key: string, expected: string): boolean {
+  return isRecord(metadata) && metadata[key] === expected;
+}
+
+function hasMetadataNumber(metadata: unknown, key: string, expected: number): boolean {
   return isRecord(metadata) && metadata[key] === expected;
 }
 
@@ -1138,9 +1618,9 @@ function hasPolicyPin(
 ): boolean {
   return Boolean(
     policyDecisionId &&
-      policyVersion &&
-      isRecord(helmDocumentVersionPins) &&
-      Object.keys(helmDocumentVersionPins).length > 0,
+    policyVersion &&
+    isRecord(helmDocumentVersionPins) &&
+    Object.keys(helmDocumentVersionPins).length > 0,
   );
 }
 
