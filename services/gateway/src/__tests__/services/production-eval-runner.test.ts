@@ -1670,6 +1670,316 @@ function stripeSetupPrepFixture({
   };
 }
 
+function companyFormationPrepFixture({
+  includePrepEvidence = true,
+}: { includePrepEvidence?: boolean } = {}): {
+  browser: BrowserObservationRow[];
+  missionNodeRows: MissionNodeRow[];
+  toolExecutionRows: ToolExecutionRow[];
+  artifactRows: ArtifactRow[];
+  evidence: EvidenceItemRow[];
+  audits: AuditRow[];
+} {
+  const node = missionNodeRow({
+    id: 'mission-node-company-formation-1',
+    missionId: 'mission-company-formation-1',
+    nodeKey: 'company_formation_prep',
+    stage: 'company_formation_prep',
+    title: 'Company formation preparation',
+    objective: 'Compare formation providers and prepare a draft packet up to human gates.',
+    requiredAgents: ['Legal Workflow Agent', 'Finance Agent', 'Founder Ops Agent'],
+    requiredSkills: ['formation_research', 'legal_packet_drafting', 'human_gate_mapping'],
+    requiredTools: ['browser_read_extract', 'artifact_writer'],
+    requiredEvidence: ['formation comparison', 'draft packet', 'human gate list'],
+    helmPolicyClasses: ['legal', 'financial', 'browser', 'audit'],
+    escalationConditions: [
+      'Signature, filing, legal attestation, identity verification, or payment is required',
+    ],
+    acceptanceCriteria: [
+      'Formation prep artifact exists',
+      'Human-required legal steps are explicit',
+      'No legal filing, payment, identity submission, or raw secrets are stored',
+    ],
+  });
+  const humanGates = [
+    'signature',
+    'filing',
+    'legal_attestation',
+    'identity_verification',
+    'payment',
+  ];
+  const artifact = artifactRow({
+    id: 'artifact-company-formation-prep-1',
+    type: 'application',
+    name: 'Company formation prep packet',
+    description: 'Non-filing formation provider comparison, draft packet, and human gates.',
+    storagePath: 'artifacts/company/formation-prep.md',
+    mimeType: 'text/markdown',
+    sizeBytes: 6144,
+    metadata: {
+      evalId: 'company_formation_prep',
+      lifecycleStage: 'company_formation_prep',
+      missionNodeId: node.id,
+      formationComparisonRef: 'artifact:formation-comparison',
+      draftPacketRef: 'artifact:formation-draft-packet',
+      humanGateListRef: 'artifact:formation-human-gates',
+      productionReady: false,
+      restrictedActionsExecuted: false,
+      legalFilingSubmitted: false,
+      paymentSubmitted: false,
+      identityVerificationSubmitted: false,
+      rawIdentitySecretsStoredInArtifact: false,
+      rawFinancialSecretsStoredInArtifact: false,
+    },
+  });
+  const execution = toolExecution({
+    id: 'tool-execution-company-formation-prep-1',
+    actionId: 'action-company-formation-prep-1',
+    toolKey: 'company_formation_prep',
+    inputHash: 'sha256:company-formation-input',
+    sanitizedInput: { mode: 'company_formation_prep', missionNodeId: node.id },
+    outputHash: `sha256:${'d'.repeat(64)}`,
+    sanitizedOutput: {
+      mode: 'company_formation_prep',
+      missionNodeId: node.id,
+      artifactId: artifact.id,
+      productionReady: false,
+      restrictedActionsExecuted: false,
+      legalFilingSubmitted: false,
+      paymentSubmitted: false,
+      identityVerificationSubmitted: false,
+      rawIdentitySecretsStoredInOutput: false,
+      rawFinancialSecretsStoredInOutput: false,
+      formationComparison: [
+        { provider: 'Clerky', filing: 'human_required' },
+        { provider: 'Stripe Atlas', filing: 'human_required' },
+      ],
+      draftPacket: {
+        entityType: 'Delaware C-Corp',
+        founderQuestions: ['legal name', 'registered agent', 'share structure'],
+      },
+      humanGates,
+      requiredEscalations: humanGates,
+    },
+    evidenceIds: ['evidence-company-formation-tool'],
+    policyDecisionId: 'company-formation-legal-decision-1',
+    policyVersion: 'founder-ops-v1',
+    helmDocumentVersionPins: {
+      legalPolicy: 'founder-ops-v1',
+      financialPolicy: 'founder-ops-v1',
+    },
+  });
+  const browser = browserObservation({
+    id: 'browser-observation-company-formation-1',
+    url: 'https://www.clerky.com/incorporation',
+    origin: 'https://www.clerky.com',
+    title: 'Clerky incorporation docs',
+    objective: 'Read company formation provider docs without submitting identity or payment data',
+    domHash: `sha256:${'e'.repeat(64)}`,
+    screenshotHash: `sha256:${'f'.repeat(64)}`,
+    screenshotRef: 'browser/company/formation-prep.png',
+    redactedDomSnapshot: '<html><main>Formation provider docs</main></html>',
+    extractedData: {
+      providers: ['Clerky', 'Stripe Atlas', 'Doola', 'Firstbase'],
+      formationOptions: ['Delaware C-Corp', 'LLC'],
+      humanGates,
+    },
+    redactions: [],
+    metadata: {
+      credentialBoundary: browserCredentialBoundary,
+      helmDecisionId: 'company-formation-browser-decision-1',
+      helmPolicyVersion: 'founder-ops-v1',
+      rawCookiesExported: false,
+      rawIdentitySecretsStored: false,
+      rawPaymentSecretsStored: false,
+    },
+  });
+  const prepReplayRef = `company-formation-prep:${node.id}`;
+
+  return {
+    browser: [browser],
+    missionNodeRows: [node],
+    toolExecutionRows: [execution],
+    artifactRows: [artifact],
+    evidence: [
+      evidenceItem({
+        id: 'evidence-company-formation-tool',
+        computerActionId: null,
+        actionId: execution.actionId,
+        toolExecutionId: execution.id,
+        evidenceType: 'tool_execution_completed',
+        sourceType: 'tool_broker',
+        auditEventId: 'audit-company-formation-tool',
+        contentHash: execution.outputHash,
+        replayRef: `tool:${execution.id}`,
+        metadata: {
+          broker: 'tool_broker_v1',
+          toolKey: execution.toolKey,
+          toolExecutionId: execution.id,
+          status: 'completed',
+          policyDecisionId: execution.policyDecisionId,
+          policyVersion: execution.policyVersion,
+          requiredEvidence: ['formation_comparison', 'draft_packet', 'human_gate_list'],
+          legalFilingSubmitted: false,
+          paymentSubmitted: false,
+          rawIdentitySecretsStoredInEvidence: false,
+          rawFinancialSecretsStoredInEvidence: false,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-company-formation-browser',
+        computerActionId: null,
+        browserObservationId: browser.id,
+        evidenceType: 'browser_observation',
+        sourceType: 'gateway_browser_session',
+        auditEventId: 'audit-company-formation-browser',
+        sensitivity: 'sensitive',
+        contentHash: browser.domHash,
+        storageRef: browser.screenshotRef,
+        replayRef: `browser:${browser.sessionId}:3`,
+        metadata: {
+          sessionId: browser.sessionId,
+          grantId: browser.grantId,
+          browserActionId: browser.browserActionId,
+          url: browser.url,
+          origin: browser.origin,
+          credentialBoundary: browserCredentialBoundary,
+          helmDecisionId: 'company-formation-browser-decision-1',
+          helmPolicyVersion: 'founder-ops-v1',
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-company-formation-artifact',
+        computerActionId: null,
+        artifactId: artifact.id,
+        evidenceType: 'artifact_created',
+        sourceType: 'tool_registry',
+        auditEventId: 'audit-company-formation-artifact',
+        sensitivity: 'internal',
+        contentHash: `sha256:${'1'.repeat(64)}`,
+        storageRef: artifact.storagePath,
+        replayRef: `artifact:${artifact.id}:1`,
+        metadata: {
+          evalId: 'company_formation_prep',
+          lifecycleStage: 'company_formation_prep',
+          missionNodeId: node.id,
+          artifactType: artifact.type,
+          version: 1,
+          tool: 'create_artifact',
+          legalFilingSubmitted: false,
+          paymentSubmitted: false,
+          identityVerificationSubmitted: false,
+          rawIdentitySecretsStoredInEvidence: false,
+          rawFinancialSecretsStoredInEvidence: false,
+        },
+      }),
+      ...(includePrepEvidence
+        ? [
+            evidenceItem({
+              id: 'evidence-company-formation-prep',
+              computerActionId: null,
+              missionId: node.missionId,
+              artifactId: artifact.id,
+              toolExecutionId: execution.id,
+              browserObservationId: browser.id,
+              evidenceType: 'company_formation_prep_recorded',
+              sourceType: 'startup_lifecycle',
+              auditEventId: 'audit-company-formation-prep',
+              sensitivity: 'restricted',
+              contentHash: `sha256:${'2'.repeat(64)}`,
+              replayRef: prepReplayRef,
+              metadata: {
+                missionNodeId: node.id,
+                artifactId: artifact.id,
+                toolExecutionId: execution.id,
+                browserObservationId: browser.id,
+                humanGates,
+                helmPolicyClasses: ['legal', 'financial', 'browser', 'audit'],
+                restrictedActionsExecuted: false,
+                legalFilingSubmitted: false,
+                paymentSubmitted: false,
+                identityVerificationSubmitted: false,
+                rawIdentitySecretsStoredInEvidence: false,
+                rawFinancialSecretsStoredInEvidence: false,
+              },
+            }),
+          ]
+        : []),
+    ],
+    audits: [
+      auditRow({
+        id: 'audit-company-formation-tool',
+        action: 'TOOL_EXECUTION',
+        target: execution.toolKey,
+        verdict: 'allow',
+        metadata: {
+          broker: 'tool_broker_v1',
+          toolKey: execution.toolKey,
+          toolExecutionId: execution.id,
+          evidenceItemId: 'evidence-company-formation-tool',
+          policyDecisionId: execution.policyDecisionId,
+          policyVersion: execution.policyVersion,
+        },
+      }),
+      auditRow({
+        id: 'audit-company-formation-browser',
+        action: 'BROWSER_OBSERVATION_CAPTURED',
+        actor: `browser:${browser.sessionId}`,
+        target: browser.id,
+        verdict: 'allow',
+        metadata: {
+          evidenceItemId: 'evidence-company-formation-browser',
+          helmDecisionId: 'company-formation-browser-decision-1',
+          helmPolicyVersion: 'founder-ops-v1',
+        },
+      }),
+      auditRow({
+        id: 'audit-company-formation-artifact',
+        action: 'ARTIFACT_CREATED',
+        target: artifact.id,
+        verdict: 'created',
+        metadata: {
+          evidenceItemId: 'evidence-company-formation-artifact',
+          evidenceType: 'artifact_created',
+          replayRef: `artifact:${artifact.id}:1`,
+          artifactId: artifact.id,
+          artifactType: artifact.type,
+          version: 1,
+        },
+      }),
+      ...(includePrepEvidence
+        ? [
+            auditRow({
+              id: 'audit-company-formation-prep',
+              action: 'COMPANY_FORMATION_PREP_RECORDED',
+              target: node.id,
+              verdict: 'recorded',
+              metadata: {
+                evidenceItemId: 'evidence-company-formation-prep',
+                evidenceType: 'company_formation_prep_recorded',
+                missionNodeId: node.id,
+                artifactId: artifact.id,
+                toolExecutionId: execution.id,
+                browserObservationId: browser.id,
+                humanGates,
+                helmPolicyClasses: ['legal', 'financial', 'browser', 'audit'],
+                legalPolicyDecisionId: 'company-formation-legal-decision-1',
+                legalPolicyVersion: 'founder-ops-v1',
+                financialPolicyDecisionId: 'company-formation-financial-decision-1',
+                financialPolicyVersion: 'founder-ops-v1',
+                restrictedActionsExecuted: false,
+                legalFilingSubmitted: false,
+                paymentSubmitted: false,
+                rawIdentitySecretsStoredInEvidence: false,
+                rawFinancialSecretsStoredInEvidence: false,
+              },
+            }),
+          ]
+        : []),
+    ],
+  };
+}
+
 function helmReceiptMetadata(pack: EvidencePackRow): Record<string, string | null> {
   return {
     decisionId: pack.decisionId,
@@ -1927,6 +2237,82 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain('isolated human gates');
+  });
+
+  it('passes company_formation_prep from lifecycle, browser, draft artifact, human-gate, and audit evidence', async () => {
+    const fixture = companyFormationPrepFixture();
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'company_formation_prep',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'company_formation_prep',
+      status: 'passed',
+      capabilityKey: 'startup_lifecycle',
+      evidenceRefs: expect.arrayContaining([
+        'company-formation-prep:mission-node-company-formation-1',
+        'tool:tool-execution-company-formation-prep-1',
+        'browser:00000000-0000-4000-8000-000000000011:3',
+        'artifact:artifact-company-formation-prep-1:1',
+      ]),
+      auditReceiptRefs: expect.arrayContaining([
+        'audit:audit-company-formation-prep',
+        'audit:audit-company-formation-tool',
+        'audit:audit-company-formation-browser',
+        'audit:audit-company-formation-artifact',
+      ]),
+      metadata: {
+        runnerRef: 'gateway:company_formation_prep:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedMissionNodeId: 'mission-node-company-formation-1',
+        verifiedToolExecutionId: 'tool-execution-company-formation-prep-1',
+        verifiedBrowserObservationId: 'browser-observation-company-formation-1',
+        verifiedArtifactId: 'artifact-company-formation-prep-1',
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'completed-company-formation-lifecycle-node',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'brokered-formation-research-and-draft-packet',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'artifact-human-gates-and-legal-boundary',
+        status: 'passed',
+      }),
+    ]);
+  });
+
+  it('fails company_formation_prep without isolated legal human-gate evidence', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb(companyFormationPrepFixture({ includePrepEvidence: false })),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'company_formation_prep',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('signature/filing/identity/payment');
   });
 
   it('passes domain_to_deployment from build, test, DNS/hosting, deployment, browser, rollback evidence, and audit rows', async () => {
@@ -4073,7 +4459,7 @@ describe('createProductionEvalRunner', () => {
 
     const result = await runner.execute({
       workspaceId,
-      evalId: 'company_formation_prep',
+      evalId: 'founder_off_grid',
       executionMode: PRODUCTION_READY_EXECUTION_MODE,
       evidenceRefs: [],
       auditReceiptRefs: [],
@@ -4084,7 +4470,7 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain(
-      'No trusted real_external_eval runner is implemented for company_formation_prep',
+      'No trusted real_external_eval runner is implemented for founder_off_grid',
     );
   });
 });
