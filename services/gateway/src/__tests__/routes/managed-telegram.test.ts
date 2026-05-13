@@ -909,8 +909,8 @@ describe('managed Telegram service governance', () => {
     expect(state.message['replyStatus']).toBe('drafted');
   });
 
-  it('persists HELM policy pins when disabling managed Telegram bots', async () => {
-    const { db, state } = makeManagedTelegramActionDb();
+  it('persists HELM policy pins and evidence before disabling managed Telegram bots', async () => {
+    const { db, state, inserts, operations } = makeManagedTelegramActionDb();
     const helmClient = {
       evaluate: vi.fn(async () => ({
         receipt: {
@@ -951,6 +951,123 @@ describe('managed Telegram service governance', () => {
           documentVersionPins: { managedTelegramPolicy: 'founder-ops-v1' },
         },
       },
+      disableEvidence: {
+        auditEventId: expect.any(String),
+        evidenceItemId: 'evidence-send-item',
+      },
     });
+    const evidenceInsert = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_disable_requested',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(evidenceInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_disable_requested',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'restricted',
+      metadata: expect.objectContaining({
+        managedBotId: 'bot-1',
+        policyDecisionId: 'dec-disable',
+        rawTelegramBotIdStoredInEvidence: false,
+        rawTokenSecretRefStoredInEvidence: false,
+      }),
+    });
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('123');
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain(
+      'custom_telegram_managed_bot_token_bot-1',
+    );
+    const evidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_disable_requested',
+    );
+    const disableIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBots &&
+        (operation.value as { status?: string }).status === 'disabled',
+    );
+    expect(evidenceIndex).toBeGreaterThanOrEqual(0);
+    expect(disableIndex).toBeGreaterThan(evidenceIndex);
+  });
+
+  it('fails closed before disabling when disable evidence cannot be persisted', async () => {
+    const { db, state, updates } = makeManagedTelegramActionDb({ failEvidenceInsert: true });
+    const helmClient = {
+      evaluate: vi.fn(async () => ({
+        receipt: {
+          decisionId: 'dec-disable',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+      })),
+    };
+    const secrets = {
+      get: vi.fn(async () => 'child-token'),
+      delete: vi.fn(async () => true),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: helmClient as never,
+    });
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async () => Response.json({ ok: true, result: true }));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(service.disable('ws-1', 'user-1')).rejects.toThrow('send evidence unavailable');
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(secrets.get).not.toHaveBeenCalled();
+    expect(secrets.delete).not.toHaveBeenCalled();
+    expect(state.bot['status']).toBe('active');
+    expect(
+      updates.some(
+        (update) =>
+          update.table === managedTelegramBots &&
+          (update.value as { status?: string }).status === 'disabled',
+      ),
+    ).toBe(false);
+  });
+
+  it('fails closed before rotating managed Telegram tokens when rotation evidence fails', async () => {
+    const { db, state } = makeManagedTelegramActionDb({ failEvidenceInsert: true });
+    const helmClient = {
+      evaluate: vi.fn(async () => ({
+        receipt: {
+          decisionId: 'dec-rotate',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+      })),
+    };
+    const secrets = {
+      set: vi.fn(async () => true),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: helmClient as never,
+      managerBotToken: 'manager-token',
+    });
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async () => Response.json({ ok: true, result: 'new-child-token' }));
+    vi.stubGlobal('fetch', fetch);
+
+    await expect(service.rotateToken('ws-1', 'user-1')).rejects.toThrow(
+      'send evidence unavailable',
+    );
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(secrets.set).not.toHaveBeenCalled();
+    expect(state.bot['webhookSecretHash']).toBe('hash');
   });
 });

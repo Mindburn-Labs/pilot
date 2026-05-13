@@ -567,6 +567,24 @@ export class ManagedTelegramBotService {
       resource: `telegram:${bot.telegramBotId}`,
       context: { managedBotId: bot.id },
     });
+    const rotateGovernanceMetadata = rotateGovernance
+      ? managedTelegramGovernanceMetadata(TELEGRAM_MANAGED_ACTIONS.ROTATE_TOKEN, rotateGovernance)
+      : undefined;
+    const rotateEvidence = await this.opts.db.transaction(async (tx) =>
+      appendManagedTelegramControlEvidence(tx as unknown as Db, {
+        workspaceId,
+        actor: `user:${userId}`,
+        action: TELEGRAM_MANAGED_ACTIONS.ROTATE_TOKEN,
+        target: bot.id,
+        evidenceType: 'managed_telegram_token_rotation_requested',
+        title: 'Managed Telegram token rotation requested',
+        summary:
+          'A workspace owner requested managed Telegram token rotation before external Telegram token replacement.',
+        replayRef: `managed-telegram-bot:${bot.id}:rotate-token`,
+        sensitivity: 'restricted',
+        metadata: managedTelegramElevatedControlMetadata(bot, rotateGovernanceMetadata),
+      }),
+    );
     const newToken = await replaceManagedBotToken(managerBotToken, bot.telegramBotId);
     await this.secrets.set(workspaceId, asSecretKind(bot.tokenSecretRef), newToken);
 
@@ -581,14 +599,13 @@ export class ManagedTelegramBotService {
         lastError: null,
         governanceMetadata: appendGovernanceMetadata(
           appendGovernanceMetadata(
-            bot.governanceMetadata,
-            'rotateToken',
-            rotateGovernance
-              ? managedTelegramGovernanceMetadata(
-                  TELEGRAM_MANAGED_ACTIONS.ROTATE_TOKEN,
-                  rotateGovernance,
-                )
-              : undefined,
+            appendGovernanceMetadata(
+              bot.governanceMetadata,
+              'rotateToken',
+              rotateGovernanceMetadata,
+            ),
+            'rotateTokenEvidence',
+            managedTelegramControlEvidenceMetadata(rotateEvidence),
           ),
           'setWebhook',
           webhookGovernance,
@@ -613,6 +630,24 @@ export class ManagedTelegramBotService {
       resource: `telegram:${bot.telegramBotId}`,
       context: { managedBotId: bot.id },
     });
+    const governance = governed
+      ? managedTelegramGovernanceMetadata(TELEGRAM_MANAGED_ACTIONS.DISABLE, governed)
+      : undefined;
+    const disableEvidence = await this.opts.db.transaction(async (tx) =>
+      appendManagedTelegramControlEvidence(tx as unknown as Db, {
+        workspaceId,
+        actor: `user:${userId}`,
+        action: TELEGRAM_MANAGED_ACTIONS.DISABLE,
+        target: bot.id,
+        evidenceType: 'managed_telegram_disable_requested',
+        title: 'Managed Telegram disable requested',
+        summary:
+          'A workspace owner requested managed Telegram bot disable before external webhook deletion or secret deletion.',
+        replayRef: `managed-telegram-bot:${bot.id}:disable`,
+        sensitivity: 'restricted',
+        metadata: managedTelegramElevatedControlMetadata(bot, governance),
+      }),
+    );
 
     const token = await this.secrets.get(workspaceId, asSecretKind(bot.tokenSecretRef));
     if (token) {
@@ -627,11 +662,9 @@ export class ManagedTelegramBotService {
         status: 'disabled',
         webhookSecretHash: null,
         governanceMetadata: appendGovernanceMetadata(
-          bot.governanceMetadata,
-          'disable',
-          governed
-            ? managedTelegramGovernanceMetadata(TELEGRAM_MANAGED_ACTIONS.DISABLE, governed)
-            : undefined,
+          appendGovernanceMetadata(bot.governanceMetadata, 'disable', governance),
+          'disableEvidence',
+          managedTelegramControlEvidenceMetadata(disableEvidence),
         ),
         disabledAt: new Date(),
         updatedAt: new Date(),
@@ -1547,6 +1580,33 @@ function managedTelegramSettingsEvidenceMetadata(
       input.supportPrompt === undefined ? null : stableHash(input.supportPrompt ?? ''),
     supportPromptLength: input.supportPrompt?.length ?? null,
     rawSettingsValuesStoredInEvidence: false,
+  };
+}
+
+function managedTelegramElevatedControlMetadata(
+  row: ManagedBotRow,
+  governance: ManagedTelegramGovernanceMetadata | undefined,
+) {
+  return {
+    managedBotId: row.id,
+    telegramBotIdHash: stableHash(row.telegramBotId),
+    tokenSecretRefHash: stableHash(row.tokenSecretRef),
+    rawTelegramBotIdStoredInEvidence: false,
+    rawTokenSecretRefStoredInEvidence: false,
+    policyDecisionId: governance?.policyDecisionId ?? null,
+    policyVersion: governance?.policyVersion ?? null,
+    evidencePackId: governance?.evidencePackId ?? null,
+    helmDocumentVersionPins: governance?.helmDocumentVersionPins ?? {},
+  };
+}
+
+function managedTelegramControlEvidenceMetadata(evidence: {
+  auditEventId: string;
+  evidenceItemId: string;
+}) {
+  return {
+    auditEventId: evidence.auditEventId,
+    evidenceItemId: evidence.evidenceItemId,
   };
 }
 
