@@ -1,21 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
-import { auditLog, computerActions, evidenceItems } from '@pilot/db/schema';
+import { auditLog, browserObservations, computerActions, evidenceItems } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import { PRODUCTION_READY_EXECUTION_MODE } from '@pilot/shared/eval';
 import { createProductionEvalRunner } from '../../services/production-eval-runner.js';
 
 const workspaceId = '00000000-0000-4000-8000-000000000001';
+const browserCredentialBoundary = 'read_only_no_cookie_or_password_export';
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
+type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 
 function createRunnerDb({
   actions = [],
+  browser = [],
   evidence = [],
   audits = [],
 }: {
   actions?: ComputerActionRow[];
+  browser?: BrowserObservationRow[];
   evidence?: EvidenceItemRow[];
   audits?: AuditRow[];
 }) {
@@ -23,7 +27,13 @@ function createRunnerDb({
     select: vi.fn(() => ({
       from: vi.fn((table: unknown) => {
         const result =
-          table === computerActions ? actions : table === evidenceItems ? evidence : audits;
+          table === computerActions
+            ? actions
+            : table === browserObservations
+              ? browser
+              : table === evidenceItems
+                ? evidence
+                : audits;
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -35,6 +45,38 @@ function createRunnerDb({
     })),
   };
   return db as unknown as Db;
+}
+
+function browserObservation(overrides: Partial<BrowserObservationRow>): BrowserObservationRow {
+  return {
+    id: 'browser-observation-1',
+    workspaceId,
+    sessionId: '00000000-0000-4000-8000-000000000011',
+    grantId: '00000000-0000-4000-8000-000000000012',
+    browserActionId: '00000000-0000-4000-8000-000000000013',
+    taskId: null,
+    actionId: null,
+    evidencePackId: null,
+    url: 'https://www.ycombinator.com/companies',
+    origin: 'https://www.ycombinator.com',
+    title: 'YC Companies',
+    objective: 'Extract YC company data',
+    domHash: 'sha256:dom',
+    screenshotHash: 'sha256:screenshot',
+    screenshotRef: null,
+    redactedDomSnapshot: '<html>[REDACTED]</html>',
+    extractedData: { company: 'Pilot', batch: 'S26' },
+    redactions: ['token'],
+    replayIndex: 3,
+    metadata: {
+      credentialBoundary: browserCredentialBoundary,
+      helmDecisionId: 'browser-decision-1',
+      helmPolicyVersion: 'founder-ops-v1',
+    },
+    observedAt: new Date('2026-05-12T00:01:00.000Z'),
+    createdAt: new Date('2026-05-12T00:01:00.000Z'),
+    ...overrides,
+  };
 }
 
 function computerAction(overrides: Partial<ComputerActionRow>): ComputerActionRow {
@@ -118,6 +160,130 @@ function auditRow(overrides: Partial<AuditRow>): AuditRow {
 }
 
 describe('createProductionEvalRunner', () => {
+  it('passes yc_logged_in_browser_extraction only from durable browser evidence and audit rows', async () => {
+    const observation = browserObservation({ id: 'browser-yc-1' });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        browser: [observation],
+        evidence: [
+          evidenceItem({
+            id: 'evidence-browser-yc',
+            browserObservationId: observation.id,
+            computerActionId: null,
+            evidenceType: 'browser_observation',
+            auditEventId: 'audit-browser-yc',
+            replayRef: 'browser:browser-session-1:3',
+            metadata: {
+              credentialBoundary: browserCredentialBoundary,
+              helmDecisionId: 'browser-decision-1',
+              helmPolicyVersion: 'founder-ops-v1',
+            },
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-browser-yc',
+            action: 'BROWSER_OBSERVATION_CAPTURED',
+            target: observation.id,
+            verdict: 'allow',
+            metadata: {
+              helmDecisionId: 'browser-decision-1',
+              helmPolicyVersion: 'founder-ops-v1',
+            },
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'yc_logged_in_browser_extraction',
+      capabilityKey: 'browser_execution',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'yc_logged_in_browser_extraction',
+      status: 'passed',
+      capabilityKey: 'browser_execution',
+      evidenceRefs: ['browser:browser-session-1:3'],
+      auditReceiptRefs: ['audit:audit-browser-yc'],
+      metadata: {
+        runnerRef: 'gateway:yc_logged_in_browser_extraction:v1',
+        verifiedBrowserObservationId: 'browser-yc-1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'yc-browser-read-extract-evidence',
+        status: 'passed',
+        evidenceRefs: ['browser:browser-session-1:3'],
+        metadata: expect.objectContaining({
+          domHash: 'sha256:dom',
+          screenshotHash: 'sha256:screenshot',
+          redactionCount: 1,
+        }),
+      }),
+    ]);
+  });
+
+  it('fails yc_logged_in_browser_extraction when extracted fields are missing', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        browser: [browserObservation({ extractedData: {} })],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'yc_logged_in_browser_extraction',
+      capabilityKey: 'browser_execution',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('requires a durable YC browser observation');
+  });
+
+  it('fails yc_logged_in_browser_extraction for lookalike YC domains', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        browser: [
+          browserObservation({
+            url: 'https://notycombinator.com/companies',
+            origin: 'https://notycombinator.com',
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'yc_logged_in_browser_extraction',
+      capabilityKey: 'browser_execution',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('requires a durable YC browser observation');
+  });
+
   it('passes safe_computer_sandbox_action only from durable computer evidence and audit rows', async () => {
     const completed = computerAction({ id: 'computer-completed', replayIndex: 1 });
     const denied = computerAction({

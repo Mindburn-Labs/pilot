@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { auditLog, computerActions, evidenceItems } from '@pilot/db/schema';
+import { auditLog, browserObservations, computerActions, evidenceItems } from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import {
   PRODUCTION_READY_EXECUTION_MODE,
@@ -21,6 +21,7 @@ type ProductionEvalRunner = {
 };
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
+type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 
@@ -30,17 +31,132 @@ const SAFE_COMPUTER_ACTIONS = new Set([
   'file_write',
   'dev_server_status',
 ]);
+const BROWSER_CREDENTIAL_BOUNDARY = 'read_only_no_cookie_or_password_export';
 
 export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
   return {
     async execute(input) {
       if (input.evalId !== 'safe_computer_sandbox_action') {
+        if (input.evalId === 'yc_logged_in_browser_extraction') {
+          return executeYcLoggedInBrowserExtractionEval(db, input);
+        }
         return failedRun(
           input,
           `No trusted real_external_eval runner is implemented for ${input.evalId}`,
         );
       }
       return executeSafeComputerSandboxEval(db, input);
+    },
+  };
+}
+
+async function executeYcLoggedInBrowserExtractionEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const rows = await db
+    .select()
+    .from(browserObservations)
+    .where(eq(browserObservations.workspaceId, input.workspaceId))
+    .orderBy(desc(browserObservations.observedAt))
+    .limit(100);
+
+  const observation = rows.find(isYcLoggedInBrowserObservation);
+  if (!observation) {
+    return failedRun(
+      input,
+      'YC Logged-In Browser Extraction Eval requires a durable YC browser observation with DOM hash, screenshot reference, extracted fields, redacted DOM, and replay metadata',
+    );
+  }
+
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(
+      and(
+        eq(evidenceItems.workspaceId, input.workspaceId),
+        eq(evidenceItems.browserObservationId, observation.id),
+      ),
+    )
+    .orderBy(desc(evidenceItems.observedAt))
+    .limit(10);
+
+  const evidence = evidenceRows.find(findBrowserEvidence);
+  if (!evidence) {
+    return failedRun(
+      input,
+      `YC browser observation ${observation.id} has no linked browser_observation evidence_items row`,
+    );
+  }
+  if (!evidence.auditEventId) {
+    return failedRun(
+      input,
+      `YC browser observation evidence ${evidence.id} is missing an audit_event_id link`,
+    );
+  }
+
+  const audits = await db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, evidence.auditEventId)))
+    .limit(1);
+  const audit = audits.find(
+    (row) =>
+      row.id === evidence.auditEventId &&
+      row.action === 'BROWSER_OBSERVATION_CAPTURED' &&
+      row.target === observation.id &&
+      row.verdict === 'allow' &&
+      hasMetadataString(row.metadata, 'helmDecisionId') &&
+      hasMetadataString(row.metadata, 'helmPolicyVersion'),
+  );
+  if (!audit) {
+    return failedRun(
+      input,
+      `YC browser observation evidence ${evidence.id} has no matching BROWSER_OBSERVATION_CAPTURED audit row`,
+    );
+  }
+
+  const evidenceReference = evidenceRef(evidence);
+  const auditReference = auditRef(audit);
+  const completedAt = new Date().toISOString();
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'yc_logged_in_browser_extraction',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'browser_execution',
+      runRef: input.runRef ?? `real-external-eval:yc-browser:${randomUUID()}`,
+      summary:
+        'YC browser eval verified a durable logged-in read/extract observation with redacted DOM, DOM hash, screenshot metadata, extracted fields, replay reference, evidence, and audit receipt.',
+      evidenceRefs: [evidenceReference],
+      auditReceiptRefs: [auditReference],
+      metadata: {
+        runnerRef: 'gateway:yc_logged_in_browser_extraction:v1',
+        verifiedBrowserObservationId: observation.id,
+        verifiedEvidenceItemId: evidence.id,
+        verifiedAuditEventId: audit.id,
+        origin: observation.origin,
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'yc-browser-read-extract-evidence',
+          status: 'passed',
+          evidenceRefs: [evidenceReference],
+          auditReceiptRefs: [auditReference],
+          completedAt,
+          metadata: {
+            browserObservationId: observation.id,
+            sessionId: observation.sessionId,
+            grantId: observation.grantId,
+            domHash: observation.domHash,
+            screenshotHash: observation.screenshotHash,
+            screenshotRef: observation.screenshotRef,
+            redactionCount: observation.redactions.length,
+          },
+        },
+      ],
     },
   };
 }
@@ -234,12 +350,52 @@ function isDeniedRestrictedComputerAction(row: ComputerActionRow): boolean {
   );
 }
 
+function isYcLoggedInBrowserObservation(row: BrowserObservationRow): boolean {
+  return (
+    isYcUrl(row.url, row.origin) &&
+    Boolean(row.domHash) &&
+    Boolean(row.redactedDomSnapshot) &&
+    Boolean(row.replayIndex !== null && row.replayIndex !== undefined) &&
+    (Boolean(row.screenshotHash) || Boolean(row.screenshotRef)) &&
+    isRecord(row.extractedData) &&
+    Object.keys(row.extractedData).length > 0 &&
+    Array.isArray(row.redactions) &&
+    hasMetadataValue(row.metadata, 'credentialBoundary', BROWSER_CREDENTIAL_BOUNDARY) &&
+    hasMetadataString(row.metadata, 'helmDecisionId') &&
+    hasMetadataString(row.metadata, 'helmPolicyVersion')
+  );
+}
+
+function isYcUrl(url: string, origin: string): boolean {
+  return [url, origin].some((value) => {
+    try {
+      const parsed = new URL(value);
+      const hostname = parsed.hostname.toLowerCase();
+      return hostname === 'ycombinator.com' || hostname.endsWith('.ycombinator.com');
+    } catch {
+      return false;
+    }
+  });
+}
+
 function hasPolicyMetadata(row: ComputerActionRow): boolean {
   return (
     Boolean(row.policyDecisionId) &&
     Boolean(row.policyVersion) &&
     isRecord(row.helmDocumentVersionPins) &&
     Object.keys(row.helmDocumentVersionPins).length > 0
+  );
+}
+
+function findBrowserEvidence(row: EvidenceItemRow): boolean {
+  return Boolean(
+    row.browserObservationId &&
+    row.evidenceType === 'browser_observation' &&
+    row.auditEventId &&
+    row.replayRef &&
+    hasMetadataValue(row.metadata, 'credentialBoundary', BROWSER_CREDENTIAL_BOUNDARY) &&
+    hasMetadataString(row.metadata, 'helmDecisionId') &&
+    hasMetadataString(row.metadata, 'helmPolicyVersion'),
   );
 }
 
@@ -271,4 +427,12 @@ function auditRef(row: AuditRow): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasMetadataString(metadata: unknown, key: string): boolean {
+  return isRecord(metadata) && typeof metadata[key] === 'string' && metadata[key].length > 0;
+}
+
+function hasMetadataValue(metadata: unknown, key: string, expected: string): boolean {
+  return isRecord(metadata) && metadata[key] === expected;
 }
