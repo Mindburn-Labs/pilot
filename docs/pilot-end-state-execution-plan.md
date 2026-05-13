@@ -46,7 +46,7 @@ This is the control artifact for moving Pilot from a governed agent/task prototy
 | `command_center`             | `prototype`   | UI Agent         | Command Center Real-State UX Eval                                                 |
 | `startup_lifecycle`          | `prototype`   | Runtime Agent    | Full Startup Launch Eval, Stripe Setup Prep Eval, and Company Formation Prep Eval |
 | `founder_off_grid`           | `blocked`     | Eval Agent       | Founder-Off-Grid Eval                                                             |
-| `polsia_outperformance`      | `blocked`     | Docs Agent       | Polsia Outperformance Proof and production autonomy eval suite                    |
+| `polsia_outperformance`      | `blocked`     | Eval Agent       | Polsia Outperformance Proof and production autonomy eval suite                    |
 
 No row may move to `production_ready` without passing eval metadata in the registry.
 

@@ -13,6 +13,7 @@ import {
   deployTargets,
   evidenceItems,
   evidencePacks,
+  evalRuns,
   missionEdges,
   missionNodes,
   missionTasks,
@@ -27,6 +28,7 @@ import type { Db } from '@pilot/db/client';
 import {
   PRODUCTION_READY_EXECUTION_MODE,
   type ExecutePilotEvalInput,
+  type PilotEvalId,
   type RecordPilotEvalRunInput,
 } from '@pilot/shared/eval';
 
@@ -114,12 +116,41 @@ const FOUNDER_OFF_GRID_DISALLOWED_AUDIT_TERMS = [
   'bank',
   'charge',
 ] as const;
+const POLSIA_REQUIRED_REAL_EVAL_IDS = [
+  'full_startup_launch',
+  'yc_logged_in_browser_extraction',
+  'domain_to_deployment',
+  'stripe_setup_prep',
+  'company_formation_prep',
+  'pmf_discovery',
+  'multi_agent_parallel_build',
+  'helm_governance',
+  'recovery',
+  'founder_off_grid',
+  'command_center_real_state_ux',
+  'safe_computer_sandbox_action',
+  'decision_court_governed_model',
+  'skill_invocation_governance',
+  'approval_resume_isolation',
+  'proof_dag_lineage',
+  'cross_workspace_operator_rejection',
+] as const satisfies readonly PilotEvalId[];
+const POLSIA_REQUIRED_OUTPERFORMANCE_DIMENSIONS = [
+  'external-world startup outcomes',
+  'governance',
+  'evidence',
+  'browser/computer access',
+  'reliability',
+  'trust',
+] as const;
+const POLSIA_MIN_CITATIONS = 3;
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type EvalRunRow = typeof evalRuns.$inferSelect;
 type A2aThreadRow = typeof a2aThreads.$inferSelect;
 type A2aMessageRow = typeof a2aMessages.$inferSelect;
 type MissionRow = typeof missions.$inferSelect;
@@ -198,6 +229,9 @@ export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
       }
       if (input.evalId === 'founder_off_grid') {
         return executeFounderOffGridEval(db, input);
+      }
+      if (input.evalId === 'polsia_outperformance') {
+        return executePolsiaOutperformanceEval(db, input);
       }
       return failedRun(
         input,
@@ -1846,6 +1880,144 @@ async function executeFounderOffGridEval(
   };
 }
 
+async function executePolsiaOutperformanceEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  if (input.capabilityKey && input.capabilityKey !== 'polsia_outperformance') {
+    return failedRun(
+      input,
+      'Polsia Outperformance Eval can only create promotion eligibility for polsia_outperformance',
+    );
+  }
+
+  const artifactRows = await db
+    .select()
+    .from(artifacts)
+    .where(eq(artifacts.workspaceId, input.workspaceId))
+    .orderBy(desc(artifacts.updatedAt), desc(artifacts.id))
+    .limit(500);
+  const evalRunRows = await db
+    .select()
+    .from(evalRuns)
+    .where(eq(evalRuns.workspaceId, input.workspaceId))
+    .orderBy(desc(evalRuns.completedAt), desc(evalRuns.createdAt), desc(evalRuns.id))
+    .limit(1000);
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(eq(evidenceItems.workspaceId, input.workspaceId))
+    .orderBy(desc(evidenceItems.observedAt), desc(evidenceItems.id))
+    .limit(2500);
+  const auditRows = await db
+    .select()
+    .from(auditLog)
+    .where(eq(auditLog.workspaceId, input.workspaceId))
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(2500);
+
+  const proof = findPolsiaOutperformanceProof({
+    workspaceId: input.workspaceId,
+    artifactRows,
+    evalRunRows,
+    evidenceRows,
+    auditRows,
+  });
+
+  if (!proof) {
+    return failedRun(
+      input,
+      'Polsia Outperformance Eval requires a sourced MIN-301 benchmark matrix artifact, every required prior real_external_eval run, a durable eval-run pack, external-world outcome proof, unsupported-claim scoping, and linked benchmark/eval/external audit receipts',
+    );
+  }
+
+  const evidenceRefs = [
+    evidenceRef(proof.benchmarkEvidence),
+    evidenceRef(proof.evalPackEvidence),
+    evidenceRef(proof.externalProofEvidence),
+  ];
+  const auditReceiptRefs = [
+    auditRef(proof.benchmarkAudit),
+    auditRef(proof.evalPackAudit),
+    auditRef(proof.externalProofAudit),
+  ];
+  const benchmarkMetadata = proof.benchmarkEvidence.metadata as Record<string, unknown>;
+  const externalProofMetadata = proof.externalProofEvidence.metadata as Record<string, unknown>;
+  const completedAt = new Date().toISOString();
+
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'polsia_outperformance',
+      status: 'passed',
+      capabilityKey: 'polsia_outperformance',
+      runRef: input.runRef ?? `real-external-eval:polsia-outperformance:${randomUUID()}`,
+      summary:
+        'Polsia Outperformance proof verified sourced benchmark matrix evidence, all required prior real-external eval runs, eval-run pack evidence, external outcome proof, unsupported-claim scoping, and linked audit receipts.',
+      evidenceRefs,
+      auditReceiptRefs,
+      metadata: {
+        runnerRef: 'gateway:polsia_outperformance:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedBenchmarkArtifactId: proof.benchmarkArtifact.id,
+        verifiedBenchmarkEvidenceItemId: proof.benchmarkEvidence.id,
+        verifiedEvalPackEvidenceItemId: proof.evalPackEvidence.id,
+        verifiedExternalProofEvidenceItemId: proof.externalProofEvidence.id,
+        verifiedEvalRunIds: proof.evalRuns.map((row) => row.id),
+        verifiedEvalIds: proof.evalRuns.map((row) => row.evalId),
+        competitor: benchmarkMetadata['competitor'],
+        benchmarkLockIssue: benchmarkMetadata['benchmarkLockIssue'],
+        result: externalProofMetadata['result'],
+        outperformanceDimensions: externalProofMetadata['outperformanceDimensions'],
+        productionReady: false,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'sourced-benchmark-matrix',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.benchmarkEvidence)],
+          auditReceiptRefs: [auditRef(proof.benchmarkAudit)],
+          completedAt,
+          metadata: {
+            artifactId: proof.benchmarkArtifact.id,
+            artifactStoragePath: proof.benchmarkArtifact.storagePath,
+            benchmarkLockIssue: benchmarkMetadata['benchmarkLockIssue'],
+            citationCount: getArrayLength(benchmarkMetadata, 'citations'),
+            mappedEvalIds: getStringArray(benchmarkMetadata, 'mappedEvalIds'),
+          },
+        },
+        {
+          stepKey: 'required-real-eval-run-pack',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.evalPackEvidence)],
+          auditReceiptRefs: [auditRef(proof.evalPackAudit)],
+          completedAt,
+          metadata: {
+            requiredEvalIds: [...POLSIA_REQUIRED_REAL_EVAL_IDS],
+            verifiedEvalRunIds: proof.evalRuns.map((row) => row.id),
+            verifiedEvalRefs: proof.evalRuns.map((row) => row.runRef).filter(Boolean),
+          },
+        },
+        {
+          stepKey: 'external-outcome-proof-and-claim-control',
+          status: 'passed',
+          evidenceRefs: [evidenceRef(proof.externalProofEvidence)],
+          auditReceiptRefs: [auditRef(proof.externalProofAudit)],
+          completedAt,
+          metadata: {
+            result: externalProofMetadata['result'],
+            claimScope: externalProofMetadata['claimScope'],
+            unsupportedClaimsOutOfScope: externalProofMetadata['unsupportedClaimsOutOfScope'],
+            outperformanceDimensions: externalProofMetadata['outperformanceDimensions'],
+            citationCount: getArrayLength(externalProofMetadata, 'citations'),
+          },
+        },
+      ],
+    },
+  };
+}
+
 async function executePmfDiscoveryEval(
   db: Db,
   input: TrustedRealExternalEvalInput,
@@ -3454,9 +3626,7 @@ function findFounderOffGridProof(params: {
     if (missionTaskIds.length === 0) continue;
 
     const missionRuns = params.runRows.filter((row) => missionTaskIds.includes(row.taskId));
-    const handoff = params.handoffRows.find((row) =>
-      isFounderOffGridHandoff(row, missionTaskIds),
-    );
+    const handoff = params.handoffRows.find((row) => isFounderOffGridHandoff(row, missionTaskIds));
     if (!handoff) continue;
 
     const boundaryEvidence = params.evidenceRows.find((row) =>
@@ -3523,24 +3693,24 @@ function findFounderOffGridProof(params: {
 function isFounderOffGridMission(row: MissionRow): boolean {
   return Boolean(
     row.autonomyMode === 'founder_off_grid' &&
-      row.status === 'completed' &&
-      row.completedAt &&
-      row.productionReady === false &&
-      isRecord(row.metadata) &&
-      row.metadata['founderPresence'] === 'absent' &&
-      row.metadata['controlledEval'] === true,
+    row.status === 'completed' &&
+    row.completedAt &&
+    row.productionReady === false &&
+    isRecord(row.metadata) &&
+    row.metadata['founderPresence'] === 'absent' &&
+    row.metadata['controlledEval'] === true,
   );
 }
 
 function isFounderOffGridHandoff(row: AgentHandoffRow, missionTaskIds: string[]): boolean {
   return Boolean(
     missionTaskIds.includes(row.taskId) &&
-      row.handoffKind === 'subagent_spawn' &&
-      row.status === 'completed' &&
-      row.parentTaskRunId &&
-      row.childTaskRunId &&
-      row.completedAt &&
-      isRecord(row.output),
+    row.handoffKind === 'subagent_spawn' &&
+    row.status === 'completed' &&
+    row.parentTaskRunId &&
+    row.childTaskRunId &&
+    row.completedAt &&
+    isRecord(row.output),
   );
 }
 
@@ -3617,40 +3787,40 @@ function findFounderOffGridToolProofs(params: {
 function isFounderOffGridToolExecution(row: ToolExecutionRow): boolean {
   return Boolean(
     row.status === 'completed' &&
-      row.completedAt &&
-      row.actionId &&
-      row.taskRunId &&
-      row.toolKey !== 'finish' &&
-      row.outputHash &&
-      Array.isArray(row.evidenceIds) &&
-      row.evidenceIds.length > 0 &&
-      hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
-      isRecord(row.sanitizedOutput) &&
-      row.sanitizedOutput['founderPresence'] === 'absent' &&
-      row.sanitizedOutput['externalSideEffects'] === false,
+    row.completedAt &&
+    row.actionId &&
+    row.taskRunId &&
+    row.toolKey !== 'finish' &&
+    row.outputHash &&
+    Array.isArray(row.evidenceIds) &&
+    row.evidenceIds.length > 0 &&
+    hasPolicyPin(row.policyDecisionId, row.policyVersion, row.helmDocumentVersionPins) &&
+    isRecord(row.sanitizedOutput) &&
+    row.sanitizedOutput['founderPresence'] === 'absent' &&
+    row.sanitizedOutput['externalSideEffects'] === false,
   );
 }
 
 function isFounderOffGridToolEvidence(row: EvidenceItemRow, execution: ToolExecutionRow): boolean {
   return Boolean(
     row.toolExecutionId === execution.id &&
-      row.taskRunId === execution.taskRunId &&
-      row.actionId === execution.actionId &&
-      row.evidenceType === 'tool_execution_completed' &&
-      row.sourceType === 'tool_broker' &&
-      row.auditEventId &&
-      row.replayRef === `tool:${execution.id}` &&
-      row.contentHash === execution.outputHash &&
-      Array.isArray(execution.evidenceIds) &&
-      execution.evidenceIds.includes(row.id) &&
-      hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
-      hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
-      hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
-      hasMetadataValue(row.metadata, 'status', 'completed') &&
-      hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
-      hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
-      hasMetadataValue(row.metadata, 'founderPresence', 'absent') &&
-      metadataArrayIncludes(row.metadata, 'requiredEvidence', 'founder_off_grid_action_log'),
+    row.taskRunId === execution.taskRunId &&
+    row.actionId === execution.actionId &&
+    row.evidenceType === 'tool_execution_completed' &&
+    row.sourceType === 'tool_broker' &&
+    row.auditEventId &&
+    row.replayRef === `tool:${execution.id}` &&
+    row.contentHash === execution.outputHash &&
+    Array.isArray(execution.evidenceIds) &&
+    execution.evidenceIds.includes(row.id) &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'status', 'completed') &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+    hasMetadataValue(row.metadata, 'founderPresence', 'absent') &&
+    metadataArrayIncludes(row.metadata, 'requiredEvidence', 'founder_off_grid_action_log'),
   );
 }
 
@@ -3661,17 +3831,17 @@ function isFounderOffGridToolAudit(
 ): boolean {
   return Boolean(
     row.id === evidence.auditEventId &&
-      row.workspaceId === evidence.workspaceId &&
-      row.action === 'TOOL_EXECUTION' &&
-      row.target === execution.toolKey &&
-      row.verdict === 'allow' &&
-      hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
-      hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
-      hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
-      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
-      hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
-      hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
-      hasMetadataValue(row.metadata, 'founderPresence', 'absent'),
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'TOOL_EXECUTION' &&
+    row.target === execution.toolKey &&
+    row.verdict === 'allow' &&
+    hasMetadataValue(row.metadata, 'broker', 'tool_broker_v1') &&
+    hasMetadataValue(row.metadata, 'toolKey', execution.toolKey) &&
+    hasMetadataValue(row.metadata, 'toolExecutionId', execution.id) &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'policyDecisionId', execution.policyDecisionId ?? '') &&
+    hasMetadataValue(row.metadata, 'policyVersion', execution.policyVersion ?? '') &&
+    hasMetadataValue(row.metadata, 'founderPresence', 'absent'),
   );
 }
 
@@ -3714,16 +3884,16 @@ function isFounderOffGridCheckpointAudit(
 ): boolean {
   return Boolean(
     row.id === evidence.auditEventId &&
-      row.workspaceId === evidence.workspaceId &&
-      row.action === 'STARTUP_LIFECYCLE_MISSION_CHECKPOINT' &&
-      row.target === mission.id &&
-      row.verdict === 'recorded' &&
-      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
-      hasMetadataValue(row.metadata, 'evidenceType', 'startup_lifecycle_mission_checkpoint') &&
-      hasMetadataValue(row.metadata, 'checkpointKind', 'founder_off_grid') &&
-      hasMetadataValue(row.metadata, 'founderPresence', 'absent') &&
-      hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
-      hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'STARTUP_LIFECYCLE_MISSION_CHECKPOINT' &&
+    row.target === mission.id &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'startup_lifecycle_mission_checkpoint') &&
+    hasMetadataValue(row.metadata, 'checkpointKind', 'founder_off_grid') &&
+    hasMetadataValue(row.metadata, 'founderPresence', 'absent') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
   );
 }
 
@@ -3767,16 +3937,16 @@ function isFounderOffGridReportEvidence(
 function isFounderOffGridReportAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
   return Boolean(
     row.id === evidence.auditEventId &&
-      row.workspaceId === evidence.workspaceId &&
-      row.action === 'FOUNDER_OFF_GRID_PROGRESS_REPORTED' &&
-      row.target === 'founder_off_grid' &&
-      row.verdict === 'recorded' &&
-      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
-      hasMetadataValue(row.metadata, 'evidenceType', 'founder_off_grid_progress_report') &&
-      hasMetadataValue(row.metadata, 'founderOffGridReportVersion', 'founder-off-grid-report.v1') &&
-      hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
-      hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
-      hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'FOUNDER_OFF_GRID_PROGRESS_REPORTED' &&
+    row.target === 'founder_off_grid' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'founder_off_grid_progress_report') &&
+    hasMetadataValue(row.metadata, 'founderOffGridReportVersion', 'founder-off-grid-report.v1') &&
+    hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
   );
 }
 
@@ -3801,7 +3971,10 @@ function isFounderOffGridBlockerEvidence(row: EvidenceItemRow, mission: MissionR
     row.metadata['productionReady'] === false &&
     row.metadata['microPromptCount'] === 0 &&
     row.metadata['onlyTrueEdgeCases'] === true &&
-    stringArrayContainsAllTerms(row.metadata['escalationReasons'], FOUNDER_OFF_GRID_ESCALATION_TERMS) &&
+    stringArrayContainsAllTerms(
+      row.metadata['escalationReasons'],
+      FOUNDER_OFF_GRID_ESCALATION_TERMS,
+    ) &&
     getArrayLength(row.metadata, 'blockerQueue') > 0
   );
 }
@@ -3809,16 +3982,20 @@ function isFounderOffGridBlockerEvidence(row: EvidenceItemRow, mission: MissionR
 function isFounderOffGridBlockerAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
   return Boolean(
     row.id === evidence.auditEventId &&
-      row.workspaceId === evidence.workspaceId &&
-      row.action === 'FOUNDER_OFF_GRID_BLOCKER_QUEUED' &&
-      row.target === 'founder_off_grid' &&
-      row.verdict === 'recorded' &&
-      hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
-      hasMetadataValue(row.metadata, 'evidenceType', 'founder_off_grid_blocker_queue') &&
-      hasMetadataValue(row.metadata, 'founderOffGridBlockerVersion', 'founder-off-grid-blockers.v1') &&
-      hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
-      hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
-      hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'FOUNDER_OFF_GRID_BLOCKER_QUEUED' &&
+    row.target === 'founder_off_grid' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'founder_off_grid_blocker_queue') &&
+    hasMetadataValue(
+      row.metadata,
+      'founderOffGridBlockerVersion',
+      'founder-off-grid-blockers.v1',
+    ) &&
+    hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
   );
 }
 
@@ -3829,6 +4006,264 @@ function hasNoDisallowedFounderAbsentAudit(rows: AuditRow[]): boolean {
     const haystack = `${row.action} ${row.target}`.toLowerCase();
     return !FOUNDER_OFF_GRID_DISALLOWED_AUDIT_TERMS.some((term) => haystack.includes(term));
   });
+}
+
+type PolsiaOutperformanceProof = {
+  benchmarkArtifact: ArtifactRow;
+  benchmarkEvidence: EvidenceItemRow;
+  benchmarkAudit: AuditRow;
+  evalPackEvidence: EvidenceItemRow;
+  evalPackAudit: AuditRow;
+  externalProofEvidence: EvidenceItemRow;
+  externalProofAudit: AuditRow;
+  evalRuns: EvalRunRow[];
+};
+
+function findPolsiaOutperformanceProof(params: {
+  workspaceId: string;
+  artifactRows: ArtifactRow[];
+  evalRunRows: EvalRunRow[];
+  evidenceRows: EvidenceItemRow[];
+  auditRows: AuditRow[];
+}): PolsiaOutperformanceProof | undefined {
+  const evalRunProof = findPolsiaRequiredEvalRuns(params.evalRunRows);
+  if (!evalRunProof) return undefined;
+
+  const benchmarkEvidence = params.evidenceRows.find((row) =>
+    isPolsiaBenchmarkEvidence(row, params.workspaceId),
+  );
+  if (!benchmarkEvidence) return undefined;
+
+  const benchmarkArtifact = params.artifactRows.find((row) =>
+    isPolsiaBenchmarkArtifact(row, benchmarkEvidence),
+  );
+  if (!benchmarkArtifact) return undefined;
+
+  const benchmarkAudit = params.auditRows.find((row) =>
+    isPolsiaBenchmarkAudit(row, benchmarkEvidence),
+  );
+  if (!benchmarkAudit) return undefined;
+
+  const evalPackEvidence = params.evidenceRows.find((row) =>
+    isPolsiaEvalPackEvidence(row, evalRunProof, benchmarkEvidence),
+  );
+  if (!evalPackEvidence) return undefined;
+
+  const evalPackAudit = params.auditRows.find((row) =>
+    isPolsiaEvalPackAudit(row, evalPackEvidence),
+  );
+  if (!evalPackAudit) return undefined;
+
+  const externalProofEvidence = params.evidenceRows.find((row) =>
+    isPolsiaExternalProofEvidence(row, benchmarkEvidence, evalPackEvidence, evalRunProof),
+  );
+  if (!externalProofEvidence) return undefined;
+
+  const externalProofAudit = params.auditRows.find((row) =>
+    isPolsiaExternalProofAudit(row, externalProofEvidence),
+  );
+  if (!externalProofAudit) return undefined;
+
+  return {
+    benchmarkArtifact,
+    benchmarkEvidence,
+    benchmarkAudit,
+    evalPackEvidence,
+    evalPackAudit,
+    externalProofEvidence,
+    externalProofAudit,
+    evalRuns: evalRunProof,
+  };
+}
+
+function findPolsiaRequiredEvalRuns(rows: EvalRunRow[]): EvalRunRow[] | undefined {
+  const selected: EvalRunRow[] = [];
+  for (const evalId of POLSIA_REQUIRED_REAL_EVAL_IDS) {
+    const run = rows.find((row) => isPassingPolsiaRequiredEvalRun(row, evalId));
+    if (!run) return undefined;
+    selected.push(run);
+  }
+  return selected;
+}
+
+function isPassingPolsiaRequiredEvalRun(row: EvalRunRow, evalId: PilotEvalId): boolean {
+  return Boolean(
+    row.evalId === evalId &&
+    row.status === 'passed' &&
+    row.completedAt &&
+    Array.isArray(row.evidenceRefs) &&
+    row.evidenceRefs.length > 0 &&
+    Array.isArray(row.auditReceiptRefs) &&
+    row.auditReceiptRefs.length > 0 &&
+    isRecord(row.metadata) &&
+    row.metadata['executionMode'] === PRODUCTION_READY_EXECUTION_MODE,
+  );
+}
+
+function isPolsiaBenchmarkArtifact(row: ArtifactRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    evidence.artifactId === row.id &&
+    row.workspaceId === evidence.workspaceId &&
+    row.storagePath &&
+    row.currentVersion >= 1 &&
+    isRecord(row.metadata) &&
+    row.metadata['evalId'] === 'polsia_outperformance' &&
+    row.metadata['artifactKind'] === 'benchmark_matrix' &&
+    row.metadata['competitor'] === 'Polsia',
+  );
+}
+
+function isPolsiaBenchmarkEvidence(row: EvidenceItemRow, workspaceId: string): boolean {
+  if (
+    row.workspaceId !== workspaceId ||
+    row.evidenceType !== 'polsia_outperformance_benchmark_matrix' ||
+    row.sourceType !== 'benchmark_artifact_reader' ||
+    row.redactionState !== 'redacted' ||
+    !row.artifactId ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash) ||
+    !isRecord(row.metadata)
+  ) {
+    return false;
+  }
+  return (
+    row.metadata['competitor'] === 'Polsia' &&
+    row.metadata['benchmarkLockIssue'] === 'MIN-301' &&
+    row.metadata['requirementsMapped'] === true &&
+    row.metadata['unsupportedClaimsOutOfScope'] === true &&
+    row.metadata['productionReady'] === false &&
+    arrayContainsAll(row.metadata['mappedEvalIds'], [...POLSIA_REQUIRED_REAL_EVAL_IDS]) &&
+    stringArrayContainsAllTerms(
+      row.metadata['outperformanceDimensions'],
+      POLSIA_REQUIRED_OUTPERFORMANCE_DIMENSIONS,
+    ) &&
+    getArrayLength(row.metadata, 'citations') >= POLSIA_MIN_CITATIONS
+  );
+}
+
+function isPolsiaBenchmarkAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'POLSIA_BENCHMARK_MATRIX_RECORDED' &&
+    row.target === 'polsia_outperformance' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'polsia_outperformance_benchmark_matrix') &&
+    hasMetadataValue(row.metadata, 'competitor', 'Polsia') &&
+    hasMetadataValue(row.metadata, 'benchmarkLockIssue', 'MIN-301') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+function isPolsiaEvalPackEvidence(
+  row: EvidenceItemRow,
+  evalRunsProof: EvalRunRow[],
+  benchmarkEvidence: EvidenceItemRow,
+): boolean {
+  if (
+    row.workspaceId !== benchmarkEvidence.workspaceId ||
+    row.evidenceType !== 'polsia_outperformance_eval_run_pack' ||
+    row.sourceType !== 'eval_runner' ||
+    row.redactionState !== 'redacted' ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash) ||
+    !isRecord(row.metadata)
+  ) {
+    return false;
+  }
+
+  const evalRunIds = evalRunsProof.map((run) => run.id);
+  const evalIds = evalRunsProof.map((run) => run.evalId);
+  return (
+    row.metadata['executionMode'] === PRODUCTION_READY_EXECUTION_MODE &&
+    row.metadata['allRequiredEvalRunsPassed'] === true &&
+    row.metadata['benchmarkEvidenceItemId'] === benchmarkEvidence.id &&
+    arrayContainsAll(row.metadata['evalRunIds'], evalRunIds) &&
+    arrayContainsAll(row.metadata['evalIds'], [...POLSIA_REQUIRED_REAL_EVAL_IDS]) &&
+    arrayContainsAll(evalIds, [...POLSIA_REQUIRED_REAL_EVAL_IDS]) &&
+    getArrayLength(row.metadata, 'evidenceRefs') >= POLSIA_REQUIRED_REAL_EVAL_IDS.length &&
+    getArrayLength(row.metadata, 'auditReceiptRefs') >= POLSIA_REQUIRED_REAL_EVAL_IDS.length
+  );
+}
+
+function isPolsiaEvalPackAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'POLSIA_OUTPERFORMANCE_EVAL_PACK' &&
+    row.target === 'polsia_outperformance' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(row.metadata, 'evidenceType', 'polsia_outperformance_eval_run_pack') &&
+    hasMetadataValue(row.metadata, 'executionMode', PRODUCTION_READY_EXECUTION_MODE) &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
+}
+
+function isPolsiaExternalProofEvidence(
+  row: EvidenceItemRow,
+  benchmarkEvidence: EvidenceItemRow,
+  evalPackEvidence: EvidenceItemRow,
+  evalRunsProof: EvalRunRow[],
+): boolean {
+  if (
+    row.workspaceId !== benchmarkEvidence.workspaceId ||
+    row.evidenceType !== 'polsia_outperformance_external_outcome_proof' ||
+    row.sourceType !== 'eval_runner' ||
+    row.redactionState !== 'redacted' ||
+    !row.auditEventId ||
+    !row.replayRef ||
+    !isSha256ContentHash(row.contentHash) ||
+    !isRecord(row.metadata)
+  ) {
+    return false;
+  }
+
+  return (
+    row.metadata['competitor'] === 'Polsia' &&
+    row.metadata['result'] === 'pilot_outperforms' &&
+    row.metadata['claimScope'] === 'external-world-autonomy' &&
+    row.metadata['externalOutcomeProof'] === true &&
+    row.metadata['unsupportedClaimsOutOfScope'] === true &&
+    row.metadata['productionReady'] === false &&
+    row.metadata['benchmarkEvidenceItemId'] === benchmarkEvidence.id &&
+    row.metadata['evalPackEvidenceItemId'] === evalPackEvidence.id &&
+    arrayContainsAll(
+      row.metadata['evalRunIds'],
+      evalRunsProof.map((run) => run.id),
+    ) &&
+    arrayContainsAll(row.metadata['evalIds'], [...POLSIA_REQUIRED_REAL_EVAL_IDS]) &&
+    stringArrayContainsAllTerms(
+      row.metadata['outperformanceDimensions'],
+      POLSIA_REQUIRED_OUTPERFORMANCE_DIMENSIONS,
+    ) &&
+    getArrayLength(row.metadata, 'citations') >= POLSIA_MIN_CITATIONS
+  );
+}
+
+function isPolsiaExternalProofAudit(row: AuditRow, evidence: EvidenceItemRow): boolean {
+  return Boolean(
+    row.id === evidence.auditEventId &&
+    row.workspaceId === evidence.workspaceId &&
+    row.action === 'POLSIA_OUTPERFORMANCE_EXTERNAL_PROOF' &&
+    row.target === 'polsia_outperformance' &&
+    row.verdict === 'recorded' &&
+    hasMetadataValue(row.metadata, 'evidenceItemId', evidence.id) &&
+    hasMetadataValue(
+      row.metadata,
+      'evidenceType',
+      'polsia_outperformance_external_outcome_proof',
+    ) &&
+    hasMetadataValue(row.metadata, 'competitor', 'Polsia') &&
+    hasMetadataValue(row.metadata, 'result', 'pilot_outperforms') &&
+    hasMetadataValue(row.metadata, 'replayRef', evidence.replayRef ?? '') &&
+    hasMetadataValue(row.metadata, 'contentHash', evidence.contentHash ?? ''),
+  );
 }
 
 type DomainComputerProof = {

@@ -534,12 +534,11 @@ const capabilityRecords = validateCapabilityRecords([
       'Pilot has not yet produced sourced competitive parity/outperformance requirements or eval-backed proof that it beats Polsia on real external startup outcomes, governance, evidence, and trust.',
     owner: 'Docs Agent',
     blockers: [
-      'Benchmark Lock issue MIN-301 must complete with sourced capability-level teardown',
-      'Benchmark-derived requirements must map to phase issues or explicit out-of-scope decisions',
-      'Pilot must pass external-world autonomy evals before claiming outperformance',
+      'No persisted Polsia Outperformance real_external_eval run has passed with sourced benchmark matrix, eval-run pack, external-world outcome proof, and linked audit receipts',
+      'Registry remains blocked until a source-controlled promotion PR is backed by persisted Polsia Outperformance evidence and production autonomy eval results',
     ],
     evidence: [
-      'MIN-301 blocks later autonomy/product phases until benchmark findings are reflected in implementation and eval requirements',
+      'Gateway real_external_eval runner for Polsia Outperformance verifies a sourced MIN-301 benchmark matrix artifact, all required prior real_external_eval runs, eval-run pack evidence, external-world outcome proof, unsupported-claim scoping, and benchmark/eval/external audit receipts before creating promotion eligibility',
     ],
     evalRequirement: 'Polsia Outperformance Proof and Production Autonomy Eval Suite',
     updatedAt: CAPABILITY_REGISTRY_UPDATED_AT,

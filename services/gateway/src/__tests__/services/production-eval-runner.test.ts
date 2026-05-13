@@ -12,6 +12,7 @@ import {
   deployTargets,
   evidenceItems,
   evidencePacks,
+  evalRuns,
   missionEdges,
   missionNodes,
   missionTasks,
@@ -40,12 +41,32 @@ const fullStartupStages = [
   'growth_experiments',
   'operations_recovery',
 ] as const;
+const polsiaRequiredEvalIds = [
+  'full_startup_launch',
+  'yc_logged_in_browser_extraction',
+  'domain_to_deployment',
+  'stripe_setup_prep',
+  'company_formation_prep',
+  'pmf_discovery',
+  'multi_agent_parallel_build',
+  'helm_governance',
+  'recovery',
+  'founder_off_grid',
+  'command_center_real_state_ux',
+  'safe_computer_sandbox_action',
+  'decision_court_governed_model',
+  'skill_invocation_governance',
+  'approval_resume_isolation',
+  'proof_dag_lineage',
+  'cross_workspace_operator_rejection',
+] as const;
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
 type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
+type EvalRunRow = typeof evalRuns.$inferSelect;
 type A2aThreadRow = typeof a2aThreads.$inferSelect;
 type A2aMessageRow = typeof a2aMessages.$inferSelect;
 type MissionRow = typeof missions.$inferSelect;
@@ -67,6 +88,7 @@ function createRunnerDb({
   actions = [],
   browser = [],
   packs = [],
+  evalRunRows = [],
   evidence = [],
   audits = [],
   a2aThreadRows = [],
@@ -89,6 +111,7 @@ function createRunnerDb({
   actions?: ComputerActionRow[];
   browser?: BrowserObservationRow[];
   packs?: EvidencePackRow[];
+  evalRunRows?: EvalRunRow[];
   evidence?: EvidenceItemRow[];
   audits?: AuditRow[];
   a2aThreadRows?: A2aThreadRow[];
@@ -118,43 +141,45 @@ function createRunnerDb({
               ? browser
               : table === evidencePacks
                 ? packs
-                : table === evidenceItems
-                  ? evidence
-                  : table === auditLog
-                    ? audits
-                    : table === a2aThreads
-                      ? a2aThreadRows
-                      : table === a2aMessages
-                        ? a2aMessageRows
-                        : table === missions
-                          ? missionRows
-                          : table === missionNodes
-                            ? missionNodeRows
-                            : table === missionEdges
-                              ? missionEdgeRows
-                              : table === missionTasks
-                                ? missionTaskRows
-                                : table === tasks
-                                  ? taskRows
-                                  : table === taskRuns
-                                    ? taskRunRows
-                                    : table === agentHandoffs
-                                      ? handoffRows
-                                      : table === artifacts
-                                        ? artifactRows
-                                        : table === deployTargets
-                                          ? deployTargetRows
-                                          : table === deployments
-                                            ? deploymentRows
-                                            : table === deployHealth
-                                              ? deployHealthRows
-                                              : table === opportunities
-                                                ? opportunityRows
-                                                : table === opportunityScores
-                                                  ? scoreRows
-                                                  : table === toolExecutions
-                                                    ? toolExecutionRows
-                                                    : [];
+                : table === evalRuns
+                  ? evalRunRows
+                  : table === evidenceItems
+                    ? evidence
+                    : table === auditLog
+                      ? audits
+                      : table === a2aThreads
+                        ? a2aThreadRows
+                        : table === a2aMessages
+                          ? a2aMessageRows
+                          : table === missions
+                            ? missionRows
+                            : table === missionNodes
+                              ? missionNodeRows
+                              : table === missionEdges
+                                ? missionEdgeRows
+                                : table === missionTasks
+                                  ? missionTaskRows
+                                  : table === tasks
+                                    ? taskRows
+                                    : table === taskRuns
+                                      ? taskRunRows
+                                      : table === agentHandoffs
+                                        ? handoffRows
+                                        : table === artifacts
+                                          ? artifactRows
+                                          : table === deployTargets
+                                            ? deployTargetRows
+                                            : table === deployments
+                                              ? deploymentRows
+                                              : table === deployHealth
+                                                ? deployHealthRows
+                                                : table === opportunities
+                                                  ? opportunityRows
+                                                  : table === opportunityScores
+                                                    ? scoreRows
+                                                    : table === toolExecutions
+                                                      ? toolExecutionRows
+                                                      : [];
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -532,6 +557,29 @@ function auditRow(overrides: Partial<AuditRow>): AuditRow {
     reason: null,
     metadata: {},
     createdAt: new Date('2026-05-12T00:01:00.000Z'),
+    ...overrides,
+  };
+}
+
+function evalRunRow(overrides: Partial<EvalRunRow>): EvalRunRow {
+  const evalId = overrides.evalId ?? 'full_startup_launch';
+  return {
+    id: `eval-run-${evalId}`,
+    workspaceId,
+    evalId,
+    status: 'passed',
+    capabilityKey: null,
+    runRef: `real-external-eval:${evalId}:fixture`,
+    failureReason: null,
+    evidenceRefs: [`evidence:${evalId}`],
+    auditReceiptRefs: [`audit:${evalId}`],
+    metadata: {
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      runnerRef: `fixture:${evalId}`,
+    },
+    startedAt: new Date('2026-05-12T00:00:00.000Z'),
+    completedAt: new Date('2026-05-12T00:02:00.000Z'),
+    createdAt: new Date('2026-05-12T00:00:00.000Z'),
     ...overrides,
   };
 }
@@ -2110,9 +2158,7 @@ function commandCenterUxMetadata(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function founderOffGridFixture({
-  includeBlocker = true,
-}: { includeBlocker?: boolean } = {}): {
+function founderOffGridFixture({ includeBlocker = true }: { includeBlocker?: boolean } = {}): {
   missionRows: MissionRow[];
   missionTaskRows: MissionTaskRow[];
   taskRows: TaskRow[];
@@ -2434,6 +2480,179 @@ function founderOffGridFixture({
           },
         }),
       ),
+    ],
+  };
+}
+
+function polsiaOutperformanceFixture({
+  omitEvalId,
+  includeExternalProof = true,
+}: {
+  omitEvalId?: (typeof polsiaRequiredEvalIds)[number];
+  includeExternalProof?: boolean;
+} = {}): {
+  artifactRows: ArtifactRow[];
+  evalRunRows: EvalRunRow[];
+  evidence: EvidenceItemRow[];
+  audits: AuditRow[];
+} {
+  const evalRunRows = polsiaRequiredEvalIds
+    .filter((evalId) => evalId !== omitEvalId)
+    .map((evalId) => evalRunRow({ id: `eval-run-${evalId}`, evalId }));
+  const evalIds = evalRunRows.map((row) => row.evalId);
+  const evalRunIds = evalRunRows.map((row) => row.id);
+  const evidenceRefs = evalRunRows.flatMap((row) => row.evidenceRefs);
+  const auditReceiptRefs = evalRunRows.flatMap((row) => row.auditReceiptRefs);
+  const dimensions = [
+    'external-world startup outcomes',
+    'governance',
+    'evidence',
+    'browser/computer access',
+    'reliability',
+    'trust',
+  ];
+  const citations = [
+    { url: 'https://example.com/polsia/benchmark-1', title: 'Benchmark source 1' },
+    { url: 'https://example.com/polsia/benchmark-2', title: 'Benchmark source 2' },
+    { url: 'https://example.com/polsia/benchmark-3', title: 'Benchmark source 3' },
+  ];
+  const benchmarkHash = `sha256:${'1'.repeat(64)}`;
+  const evalPackHash = `sha256:${'2'.repeat(64)}`;
+  const externalHash = `sha256:${'3'.repeat(64)}`;
+  const artifact = artifactRow({
+    id: 'artifact-polsia-benchmark-matrix',
+    type: 'pdf',
+    name: 'Polsia outperformance benchmark matrix',
+    description: 'Sourced MIN-301 benchmark matrix mapped to Pilot production evals',
+    storagePath: 'artifacts/evals/polsia-outperformance/benchmark-matrix.pdf',
+    mimeType: 'application/pdf',
+    metadata: {
+      evalId: 'polsia_outperformance',
+      artifactKind: 'benchmark_matrix',
+      competitor: 'Polsia',
+      benchmarkLockIssue: 'MIN-301',
+    },
+  });
+
+  return {
+    artifactRows: [artifact],
+    evalRunRows,
+    evidence: [
+      evidenceItem({
+        id: 'evidence-polsia-benchmark-matrix',
+        computerActionId: null,
+        artifactId: artifact.id,
+        evidenceType: 'polsia_outperformance_benchmark_matrix',
+        sourceType: 'benchmark_artifact_reader',
+        auditEventId: 'audit-polsia-benchmark-matrix',
+        sensitivity: 'internal',
+        contentHash: benchmarkHash,
+        replayRef: 'polsia:benchmark:matrix:v1',
+        metadata: {
+          competitor: 'Polsia',
+          benchmarkLockIssue: 'MIN-301',
+          requirementsMapped: true,
+          unsupportedClaimsOutOfScope: true,
+          productionReady: false,
+          mappedEvalIds: [...polsiaRequiredEvalIds],
+          outperformanceDimensions: dimensions,
+          citations,
+        },
+      }),
+      evidenceItem({
+        id: 'evidence-polsia-eval-run-pack',
+        computerActionId: null,
+        evidenceType: 'polsia_outperformance_eval_run_pack',
+        sourceType: 'eval_runner',
+        auditEventId: 'audit-polsia-eval-run-pack',
+        sensitivity: 'internal',
+        contentHash: evalPackHash,
+        replayRef: 'polsia:eval-pack:v1',
+        metadata: {
+          executionMode: PRODUCTION_READY_EXECUTION_MODE,
+          allRequiredEvalRunsPassed: true,
+          benchmarkEvidenceItemId: 'evidence-polsia-benchmark-matrix',
+          evalIds,
+          evalRunIds,
+          evidenceRefs,
+          auditReceiptRefs,
+        },
+      }),
+      ...(includeExternalProof
+        ? [
+            evidenceItem({
+              id: 'evidence-polsia-external-outcome-proof',
+              computerActionId: null,
+              evidenceType: 'polsia_outperformance_external_outcome_proof',
+              sourceType: 'eval_runner',
+              auditEventId: 'audit-polsia-external-outcome-proof',
+              sensitivity: 'internal',
+              contentHash: externalHash,
+              replayRef: 'polsia:external-outcome:v1',
+              metadata: {
+                competitor: 'Polsia',
+                result: 'pilot_outperforms',
+                claimScope: 'external-world-autonomy',
+                externalOutcomeProof: true,
+                unsupportedClaimsOutOfScope: true,
+                productionReady: false,
+                benchmarkEvidenceItemId: 'evidence-polsia-benchmark-matrix',
+                evalPackEvidenceItemId: 'evidence-polsia-eval-run-pack',
+                evalIds,
+                evalRunIds,
+                outperformanceDimensions: dimensions,
+                citations,
+              },
+            }),
+          ]
+        : []),
+    ],
+    audits: [
+      auditRow({
+        id: 'audit-polsia-benchmark-matrix',
+        action: 'POLSIA_BENCHMARK_MATRIX_RECORDED',
+        target: 'polsia_outperformance',
+        verdict: 'recorded',
+        metadata: {
+          evidenceItemId: 'evidence-polsia-benchmark-matrix',
+          evidenceType: 'polsia_outperformance_benchmark_matrix',
+          competitor: 'Polsia',
+          benchmarkLockIssue: 'MIN-301',
+          replayRef: 'polsia:benchmark:matrix:v1',
+          contentHash: benchmarkHash,
+        },
+      }),
+      auditRow({
+        id: 'audit-polsia-eval-run-pack',
+        action: 'POLSIA_OUTPERFORMANCE_EVAL_PACK',
+        target: 'polsia_outperformance',
+        verdict: 'recorded',
+        metadata: {
+          evidenceItemId: 'evidence-polsia-eval-run-pack',
+          evidenceType: 'polsia_outperformance_eval_run_pack',
+          executionMode: PRODUCTION_READY_EXECUTION_MODE,
+          replayRef: 'polsia:eval-pack:v1',
+          contentHash: evalPackHash,
+        },
+      }),
+      ...(includeExternalProof
+        ? [
+            auditRow({
+              id: 'audit-polsia-external-outcome-proof',
+              action: 'POLSIA_OUTPERFORMANCE_EXTERNAL_PROOF',
+              target: 'polsia_outperformance',
+              verdict: 'recorded',
+              metadata: {
+                evidenceItemId: 'evidence-polsia-external-outcome-proof',
+                evidenceType: 'polsia_outperformance_external_outcome_proof',
+                competitor: 'Polsia',
+                result: 'pilot_outperforms',
+                replayRef: 'polsia:external-outcome:v1',
+                contentHash: externalHash,
+              },
+            }),
+          ]
+        : []),
     ],
   };
 }
@@ -4865,12 +5084,118 @@ describe('createProductionEvalRunner', () => {
     expect(result.run.auditReceiptRefs).toEqual([]);
   });
 
+  it('passes polsia_outperformance only from benchmark matrix, eval pack, external proof, prior real evals, and audits', async () => {
+    const fixture = polsiaOutperformanceFixture();
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'polsia_outperformance',
+      capabilityKey: 'polsia_outperformance',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.blockers).toBeUndefined();
+    expect(result.run).toMatchObject({
+      evalId: 'polsia_outperformance',
+      status: 'passed',
+      capabilityKey: 'polsia_outperformance',
+      metadata: {
+        runnerRef: 'gateway:polsia_outperformance:v1',
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+        verifiedBenchmarkArtifactId: 'artifact-polsia-benchmark-matrix',
+        verifiedBenchmarkEvidenceItemId: 'evidence-polsia-benchmark-matrix',
+        verifiedEvalPackEvidenceItemId: 'evidence-polsia-eval-run-pack',
+        verifiedExternalProofEvidenceItemId: 'evidence-polsia-external-outcome-proof',
+        verifiedEvalRunIds: polsiaRequiredEvalIds.map((evalId) => `eval-run-${evalId}`),
+        verifiedEvalIds: [...polsiaRequiredEvalIds],
+        competitor: 'Polsia',
+        benchmarkLockIssue: 'MIN-301',
+        result: 'pilot_outperforms',
+        productionReady: false,
+      },
+    });
+    expect(result.run.evidenceRefs).toEqual([
+      'polsia:benchmark:matrix:v1',
+      'polsia:eval-pack:v1',
+      'polsia:external-outcome:v1',
+    ]);
+    expect(result.run.auditReceiptRefs).toEqual([
+      'audit:audit-polsia-benchmark-matrix',
+      'audit:audit-polsia-eval-run-pack',
+      'audit:audit-polsia-external-outcome-proof',
+    ]);
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'sourced-benchmark-matrix',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'required-real-eval-run-pack',
+        status: 'passed',
+      }),
+      expect.objectContaining({
+        stepKey: 'external-outcome-proof-and-claim-control',
+        status: 'passed',
+      }),
+    ]);
+  });
+
+  it('fails polsia_outperformance when a required prior real eval run is missing', async () => {
+    const fixture = polsiaOutperformanceFixture({ omitEvalId: 'founder_off_grid' });
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'polsia_outperformance',
+      capabilityKey: 'polsia_outperformance',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('Polsia Outperformance Eval requires');
+    expect(result.run.evidenceRefs).toEqual([]);
+    expect(result.run.auditReceiptRefs).toEqual([]);
+  });
+
+  it('fails polsia_outperformance when external-world outcome proof is missing', async () => {
+    const fixture = polsiaOutperformanceFixture({ includeExternalProof: false });
+    const runner = createProductionEvalRunner(createRunnerDb(fixture));
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'polsia_outperformance',
+      capabilityKey: 'polsia_outperformance',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('external-world outcome proof');
+    expect(result.run.evidenceRefs).toEqual([]);
+    expect(result.run.auditReceiptRefs).toEqual([]);
+  });
+
   it('fails unsupported real_external_eval scenarios instead of fabricating a pass', async () => {
     const runner = createProductionEvalRunner(createRunnerDb({}));
 
     const result = await runner.execute({
       workspaceId,
-      evalId: 'polsia_outperformance',
+      evalId: 'not_registered' as never,
       executionMode: PRODUCTION_READY_EXECUTION_MODE,
       evidenceRefs: [],
       auditReceiptRefs: [],
@@ -4881,7 +5206,7 @@ describe('createProductionEvalRunner', () => {
 
     expect(result.run.status).toBe('failed');
     expect(result.run.failureReason).toContain(
-      'No trusted real_external_eval runner is implemented for polsia_outperformance',
+      'No trusted real_external_eval runner is implemented for not_registered',
     );
   });
 });
