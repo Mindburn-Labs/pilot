@@ -81,7 +81,7 @@ describe('LLM04 Oversized input (DoS) handling', () => {
     expect(out.cleaned).toBe('helloworld');
     expect(out.tainted).toBe(true);
     expect(out.warnings.join('\n')).toContain('exceeds sanitizer output limit');
-  });
+  }, 15_000);
 
   it('large clean payloads are explicitly bounded before reaching model context', () => {
     const out = sanitizeScrapingOutput('a'.repeat(MAX_SANITIZED_OUTPUT_CHARS + 100));

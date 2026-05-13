@@ -470,46 +470,78 @@ export function connectorRoutes(deps: GatewayDeps) {
       );
     }
 
+    const scopes = c.req.query('scopes')?.split(',').filter(Boolean);
+    const redirectRequested = c.req.query('redirect') === 'true';
+    const oauthConnector = {
+      id: name,
+      name,
+      description: name,
+      authType: 'oauth2' as const,
+      requiredScopes: scopes ?? [],
+      requiresApproval: true,
+    };
+    const oauthIntent = await appendConnectorEvidenceProof(deps, {
+      workspaceId,
+      connector: oauthConnector,
+      evidenceType: 'connector_oauth_initiate_requested',
+      title: `Connector OAuth initiation requested: ${name}`,
+      summary: `OAuth flow initiation was requested for ${name}`,
+      replayRef: `connector:${name}:oauth:initiate-requested:${hashJson({ connectorId: name, scopes: scopes ?? [], redirectRequested }).slice(7, 23)}`,
+      hashContent: {
+        connectorId: name,
+        scopes: scopes ?? [],
+        redirectRequested,
+        requestedAction: 'initiate_connector_oauth',
+      },
+      metadata: {
+        scopes: scopes ?? [],
+        redirectRequested,
+        effectOrder: 'before_oauth_initiate',
+        requestedAction: 'initiate_connector_oauth',
+        credentialBoundary: 'oauth_url_not_stored_in_evidence',
+      },
+    });
+
+    let authUrl: string;
     try {
-      const scopes = c.req.query('scopes')?.split(',').filter(Boolean);
-      const { authUrl } = deps.oauth.initiateFlow({
+      const flow = deps.oauth.initiateFlow({
         connectorId: name,
         workspaceId,
         scopes,
       });
-      const evidenceItemId = await appendConnectorEvidence(deps, {
-        workspaceId,
-        connector: {
-          id: name,
-          name,
-          description: name,
-          authType: 'oauth2',
-          requiredScopes: scopes ?? [],
-          requiresApproval: true,
-        },
-        evidenceType: 'connector_oauth_initiated',
-        title: `Connector OAuth initiated: ${name}`,
-        summary: `OAuth flow was initiated for ${name}`,
-        replayRef: `connector:${name}:oauth:initiate`,
-        hashContent: {
-          connectorId: name,
-          scopes: scopes ?? [],
-          redirectRequested: c.req.query('redirect') === 'true',
-        },
-        metadata: {
-          scopes: scopes ?? [],
-          redirectRequested: c.req.query('redirect') === 'true',
-          credentialBoundary: 'oauth_url_not_stored_in_evidence',
-        },
-      });
-      if (c.req.query('redirect') === 'true') {
-        return c.redirect(authUrl);
-      }
-      return c.json({ authUrl, connector: name, evidenceItemId });
+      authUrl = flow.authUrl;
     } catch (err) {
       const message = err instanceof Error ? err.message : 'OAuth initiation failed';
       return c.json({ error: message }, 400);
     }
+
+    const evidenceItemId = await appendConnectorEvidence(deps, {
+      workspaceId,
+      connector: oauthConnector,
+      evidenceType: 'connector_oauth_initiated',
+      title: `Connector OAuth initiated: ${name}`,
+      summary: `OAuth flow was initiated for ${name}`,
+      replayRef: `connector:${name}:oauth:initiate`,
+      hashContent: {
+        connectorId: name,
+        scopes: scopes ?? [],
+        redirectRequested,
+      },
+      metadata: {
+        scopes: scopes ?? [],
+        redirectRequested,
+        credentialBoundary: 'oauth_url_not_stored_in_evidence',
+      },
+    });
+    if (redirectRequested) {
+      return c.redirect(authUrl);
+    }
+    return c.json({
+      authUrl,
+      connector: name,
+      evidenceItemId,
+      requestEvidenceItemId: oauthIntent.evidenceItemId,
+    });
   });
 
   app.get('/:name/oauth/callback', async (c) => {
@@ -572,18 +604,39 @@ export function connectorRoutes(deps: GatewayDeps) {
     const ownership = await requireOwnedGrant(deps, c, name, grantId);
     if (ownership instanceof Response) return ownership;
 
+    const oauthConnector = {
+      id: name,
+      name,
+      description: name,
+      authType: 'oauth2' as const,
+      requiredScopes: [],
+      requiresApproval: true,
+    };
+    const refreshIntent = await appendConnectorEvidenceProof(deps, {
+      workspaceId: ownership.workspaceId,
+      connector: oauthConnector,
+      evidenceType: 'connector_oauth_refresh_requested',
+      title: `Connector OAuth refresh requested: ${name}`,
+      summary: `OAuth token refresh was requested for ${name}`,
+      replayRef: `connector:${name}:oauth-refresh-requested:${grantId}`,
+      hashContent: {
+        connectorId: name,
+        grantId,
+        requestedAction: 'refresh_connector_oauth_token',
+      },
+      metadata: {
+        grantId,
+        effectOrder: 'before_oauth_refresh',
+        requestedAction: 'refresh_connector_oauth_token',
+        credentialBoundary: 'no_raw_tokens_in_evidence',
+      },
+    });
+
     const newToken = await deps.oauth.refreshToken(grantId, name);
     if (!newToken) {
       const evidenceItemId = await appendConnectorEvidence(deps, {
         workspaceId: ownership.workspaceId,
-        connector: {
-          id: name,
-          name,
-          description: name,
-          authType: 'oauth2',
-          requiredScopes: [],
-          requiresApproval: true,
-        },
+        connector: oauthConnector,
         evidenceType: 'connector_oauth_refresh_failed',
         title: `Connector OAuth refresh failed: ${name}`,
         summary: `OAuth refresh failed for ${name}; reauthorization is required`,
@@ -599,20 +652,17 @@ export function connectorRoutes(deps: GatewayDeps) {
         },
       });
       return c.json(
-        { error: 'Token refresh failed. Re-authorize the connector.', evidenceItemId },
+        {
+          error: 'Token refresh failed. Re-authorize the connector.',
+          evidenceItemId,
+          requestEvidenceItemId: refreshIntent.evidenceItemId,
+        },
         401,
       );
     }
     const evidenceItemId = await appendConnectorEvidence(deps, {
       workspaceId: ownership.workspaceId,
-      connector: {
-        id: name,
-        name,
-        description: name,
-        authType: 'oauth2',
-        requiredScopes: [],
-        requiresApproval: true,
-      },
+      connector: oauthConnector,
       evidenceType: 'connector_oauth_refreshed',
       title: `Connector OAuth refreshed: ${name}`,
       summary: `OAuth token was refreshed for ${name} without raw token evidence`,
@@ -627,7 +677,11 @@ export function connectorRoutes(deps: GatewayDeps) {
         credentialBoundary: 'no_raw_tokens_in_evidence',
       },
     });
-    return c.json({ refreshed: true, evidenceItemId });
+    return c.json({
+      refreshed: true,
+      evidenceItemId,
+      requestEvidenceItemId: refreshIntent.evidenceItemId,
+    });
   });
 
   app.get('/:name', async (c) => {
