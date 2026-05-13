@@ -6,6 +6,7 @@ import {
   evidenceItems,
   managedTelegramBotLeads,
   managedTelegramBotMessages,
+  managedTelegramBotProvisioningRequests,
   managedTelegramBots,
   workspaceMembers,
   workspaces,
@@ -45,17 +46,21 @@ type ManagedTelegramLeadCapturer = {
   captureLead(managedBotId: string, ctx: unknown): Promise<void>;
 };
 
-function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } = {}) {
+function makeManagedTelegramActionDb(
+  options: { failEvidenceInsert?: boolean; activeBot?: boolean } = {},
+) {
   const inserts: Array<{ table: unknown; value: unknown }> = [];
   const updates: Array<{ table: unknown; value: unknown }> = [];
+  const operations: Array<{ kind: 'insert' | 'update'; table: unknown; value: unknown }> = [];
   const state: {
     workspace: Record<string, unknown>;
     membership: Record<string, unknown>;
     bot: Record<string, unknown>;
+    provisioningRequest: Record<string, unknown> | null;
     lead: Record<string, unknown> | null;
     message: Record<string, unknown>;
   } = {
-    workspace: { id: 'ws-1', ownerId: 'user-1' },
+    workspace: { id: 'ws-1', ownerId: 'user-1', name: 'Acme Labs' },
     membership: { workspaceId: 'ws-1', userId: 'user-1', role: 'owner' },
     bot: {
       id: 'bot-1',
@@ -79,6 +84,7 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
       updatedAt: new Date('2026-05-05T00:00:00Z'),
       disabledAt: null,
     },
+    provisioningRequest: null,
     lead: null,
     message: {
       id: 'msg-1',
@@ -109,12 +115,16 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
     if (table === workspaceMembers) return [state.membership];
     if (table === managedTelegramBotLeads) return state.lead ? [state.lead] : [];
     if (table === managedTelegramBotMessages) return [state.message];
-    if (table === managedTelegramBots) return [state.bot];
+    if (table === managedTelegramBots) return options.activeBot === false ? [] : [state.bot];
+    if (table === managedTelegramBotProvisioningRequests) {
+      return state.provisioningRequest ? [state.provisioningRequest] : [];
+    }
     return [];
   };
 
   const updateTable = (table: unknown, values: Record<string, unknown>) => {
     updates.push({ table, value: values });
+    operations.push({ kind: 'update', table, value: values });
     if (table === managedTelegramBots) {
       state.bot = { ...state.bot, ...values };
       return [state.bot];
@@ -127,11 +137,16 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
       state.lead = { ...(state.lead ?? {}), ...values };
       return [state.lead];
     }
+    if (table === managedTelegramBotProvisioningRequests) {
+      state.provisioningRequest = { ...(state.provisioningRequest ?? {}), ...values };
+      return state.provisioningRequest ? [state.provisioningRequest] : [];
+    }
     return [];
   };
 
   const insertTable = (table: unknown, values: Record<string, unknown>) => {
     inserts.push({ table, value: values });
+    operations.push({ kind: 'insert', table, value: values });
     if (table === managedTelegramBotMessages) {
       state.message = {
         ...state.message,
@@ -148,6 +163,16 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
         updatedAt: new Date('2026-05-05T00:00:00Z'),
       };
       return [state.lead];
+    }
+    if (table === managedTelegramBotProvisioningRequests) {
+      state.provisioningRequest = {
+        ...values,
+        id: values['id'] ?? 'request-1',
+        status: values['status'] ?? 'pending',
+        createdAt: new Date('2026-05-05T00:00:00Z'),
+        updatedAt: new Date('2026-05-05T00:00:00Z'),
+      };
+      return [state.provisioningRequest];
     }
     if (table === approvals) {
       return [
@@ -194,7 +219,7 @@ function makeManagedTelegramActionDb(options: { failEvidenceInsert?: boolean } =
   };
   db.transaction = vi.fn(async (callback: (tx: typeof db) => Promise<unknown>) => callback(db));
 
-  return { db: db as never, state, inserts, updates };
+  return { db: db as never, state, inserts, updates, operations };
 }
 
 function appWithContext(routeFactory: typeof launchRoutes, deps = createMockDeps()) {
@@ -513,8 +538,7 @@ describe('managed Telegram service governance', () => {
     const auditInsert = inserts.find(
       (insert) =>
         insert.table === auditLog &&
-        (insert.value as { action?: string }).action ===
-          'TELEGRAM_CHILD_SUPPORT_MESSAGE_CAPTURED',
+        (insert.value as { action?: string }).action === 'TELEGRAM_CHILD_SUPPORT_MESSAGE_CAPTURED',
     )?.value as { id: string; metadata: Record<string, unknown> };
     expect(auditInsert).toMatchObject({
       workspaceId: 'ws-1',
@@ -591,6 +615,173 @@ describe('managed Telegram service governance', () => {
       status: 503,
       message: 'HELM-governed LLM metadata is required for production Telegram support drafts',
     });
+  });
+
+  it('persists audit-linked evidence before creating managed Telegram provisioning requests', async () => {
+    const { db, state, inserts, operations } = makeManagedTelegramActionDb({ activeBot: false });
+    const service = new ManagedTelegramBotService({
+      db,
+      managerBotToken: 'manager-token',
+      managerBotUsername: 'Manager',
+    });
+
+    const request = await service.createProvisioningRequest({
+      workspaceId: 'ws-1',
+      userId: 'user-1',
+      creatorTelegramId: '999',
+    });
+
+    expect(request.id).toBe(state.provisioningRequest?.['id']);
+    expect(state.provisioningRequest).toMatchObject({
+      workspaceId: 'ws-1',
+      requestedByUserId: 'user-1',
+      creatorTelegramId: '999',
+      status: 'pending',
+    });
+
+    const auditInsert = inserts.find(
+      (insert) =>
+        insert.table === auditLog &&
+        (insert.value as { action?: string }).action ===
+          'TELEGRAM_MANAGED_BOT_PROVISIONING_REQUESTED',
+    )?.value as { id: string; metadata: Record<string, unknown> };
+    expect(auditInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      actor: 'user:user-1',
+      target: state.provisioningRequest?.['id'],
+      verdict: 'pending',
+      metadata: expect.objectContaining({
+        rawCreatorTelegramIdStoredInEvidence: false,
+        rawCreationUrlStoredInEvidence: false,
+      }),
+    });
+
+    const evidenceInsert = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_provisioning_requested',
+    )?.value as { auditEventId: string; metadata: Record<string, unknown> };
+    expect(evidenceInsert).toMatchObject({
+      auditEventId: auditInsert.id,
+      metadata: expect.objectContaining({
+        evidenceContract: 'managed_telegram_control_audit_before_mutation',
+        credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+      }),
+    });
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('999');
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('https://t.me');
+
+    const evidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_provisioning_requested',
+    );
+    const requestIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' && operation.table === managedTelegramBotProvisioningRequests,
+    );
+    expect(evidenceIndex).toBeGreaterThanOrEqual(0);
+    expect(requestIndex).toBeGreaterThan(evidenceIndex);
+  });
+
+  it('fails closed before provisioning request creation when control evidence fails', async () => {
+    const { db, state, inserts } = makeManagedTelegramActionDb({
+      activeBot: false,
+      failEvidenceInsert: true,
+    });
+    const service = new ManagedTelegramBotService({
+      db,
+      managerBotToken: 'manager-token',
+      managerBotUsername: 'Manager',
+    });
+
+    await expect(
+      service.createProvisioningRequest({
+        workspaceId: 'ws-1',
+        userId: 'user-1',
+        creatorTelegramId: '999',
+      }),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(state.provisioningRequest).toBeNull();
+    expect(inserts.some((insert) => insert.table === managedTelegramBotProvisioningRequests)).toBe(
+      false,
+    );
+  });
+
+  it('persists audit-linked evidence before managed Telegram settings updates', async () => {
+    const { db, state, inserts, operations } = makeManagedTelegramActionDb();
+    const service = new ManagedTelegramBotService({ db });
+
+    await service.updateSettings('ws-1', 'user-1', {
+      responseMode: 'approval_required',
+      welcomeCopy: 'Welcome to the private launch.',
+      launchUrl: 'https://launch.example.com/private',
+      supportPrompt: 'Ask the launch team for help.',
+    });
+
+    expect(state.bot['welcomeCopy']).toBe('Welcome to the private launch.');
+    expect(state.bot['launchUrl']).toBe('https://launch.example.com/private');
+    const evidenceInsert = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_settings_update_requested',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(evidenceInsert).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_settings_update_requested',
+      sourceType: 'managed_telegram_control',
+      redactionState: 'redacted',
+      metadata: expect.objectContaining({
+        managedBotId: 'bot-1',
+        rawSettingsValuesStoredInEvidence: false,
+        changedFields: ['launchUrl', 'responseMode', 'supportPrompt', 'welcomeCopy'],
+      }),
+    });
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('Welcome to the private launch.');
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('launch.example.com');
+    expect(JSON.stringify(evidenceInsert.metadata)).not.toContain('Ask the launch team');
+
+    const evidenceIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_settings_update_requested',
+    );
+    const updateIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBots &&
+        (operation.value as { welcomeCopy?: string }).welcomeCopy ===
+          'Welcome to the private launch.',
+    );
+    expect(evidenceIndex).toBeGreaterThanOrEqual(0);
+    expect(updateIndex).toBeGreaterThan(evidenceIndex);
+  });
+
+  it('fails closed before settings update when control evidence fails', async () => {
+    const { db, state, updates } = makeManagedTelegramActionDb({ failEvidenceInsert: true });
+    const service = new ManagedTelegramBotService({ db });
+
+    await expect(
+      service.updateSettings('ws-1', 'user-1', {
+        welcomeCopy: 'This should not persist.',
+      }),
+    ).rejects.toThrow('send evidence unavailable');
+
+    expect(state.bot['welcomeCopy']).toBe('Welcome.');
+    expect(
+      updates.some(
+        (update) =>
+          update.table === managedTelegramBots &&
+          (update.value as { welcomeCopy?: string }).welcomeCopy === 'This should not persist.',
+      ),
+    ).toBe(false);
   });
 
   it('persists HELM policy pins when sending managed Telegram messages', async () => {

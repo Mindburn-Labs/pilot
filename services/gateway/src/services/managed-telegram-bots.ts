@@ -67,6 +67,7 @@ function isElevatedManagedTelegramAction(effectLevel: ManagedTelegramEffectLevel
 
 type ManagedBotRow = typeof managedTelegramBots.$inferSelect;
 type ManagedMessageRow = typeof managedTelegramBotMessages.$inferSelect;
+type ManagedTelegramBotSettings = ReturnType<typeof ManagedTelegramBotSettingsInput.parse>;
 type ManagedTelegramSupportDraft = {
   text: string;
   governanceMetadata: Record<string, unknown>;
@@ -87,6 +88,18 @@ type ManagedTelegramInboundEvidenceInput = {
   summary: string;
   replayRef: string;
   sensitivity: 'internal' | 'sensitive';
+  metadata: Record<string, unknown>;
+};
+type ManagedTelegramControlEvidenceInput = {
+  workspaceId: string;
+  actor: string;
+  action: string;
+  target: string;
+  evidenceType: string;
+  title: string;
+  summary: string;
+  replayRef: string;
+  sensitivity: 'internal' | 'confidential' | 'restricted';
   metadata: Record<string, unknown>;
 };
 
@@ -180,17 +193,6 @@ export class ManagedTelegramBotService {
       throw new ManagedTelegramBotError('Workspace already has an active launch/support bot', 409);
     }
 
-    await this.opts.db
-      .update(managedTelegramBotProvisioningRequests)
-      .set({ status: 'expired', updatedAt: new Date() })
-      .where(
-        and(
-          eq(managedTelegramBotProvisioningRequests.workspaceId, input.workspaceId),
-          eq(managedTelegramBotProvisioningRequests.status, 'pending'),
-          lt(managedTelegramBotProvisioningRequests.expiresAt, new Date()),
-        ),
-      );
-
     const [workspace] = await this.opts.db
       .select()
       .from(workspaces)
@@ -203,20 +205,60 @@ export class ManagedTelegramBotService {
     const creationUrl = buildCreationUrl(managerBotUsername, suggestedUsername, suggestedName);
     const expiresAt = new Date(Date.now() + PROVISIONING_TTL_MS);
 
-    const [request] = await this.opts.db
-      .insert(managedTelegramBotProvisioningRequests)
-      .values({
+    const requestId = randomUUID();
+    const [request] = await this.opts.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      await appendManagedTelegramControlEvidence(db, {
         workspaceId: input.workspaceId,
-        requestedByUserId: input.userId,
-        creatorTelegramId: input.creatorTelegramId,
-        suggestedName,
-        suggestedUsername,
-        managerBotUsername,
-        creationUrl,
-        status: 'pending',
-        expiresAt,
-      })
-      .returning();
+        actor: `user:${input.userId}`,
+        action: 'TELEGRAM_MANAGED_BOT_PROVISIONING_REQUESTED',
+        target: requestId,
+        evidenceType: 'managed_telegram_provisioning_requested',
+        title: 'Managed Telegram provisioning requested',
+        summary: 'A workspace owner requested a managed Telegram launch bot provisioning link.',
+        replayRef: `managed-telegram-provisioning:${requestId}:requested`,
+        sensitivity: 'confidential',
+        metadata: {
+          requestId,
+          requestedByUserId: input.userId,
+          creatorTelegramIdHash: stableHash(input.creatorTelegramId),
+          suggestedUsername,
+          suggestedName,
+          managerBotUsername,
+          creationUrlHash: stableHash(creationUrl),
+          expiresAt: expiresAt.toISOString(),
+          rawCreatorTelegramIdStoredInEvidence: false,
+          rawCreationUrlStoredInEvidence: false,
+        },
+      });
+
+      await db
+        .update(managedTelegramBotProvisioningRequests)
+        .set({ status: 'expired', updatedAt: new Date() })
+        .where(
+          and(
+            eq(managedTelegramBotProvisioningRequests.workspaceId, input.workspaceId),
+            eq(managedTelegramBotProvisioningRequests.status, 'pending'),
+            lt(managedTelegramBotProvisioningRequests.expiresAt, new Date()),
+          ),
+        );
+
+      return db
+        .insert(managedTelegramBotProvisioningRequests)
+        .values({
+          id: requestId,
+          workspaceId: input.workspaceId,
+          requestedByUserId: input.userId,
+          creatorTelegramId: input.creatorTelegramId,
+          suggestedName,
+          suggestedUsername,
+          managerBotUsername,
+          creationUrl,
+          status: 'pending',
+          expiresAt,
+        })
+        .returning();
+    });
 
     if (!request) throw new ManagedTelegramBotError('Failed to create provisioning request', 500);
     return serializeProvisioningRequest(request);
@@ -409,13 +451,32 @@ export class ManagedTelegramBotService {
     if (input.launchUrl !== undefined) updates.launchUrl = input.launchUrl;
     if (input.supportPrompt !== undefined) updates.supportPrompt = input.supportPrompt;
 
-    const [updated] = await this.opts.db
-      .update(managedTelegramBots)
-      .set(updates)
-      .where(
-        and(eq(managedTelegramBots.id, bot.id), eq(managedTelegramBots.workspaceId, workspaceId)),
-      )
-      .returning();
+    const changedFields = Object.keys(updates)
+      .filter((key) => key !== 'updatedAt')
+      .sort();
+    const [updated] = await this.opts.db.transaction(async (tx) => {
+      const db = tx as unknown as Db;
+      await appendManagedTelegramControlEvidence(db, {
+        workspaceId,
+        actor: `user:${userId}`,
+        action: 'TELEGRAM_MANAGED_BOT_SETTINGS_UPDATED',
+        target: bot.id,
+        evidenceType: 'managed_telegram_settings_update_requested',
+        title: 'Managed Telegram settings update requested',
+        summary: 'A workspace owner requested a managed Telegram launch bot settings update.',
+        replayRef: `managed-telegram-bot:${bot.id}:settings-update:${stableHash(JSON.stringify(changedFields)).slice(0, 16)}`,
+        sensitivity: 'internal',
+        metadata: managedTelegramSettingsEvidenceMetadata(bot, input, changedFields),
+      });
+
+      return db
+        .update(managedTelegramBots)
+        .set(updates)
+        .where(
+          and(eq(managedTelegramBots.id, bot.id), eq(managedTelegramBots.workspaceId, workspaceId)),
+        )
+        .returning();
+    });
     return serializeBot(updated ?? bot);
   }
 
@@ -1390,6 +1451,65 @@ async function appendManagedTelegramInboundEvidence(
     .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
 }
 
+async function appendManagedTelegramControlEvidence(
+  db: Pick<Db, 'insert' | 'update'>,
+  input: ManagedTelegramControlEvidenceInput,
+) {
+  const auditEventId = randomUUID();
+  const metadata = {
+    ...input.metadata,
+    surface: 'managed_telegram',
+    evidenceContract: 'managed_telegram_control_audit_before_mutation',
+    credentialBoundary: 'no_raw_credentials_or_session_payloads_in_evidence',
+  };
+
+  await db.insert(auditLog).values({
+    id: auditEventId,
+    workspaceId: input.workspaceId,
+    action: input.action,
+    actor: input.actor,
+    target: input.target,
+    verdict: 'pending',
+    reason: 'Managed Telegram control-plane mutation intent recorded before state mutation.',
+    metadata: {
+      ...metadata,
+      evidenceType: input.evidenceType,
+      replayRef: input.replayRef,
+      evidenceItemId: null,
+    },
+  });
+
+  const evidenceItemId = await appendEvidenceItem(db, {
+    workspaceId: input.workspaceId,
+    auditEventId,
+    evidenceType: input.evidenceType,
+    sourceType: 'managed_telegram_control',
+    title: input.title,
+    summary: input.summary,
+    redactionState: 'redacted',
+    sensitivity: input.sensitivity,
+    contentHash: `sha256:${stableHash(JSON.stringify(metadata))}`,
+    replayRef: input.replayRef,
+    metadata,
+  });
+
+  await db
+    .update(auditLog)
+    .set({
+      verdict: 'allow',
+      reason: null,
+      metadata: {
+        ...metadata,
+        evidenceType: input.evidenceType,
+        replayRef: input.replayRef,
+        evidenceItemId,
+      },
+    })
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), eq(auditLog.id, auditEventId)));
+
+  return { auditEventId, evidenceItemId };
+}
+
 function managedTelegramInboundMetadata(
   row: ManagedBotRow,
   from: { id: string | number; username?: string; first_name?: string; last_name?: string },
@@ -1406,6 +1526,27 @@ function managedTelegramInboundMetadata(
     nameHash: displayName ? stableHash(displayName) : null,
     rawTelegramIdentityStoredInEvidence: false,
     ...extra,
+  };
+}
+
+function managedTelegramSettingsEvidenceMetadata(
+  row: ManagedBotRow,
+  input: ManagedTelegramBotSettings,
+  changedFields: string[],
+) {
+  return {
+    managedBotId: row.id,
+    telegramBotUsername: row.telegramBotUsername,
+    changedFields,
+    responseMode: input.responseMode ?? null,
+    welcomeCopyHash: input.welcomeCopy === undefined ? null : stableHash(input.welcomeCopy),
+    welcomeCopyLength: input.welcomeCopy?.length ?? null,
+    launchUrlHash: input.launchUrl === undefined ? null : stableHash(input.launchUrl ?? ''),
+    launchUrlProvided: input.launchUrl !== undefined,
+    supportPromptHash:
+      input.supportPrompt === undefined ? null : stableHash(input.supportPrompt ?? ''),
+    supportPromptLength: input.supportPrompt?.length ?? null,
+    rawSettingsValuesStoredInEvidence: false,
   };
 }
 
