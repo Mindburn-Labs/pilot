@@ -294,6 +294,7 @@ const capabilityRecords = validateCapabilityRecords([
       'Gate 7 adds computer_actions evidence rows for terminal_command, file_read, file_write, and dev_server_status operations',
       'operator.computer_use requires Tool Broker action lineage, HELM OPERATOR_COMPUTER_USE approval, restricted path deny rules, and command allowlisting before execution',
       'operator.computer_use can execute sandbox terminal_command, file_read, and file_write through the @pilot/sandbox provider abstraction when a provider is configured, and records provider failure as denied evidence when unavailable',
+      'Gateway real_external_eval runner for Safe Computer/Sandbox Action verifies completed and denied computer_actions rows through linked evidence_items and OPERATOR_COMPUTER_USE audit_log rows before creating promotion eligibility',
       'operator.computer_use safe action evidence_items now link to OPERATOR_COMPUTER_USE audit_log rows through audit_event_id with audit-before-evidence FK ordering',
     ],
     evalRequirement: 'Safe Computer/Sandbox Action Eval',
