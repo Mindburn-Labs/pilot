@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, inArray } from 'drizzle-orm';
-import { auditLog, browserObservations, computerActions, evidenceItems } from '@pilot/db/schema';
+import {
+  auditLog,
+  browserObservations,
+  computerActions,
+  evidenceItems,
+  evidencePacks,
+} from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import {
   PRODUCTION_READY_EXECUTION_MODE,
@@ -22,6 +28,7 @@ type ProductionEvalRunner = {
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
+type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 
@@ -36,16 +43,153 @@ const BROWSER_CREDENTIAL_BOUNDARY = 'read_only_no_cookie_or_password_export';
 export function createProductionEvalRunner(db: Db): ProductionEvalRunner {
   return {
     async execute(input) {
-      if (input.evalId !== 'safe_computer_sandbox_action') {
-        if (input.evalId === 'yc_logged_in_browser_extraction') {
-          return executeYcLoggedInBrowserExtractionEval(db, input);
-        }
-        return failedRun(
-          input,
-          `No trusted real_external_eval runner is implemented for ${input.evalId}`,
-        );
+      if (input.evalId === 'safe_computer_sandbox_action') {
+        return executeSafeComputerSandboxEval(db, input);
       }
-      return executeSafeComputerSandboxEval(db, input);
+      if (input.evalId === 'yc_logged_in_browser_extraction') {
+        return executeYcLoggedInBrowserExtractionEval(db, input);
+      }
+      if (input.evalId === 'helm_governance') {
+        return executeHelmGovernanceEval(db, input);
+      }
+      return failedRun(
+        input,
+        `No trusted real_external_eval runner is implemented for ${input.evalId}`,
+      );
+    },
+  };
+}
+
+async function executeHelmGovernanceEval(
+  db: Db,
+  input: TrustedRealExternalEvalInput,
+): Promise<{ run: RecordPilotEvalRunInput }> {
+  const packs = await db
+    .select()
+    .from(evidencePacks)
+    .where(eq(evidencePacks.workspaceId, input.workspaceId))
+    .orderBy(desc(evidencePacks.receivedAt))
+    .limit(200);
+
+  const allowed = packs.find(isAllowedHelmReceiptPack);
+  const deniedOrEscalated = packs.find(isDeniedOrEscalatedHelmReceiptPack);
+  if (!allowed) {
+    return failedRun(
+      input,
+      'HELM Governance Eval requires a durable ALLOW HELM receipt with policy version, decision hash, and workspace principal',
+    );
+  }
+  if (!deniedOrEscalated) {
+    return failedRun(
+      input,
+      'HELM Governance Eval requires a durable DENY or ESCALATE HELM receipt for restricted/high-risk behavior',
+    );
+  }
+
+  const receiptPacks = [allowed, deniedOrEscalated];
+  const evidenceRows = await db
+    .select()
+    .from(evidenceItems)
+    .where(
+      and(
+        eq(evidenceItems.workspaceId, input.workspaceId),
+        inArray(
+          evidenceItems.evidencePackId,
+          receiptPacks.map((pack) => pack.id),
+        ),
+      ),
+    )
+    .orderBy(desc(evidenceItems.observedAt))
+    .limit(50);
+
+  const allowedEvidence = findHelmReceiptEvidence(evidenceRows, allowed);
+  const deniedEvidence = findHelmReceiptEvidence(evidenceRows, deniedOrEscalated);
+  if (!allowedEvidence) {
+    return failedRun(
+      input,
+      `Allowed HELM receipt ${allowed.decisionId} has no audit-linked helm_receipt evidence_items row`,
+    );
+  }
+  if (!deniedEvidence) {
+    return failedRun(
+      input,
+      `Restricted HELM receipt ${deniedOrEscalated.decisionId} has no audit-linked helm_receipt evidence_items row`,
+    );
+  }
+
+  const auditIds = [allowedEvidence.auditEventId, deniedEvidence.auditEventId].filter(
+    (id): id is string => typeof id === 'string' && id.length > 0,
+  );
+  if (auditIds.length < 2) {
+    return failedRun(
+      input,
+      'HELM Governance Eval requires audit-linked evidence for both receipt outcomes',
+    );
+  }
+
+  const audits = await db
+    .select()
+    .from(auditLog)
+    .where(and(eq(auditLog.workspaceId, input.workspaceId), inArray(auditLog.id, auditIds)))
+    .limit(auditIds.length);
+  const allowedAudit = findHelmReceiptAudit(audits, allowedEvidence.auditEventId, allowed);
+  const deniedAudit = findHelmReceiptAudit(audits, deniedEvidence.auditEventId, deniedOrEscalated);
+  if (!allowedAudit) {
+    return failedRun(
+      input,
+      `Allowed HELM receipt evidence ${allowedEvidence.id} has no matching HELM_RECEIPT_PERSISTED audit row`,
+    );
+  }
+  if (!deniedAudit) {
+    return failedRun(
+      input,
+      `Restricted HELM receipt evidence ${deniedEvidence.id} has no matching HELM_RECEIPT_PERSISTED audit row`,
+    );
+  }
+
+  const allowedEvidenceRef = evidenceRef(allowedEvidence);
+  const deniedEvidenceRef = evidenceRef(deniedEvidence);
+  const allowedAuditRef = auditRef(allowedAudit);
+  const deniedAuditRef = auditRef(deniedAudit);
+  const completedAt = new Date().toISOString();
+  return {
+    run: {
+      workspaceId: input.workspaceId,
+      evalId: 'helm_governance',
+      status: 'passed',
+      capabilityKey: input.capabilityKey ?? 'helm_receipts',
+      runRef: input.runRef ?? `real-external-eval:helm-governance:${randomUUID()}`,
+      summary:
+        'HELM governance eval verified durable allowed and restricted receipt outcomes with receipt sink rows, linked evidence, and audit ledger entries.',
+      evidenceRefs: [allowedEvidenceRef, deniedEvidenceRef],
+      auditReceiptRefs: [allowedAuditRef, deniedAuditRef],
+      metadata: {
+        runnerRef: 'gateway:helm_governance:v1',
+        verifiedEvidencePackIds: receiptPacks.map((pack) => pack.id),
+        verifiedDecisionIds: receiptPacks.map((pack) => pack.decisionId),
+        verifiedEvidenceItemIds: [allowedEvidence.id, deniedEvidence.id],
+        verifiedAuditEventIds: [allowedAudit.id, deniedAudit.id],
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+      completedAt,
+      steps: [
+        {
+          stepKey: 'allowed-helm-receipt-evidence',
+          status: 'passed',
+          evidenceRefs: [allowedEvidenceRef],
+          auditReceiptRefs: [allowedAuditRef],
+          completedAt,
+          metadata: helmReceiptStepMetadata(allowed),
+        },
+        {
+          stepKey: 'restricted-helm-receipt-evidence',
+          status: 'passed',
+          evidenceRefs: [deniedEvidenceRef],
+          auditReceiptRefs: [deniedAuditRef],
+          completedAt,
+          metadata: helmReceiptStepMetadata(deniedOrEscalated),
+        },
+      ],
     },
   };
 }
@@ -366,6 +510,26 @@ function isYcLoggedInBrowserObservation(row: BrowserObservationRow): boolean {
   );
 }
 
+function isAllowedHelmReceiptPack(row: EvidencePackRow): boolean {
+  return isCompleteHelmReceiptPack(row) && normalizeVerdict(row.verdict) === 'allow';
+}
+
+function isDeniedOrEscalatedHelmReceiptPack(row: EvidencePackRow): boolean {
+  const verdict = normalizeVerdict(row.verdict);
+  return isCompleteHelmReceiptPack(row) && (verdict === 'deny' || verdict === 'escalate');
+}
+
+function isCompleteHelmReceiptPack(row: EvidencePackRow): boolean {
+  return (
+    Boolean(row.decisionId) &&
+    Boolean(row.policyVersion) &&
+    isDecisionHash(row.decisionHash) &&
+    Boolean(row.action) &&
+    Boolean(row.resource) &&
+    row.principal.startsWith(`workspace:${row.workspaceId}`)
+  );
+}
+
 function isYcUrl(url: string, origin: string): boolean {
   return [url, origin].some((value) => {
     try {
@@ -399,6 +563,25 @@ function findBrowserEvidence(row: EvidenceItemRow): boolean {
   );
 }
 
+function findHelmReceiptEvidence(
+  rows: EvidenceItemRow[],
+  pack: EvidencePackRow,
+): EvidenceItemRow | undefined {
+  return rows.find(
+    (row) =>
+      row.evidencePackId === pack.id &&
+      row.evidenceType === 'helm_receipt' &&
+      row.auditEventId &&
+      row.replayRef === `helm:${pack.decisionId}` &&
+      row.contentHash === pack.decisionHash &&
+      hasMetadataValue(row.metadata, 'decisionId', pack.decisionId) &&
+      hasMetadataValue(row.metadata, 'policyVersion', pack.policyVersion) &&
+      hasMetadataValue(row.metadata, 'action', pack.action) &&
+      hasMetadataValue(row.metadata, 'resource', pack.resource) &&
+      hasMetadataValue(row.metadata, 'principal', pack.principal),
+  );
+}
+
 function findComputerEvidence(
   rows: EvidenceItemRow[],
   computerActionId: string,
@@ -409,6 +592,27 @@ function findComputerEvidence(
       row.evidenceType === 'computer_action' &&
       row.auditEventId &&
       row.replayRef,
+  );
+}
+
+function findHelmReceiptAudit(
+  rows: AuditRow[],
+  auditEventId: string | null,
+  pack: EvidencePackRow,
+): AuditRow | undefined {
+  if (!auditEventId) return undefined;
+  return rows.find(
+    (row) =>
+      row.id === auditEventId &&
+      row.action === 'HELM_RECEIPT_PERSISTED' &&
+      row.target === pack.decisionId &&
+      normalizeVerdict(row.verdict) === normalizeVerdict(pack.verdict) &&
+      hasMetadataValue(row.metadata, 'evidencePackId', pack.id) &&
+      hasMetadataValue(row.metadata, 'decisionId', pack.decisionId) &&
+      hasMetadataValue(row.metadata, 'policyVersion', pack.policyVersion) &&
+      hasMetadataValue(row.metadata, 'action', pack.action) &&
+      hasMetadataValue(row.metadata, 'resource', pack.resource) &&
+      hasMetadataValue(row.metadata, 'principal', pack.principal),
   );
 }
 
@@ -435,4 +639,24 @@ function hasMetadataString(metadata: unknown, key: string): boolean {
 
 function hasMetadataValue(metadata: unknown, key: string, expected: string): boolean {
   return isRecord(metadata) && metadata[key] === expected;
+}
+
+function normalizeVerdict(verdict: string): string {
+  return verdict.trim().toLowerCase();
+}
+
+function isDecisionHash(value: string | null): boolean {
+  return typeof value === 'string' && /^[a-f0-9]{32,}$/u.test(value);
+}
+
+function helmReceiptStepMetadata(pack: EvidencePackRow): Record<string, string | null> {
+  return {
+    evidencePackId: pack.id,
+    decisionId: pack.decisionId,
+    verdict: pack.verdict,
+    policyVersion: pack.policyVersion,
+    action: pack.action,
+    resource: pack.resource,
+    decisionHash: pack.decisionHash,
+  };
 }

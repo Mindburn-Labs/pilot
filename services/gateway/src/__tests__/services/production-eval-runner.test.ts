@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { auditLog, browserObservations, computerActions, evidenceItems } from '@pilot/db/schema';
+import {
+  auditLog,
+  browserObservations,
+  computerActions,
+  evidenceItems,
+  evidencePacks,
+} from '@pilot/db/schema';
 import type { Db } from '@pilot/db/client';
 import { PRODUCTION_READY_EXECUTION_MODE } from '@pilot/shared/eval';
 import { createProductionEvalRunner } from '../../services/production-eval-runner.js';
@@ -9,17 +15,20 @@ const browserCredentialBoundary = 'read_only_no_cookie_or_password_export';
 
 type ComputerActionRow = typeof computerActions.$inferSelect;
 type BrowserObservationRow = typeof browserObservations.$inferSelect;
+type EvidencePackRow = typeof evidencePacks.$inferSelect;
 type EvidenceItemRow = typeof evidenceItems.$inferSelect;
 type AuditRow = typeof auditLog.$inferSelect;
 
 function createRunnerDb({
   actions = [],
   browser = [],
+  packs = [],
   evidence = [],
   audits = [],
 }: {
   actions?: ComputerActionRow[];
   browser?: BrowserObservationRow[];
+  packs?: EvidencePackRow[];
   evidence?: EvidenceItemRow[];
   audits?: AuditRow[];
 }) {
@@ -31,9 +40,11 @@ function createRunnerDb({
             ? actions
             : table === browserObservations
               ? browser
-              : table === evidenceItems
-                ? evidence
-                : audits;
+              : table === evidencePacks
+                ? packs
+                : table === evidenceItems
+                  ? evidence
+                  : audits;
         const chain = {
           where: vi.fn(() => chain),
           orderBy: vi.fn(() => chain),
@@ -113,6 +124,27 @@ function computerAction(overrides: Partial<ComputerActionRow>): ComputerActionRo
   };
 }
 
+function helmReceiptPack(overrides: Partial<EvidencePackRow>): EvidencePackRow {
+  return {
+    id: 'evidence-pack-1',
+    workspaceId,
+    decisionId: 'helm-decision-1',
+    taskRunId: null,
+    verdict: 'allow',
+    reasonCode: 'policy allowed',
+    policyVersion: 'founder-ops-v1',
+    decisionHash: 'a'.repeat(64),
+    action: 'TOOL_USE',
+    resource: 'tool:example',
+    principal: `workspace:${workspaceId}/operator:op-1`,
+    signedBlob: null,
+    receivedAt: new Date('2026-05-12T00:01:00.000Z'),
+    verifiedAt: null,
+    parentEvidencePackId: null,
+    ...overrides,
+  };
+}
+
 function evidenceItem(overrides: Partial<EvidenceItemRow>): EvidenceItemRow {
   return {
     id: 'evidence-1',
@@ -159,7 +191,146 @@ function auditRow(overrides: Partial<AuditRow>): AuditRow {
   };
 }
 
+function helmReceiptMetadata(pack: EvidencePackRow): Record<string, string | null> {
+  return {
+    decisionId: pack.decisionId,
+    verdict: pack.verdict,
+    policyVersion: pack.policyVersion,
+    action: pack.action,
+    resource: pack.resource,
+    principal: pack.principal,
+    receiptId: null,
+  };
+}
+
+function helmReceiptAuditMetadata(pack: EvidencePackRow): Record<string, string | null> {
+  return {
+    evidencePackId: pack.id,
+    ...helmReceiptMetadata(pack),
+  };
+}
+
 describe('createProductionEvalRunner', () => {
+  it('passes helm_governance only from allow and restricted durable receipt evidence with audits', async () => {
+    const allowed = helmReceiptPack({
+      id: 'pack-allow',
+      decisionId: 'dec-allow',
+      verdict: 'allow',
+      decisionHash: 'b'.repeat(64),
+      resource: 'tool:read',
+    });
+    const denied = helmReceiptPack({
+      id: 'pack-deny',
+      decisionId: 'dec-deny',
+      verdict: 'deny',
+      decisionHash: 'c'.repeat(64),
+      resource: 'tool:restricted',
+    });
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        packs: [allowed, denied],
+        evidence: [
+          evidenceItem({
+            id: 'evidence-allow',
+            evidencePackId: allowed.id,
+            computerActionId: null,
+            evidenceType: 'helm_receipt',
+            auditEventId: 'audit-allow',
+            contentHash: allowed.decisionHash,
+            replayRef: `helm:${allowed.decisionId}`,
+            metadata: helmReceiptMetadata(allowed),
+          }),
+          evidenceItem({
+            id: 'evidence-deny',
+            evidencePackId: denied.id,
+            computerActionId: null,
+            evidenceType: 'helm_receipt',
+            auditEventId: 'audit-deny',
+            contentHash: denied.decisionHash,
+            replayRef: `helm:${denied.decisionId}`,
+            metadata: helmReceiptMetadata(denied),
+          }),
+        ],
+        audits: [
+          auditRow({
+            id: 'audit-allow',
+            action: 'HELM_RECEIPT_PERSISTED',
+            target: allowed.decisionId,
+            verdict: allowed.verdict,
+            metadata: helmReceiptAuditMetadata(allowed),
+          }),
+          auditRow({
+            id: 'audit-deny',
+            action: 'HELM_RECEIPT_PERSISTED',
+            target: denied.decisionId,
+            verdict: denied.verdict,
+            metadata: helmReceiptAuditMetadata(denied),
+          }),
+        ],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'helm_governance',
+      capabilityKey: 'helm_receipts',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run).toMatchObject({
+      evalId: 'helm_governance',
+      status: 'passed',
+      capabilityKey: 'helm_receipts',
+      evidenceRefs: ['helm:dec-allow', 'helm:dec-deny'],
+      auditReceiptRefs: ['audit:audit-allow', 'audit:audit-deny'],
+      metadata: {
+        runnerRef: 'gateway:helm_governance:v1',
+        verifiedEvidencePackIds: ['pack-allow', 'pack-deny'],
+        executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      },
+    });
+    expect(result.run.steps).toEqual([
+      expect.objectContaining({
+        stepKey: 'allowed-helm-receipt-evidence',
+        status: 'passed',
+        metadata: expect.objectContaining({ decisionId: 'dec-allow', verdict: 'allow' }),
+      }),
+      expect.objectContaining({
+        stepKey: 'restricted-helm-receipt-evidence',
+        status: 'passed',
+        metadata: expect.objectContaining({ decisionId: 'dec-deny', verdict: 'deny' }),
+      }),
+    ]);
+  });
+
+  it('fails helm_governance when restricted receipt outcome is missing', async () => {
+    const runner = createProductionEvalRunner(
+      createRunnerDb({
+        packs: [helmReceiptPack({ verdict: 'allow' })],
+      }),
+    );
+
+    const result = await runner.execute({
+      workspaceId,
+      evalId: 'helm_governance',
+      capabilityKey: 'helm_receipts',
+      executionMode: PRODUCTION_READY_EXECUTION_MODE,
+      evidenceRefs: [],
+      auditReceiptRefs: [],
+      evidenceCoverage: [],
+      auditCoverage: [],
+      steps: [],
+    });
+
+    expect(result.run.status).toBe('failed');
+    expect(result.run.failureReason).toContain('DENY or ESCALATE');
+  });
+
   it('passes yc_logged_in_browser_extraction only from durable browser evidence and audit rows', async () => {
     const observation = browserObservation({ id: 'browser-yc-1' });
     const runner = createProductionEvalRunner(

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { evidenceItems, evidencePacks } from '@pilot/db/schema';
+import { auditLog, evidenceItems, evidencePacks } from '@pilot/db/schema';
 import { persistHelmReceipt } from '../helm-receipts.js';
 import { type HelmReceipt } from '@pilot/helm-client';
 
@@ -23,6 +23,7 @@ function makeReceiptDb(options: { failEvidenceItem?: boolean } = {}) {
 
   const tableName = (table: unknown) => {
     if (table === evidencePacks) return 'evidencePacks';
+    if (table === auditLog) return 'auditLog';
     if (table === evidenceItems) return 'evidenceItems';
     return 'unknown';
   };
@@ -63,6 +64,7 @@ describe('persistHelmReceipt', () => {
 
     expect(committedInserts.map((entry) => entry.table)).toEqual([
       'evidencePacks',
+      'auditLog',
       'evidenceItems',
     ]);
     expect(committedInserts[0]?.values).toMatchObject({
@@ -72,7 +74,19 @@ describe('persistHelmReceipt', () => {
     });
     expect(committedInserts[1]?.values).toMatchObject({
       workspaceId: '00000000-0000-4000-8000-000000000001',
+      action: 'HELM_RECEIPT_PERSISTED',
+      target: 'dec-1',
+      verdict: 'allow',
+      metadata: {
+        evidencePackId: 'row-1',
+        decisionId: 'dec-1',
+        policyVersion: 'policy.v1',
+      },
+    });
+    expect(committedInserts[2]?.values).toMatchObject({
+      workspaceId: '00000000-0000-4000-8000-000000000001',
       evidencePackId: 'row-1',
+      auditEventId: expect.any(String),
       evidenceType: 'helm_receipt',
       replayRef: 'helm:dec-1',
     });
