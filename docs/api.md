@@ -552,7 +552,7 @@ Record a durable eval run with status, optional capability key, evidence referen
 
 ### POST /api/evals/execute
 
-Run a narrow control-plane production eval proof check for one registered eval scenario. Requires at least the workspace `partner` role. The executor validates scenario evidence/audit coverage, writes a durable eval run/result pack, and creates blocker tasks when proof is missing. It does not write promotion eligibility because promotion requires a separately recorded passed `real_external_eval` run. This is not a full external-world eval runner yet.
+Run a production eval request for one registered eval scenario. Requires at least the workspace `partner` role. By default this runs a narrow `control_plane_proof_check` that validates scenario evidence/audit coverage, writes a durable eval run/result pack, and creates blocker tasks when proof is missing; control-plane proof checks do not create promotion eligibility. When `executionMode` is `real_external_eval`, the request is handled only by a server-owned trusted runner. The current Safe Computer/Sandbox runner verifies durable `computer_actions`, `evidence_items`, and `audit_log` rows before it can create promotion eligibility; unsupported real-external scenarios fail closed.
 
 ### POST /api/evals/promotion-check
 

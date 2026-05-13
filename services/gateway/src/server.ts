@@ -25,6 +25,7 @@ import { configureRateLimit } from './middleware/rate-limit.js';
 import { EventBus } from './events/bus.js';
 import { createEmailProvider } from './services/email-provider.js';
 import { ManagedTelegramBotService } from './services/managed-telegram-bots.js';
+import { createProductionEvalRunner } from './services/production-eval-runner.js';
 import { initSentry, flushSentry } from '@pilot/shared/errors/sentry';
 
 const log = createLogger('pilot');
@@ -333,6 +334,7 @@ async function main() {
     emailProvider,
     helmClient,
     managedTelegram,
+    productionEvalRunner: createProductionEvalRunner(db),
   });
 
   // ─── Telegram bot (webhook mode) ───
