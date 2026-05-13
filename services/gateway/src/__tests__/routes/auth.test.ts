@@ -25,6 +25,108 @@ import {
 
 const workspaceId = '00000000-0000-4000-8000-000000000001';
 
+function createEmailRequestDb(
+  options: {
+    failEvidence?: boolean;
+    existingUser?: boolean;
+    existingMembership?: boolean;
+    operations?: Array<{ kind: string; table?: unknown; value?: unknown }>;
+  } = {},
+) {
+  const inserts: Array<{ table: unknown; value: unknown }> = [];
+  const updates: Array<{ table: unknown; value: unknown }> = [];
+  const operations = options.operations ?? [];
+  const user = mockUser({ id: 'user-email-request-1', email: 'test@example.com', name: 'Test' });
+  const membership = mockMembership({
+    workspaceId,
+    userId: user.id,
+    role: 'owner',
+  });
+
+  const createDbFacade = (
+    insertSink: Array<{ table: unknown; value: unknown }>,
+    updateSink: Array<{ table: unknown; value: unknown }>,
+    operationSink: Array<{ kind: string; table?: unknown; value?: unknown }>,
+  ) => ({
+    select: vi.fn(() => ({
+      from: vi.fn((table: unknown) => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(async () => {
+            if (table === users) return options.existingUser === false ? [] : [user];
+            if (table === workspaceMembers) {
+              return options.existingMembership === false ? [] : [membership];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        })),
+      })),
+    })),
+    insert: vi.fn((table: unknown) => ({
+      values: vi.fn((value: Record<string, unknown>) => {
+        insertSink.push({ table, value });
+        operationSink.push({ kind: 'insert', table, value });
+        return {
+          returning: vi.fn(async () => {
+            if (table === users) {
+              return [
+                {
+                  ...user,
+                  id: 'user-email-request-created',
+                  email: value['email'],
+                  name: value['name'],
+                },
+              ];
+            }
+            if (table === evidenceItems) {
+              if (options.failEvidence) throw new Error('email request evidence unavailable');
+              return [{ id: 'evidence-email-requested-1' }];
+            }
+            return [];
+          }),
+          then: (resolve: (value: unknown[]) => void, reject?: (reason: unknown) => void) =>
+            Promise.resolve([]).then(resolve, reject),
+          catch: (reject: (reason: unknown) => void) => Promise.resolve([]).catch(reject),
+        };
+      }),
+    })),
+    update: vi.fn((table: unknown) => ({
+      set: vi.fn((value: unknown) => {
+        updateSink.push({ table, value });
+        operationSink.push({ kind: 'update', table, value });
+        return {
+          where: vi.fn(async () => []),
+        };
+      }),
+    })),
+    delete: vi.fn(() => ({
+      where: vi.fn(async () => []),
+    })),
+    execute: vi.fn(async () => [{ '?column?': 1 }]),
+  });
+
+  const db = {
+    ...createDbFacade(inserts, updates, operations),
+    transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) => {
+      const stagedInserts: Array<{ table: unknown; value: unknown }> = [];
+      const stagedUpdates: Array<{ table: unknown; value: unknown }> = [];
+      const stagedOperations: Array<{ kind: string; table?: unknown; value?: unknown }> = [];
+      const tx = createDbFacade(stagedInserts, stagedUpdates, stagedOperations);
+      const result = await callback(tx);
+      inserts.push(...stagedInserts);
+      updates.push(...stagedUpdates);
+      operations.push(...stagedOperations);
+      return result;
+    }),
+    _setResult: vi.fn(),
+    _reset: vi.fn(),
+  };
+
+  return { db, inserts, updates, operations };
+}
+
 function createApiKeyDb(options: { failEvidence?: boolean; selectResults?: unknown[][] } = {}) {
   const inserts: Array<{ table: unknown; value: unknown }> = [];
   const updates: Array<{ table: unknown; value: unknown }> = [];
@@ -965,18 +1067,164 @@ describe('authRoutes', () => {
           body: JSON.stringify({ email: 'test@example.com' }),
         }),
       );
-      const json = await expectJson<{ sent: boolean; email: string; code?: string }>(res, 200);
+      const json = await expectJson<{
+        sent: boolean;
+        email: string;
+        code?: string;
+        evidenceLedgerState: string;
+      }>(res, 200);
       expect(json.sent).toBe(true);
       expect(json.email).toBe('test@example.com');
       expect(json.code).toMatch(/^\d{6}$/);
+      expect(json.evidenceLedgerState).toBe('pre_workspace_audit_only');
       expect(sendMagicLink).toHaveBeenCalledWith(
         expect.objectContaining({ to: 'test@example.com', code: json.code }),
       );
       const pending = insertedValues.find((values) => values.channel === 'email_pending');
       expect(pending?.token).toMatch(/^magic:v2:/);
       expect(String(pending?.token)).not.toContain(json.code ?? '');
+      const audit = insertedValues.find((values) => values.action === 'AUTH_EMAIL_REQUESTED');
+      expect(audit).toMatchObject({
+        workspaceId: null,
+        actor: expect.stringMatching(/^email_hash:[0-9a-f]{64}$/),
+        metadata: expect.objectContaining({
+          evidenceLedgerState: 'pre_workspace_audit_only',
+          emailStoredInEvidence: false,
+          magicCodeStoredInEvidence: false,
+          magicSessionTokenStoredInEvidence: false,
+          magicLinkUrlStoredInEvidence: false,
+        }),
+      });
+      expect(JSON.stringify(audit)).not.toContain('test@example.com');
+      expect(JSON.stringify(audit)).not.toContain(json.code ?? '');
       expect(randomSpy).not.toHaveBeenCalled();
       randomSpy.mockRestore();
+    });
+
+    it('writes redacted workspace-linked evidence before sending an existing member magic link', async () => {
+      const operations: Array<{ kind: string; table?: unknown; value?: unknown }> = [];
+      const sendMagicLink = vi.fn(async () => {
+        operations.push({ kind: 'send' });
+      });
+      const { db, inserts, updates } = createEmailRequestDb({ operations });
+      const deps = createMockDeps({
+        db: db as never,
+        emailProvider: { kind: 'noop', sendMagicLink } as any,
+      });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/email/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'Test@Example.com' }),
+        }),
+      );
+
+      const json = await expectJson<{
+        sent: boolean;
+        email: string;
+        code: string;
+        evidenceLedgerState: string;
+        evidenceItemId: string;
+      }>(res, 200);
+      expect(json.sent).toBe(true);
+      expect(json.email).toBe('test@example.com');
+      expect(json.evidenceLedgerState).toBe('workspace_linked');
+      expect(json.evidenceItemId).toBe('evidence-email-requested-1');
+      expect(sendMagicLink).toHaveBeenCalledWith(
+        expect.objectContaining({ to: 'test@example.com', code: json.code }),
+      );
+
+      expect(inserts.map((insert) => insert.table)).toEqual([sessions, auditLog, evidenceItems]);
+      expect(updates.find((update) => update.table === auditLog)?.value).toMatchObject({
+        metadata: expect.objectContaining({
+          evidenceItemId: 'evidence-email-requested-1',
+          evidenceLedgerState: 'workspace_linked',
+        }),
+      });
+
+      const auditInsert = inserts.find((insert) => insert.table === auditLog)?.value as {
+        id: string;
+        metadata: Record<string, unknown>;
+      };
+      expect(auditInsert).toMatchObject({
+        workspaceId,
+        action: 'AUTH_EMAIL_REQUESTED',
+        actor: 'user:user-email-request-1',
+        target: workspaceId,
+        verdict: 'allow',
+        reason: 'magic_code_issued',
+        metadata: expect.objectContaining({
+          evidenceType: 'auth_email_requested',
+          evidenceLedgerState: 'workspace_linked',
+          emailStoredInEvidence: false,
+          magicCodeStoredInEvidence: false,
+          magicSessionTokenStoredInEvidence: false,
+          magicLinkUrlStoredInEvidence: false,
+        }),
+      });
+
+      const evidenceInsert = inserts.find((insert) => insert.table === evidenceItems)?.value;
+      expect(evidenceInsert).toMatchObject({
+        workspaceId,
+        auditEventId: auditInsert.id,
+        evidenceType: 'auth_email_requested',
+        sourceType: 'gateway_auth',
+        redactionState: 'redacted',
+        sensitivity: 'sensitive',
+        metadata: expect.objectContaining({
+          workspaceId,
+          workspaceLinked: true,
+          userId: 'user-email-request-1',
+          emailStoredInEvidence: false,
+          magicCodeStoredInEvidence: false,
+          magicSessionTokenStoredInEvidence: false,
+          magicLinkUrlStoredInEvidence: false,
+        }),
+      });
+
+      const evidenceIndex = operations.findIndex(
+        (operation) => operation.kind === 'insert' && operation.table === evidenceItems,
+      );
+      const sendIndex = operations.findIndex((operation) => operation.kind === 'send');
+      expect(evidenceIndex).toBeGreaterThanOrEqual(0);
+      expect(sendIndex).toBeGreaterThan(evidenceIndex);
+
+      const serializedProof = JSON.stringify({ auditInsert, evidenceInsert });
+      expect(serializedProof).not.toContain('Test@Example.com');
+      expect(serializedProof).not.toContain('test@example.com');
+      expect(serializedProof).not.toContain(json.code);
+      expect(serializedProof).not.toContain('/login?');
+    });
+
+    it('fails closed before sending an existing member magic link when request evidence fails', async () => {
+      const operations: Array<{ kind: string; table?: unknown; value?: unknown }> = [];
+      const sendMagicLink = vi.fn(async () => {
+        operations.push({ kind: 'send' });
+      });
+      const { db, inserts } = createEmailRequestDb({ failEvidence: true, operations });
+      const deps = createMockDeps({
+        db: db as never,
+        emailProvider: { kind: 'noop', sendMagicLink } as any,
+      });
+      const app = new Hono();
+      app.route('/', authRoutes(deps));
+
+      const res = await app.fetch(
+        new Request('http://localhost/email/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: 'test@example.com' }),
+        }),
+      );
+
+      const json = await expectJson<{ error: string }>(res, 500);
+      expect(json.error).toContain('failed to persist email request evidence');
+      expect(inserts).toEqual([]);
+      expect(sendMagicLink).not.toHaveBeenCalled();
+      expect(operations.some((operation) => operation.kind === 'send')).toBe(false);
     });
   });
 

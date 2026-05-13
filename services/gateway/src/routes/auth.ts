@@ -197,26 +197,16 @@ export function authRoutes(deps: GatewayDeps) {
     const code = randomInt(100000, 1000000).toString();
     const magicToken = createMagicCodeSessionToken(email, code);
 
-    // Store as a session with 'email_pending' channel (15-min expiry)
-    // Find or create user by email
-    let [user] = await deps.db.select().from(users).where(eq(users.email, email)).limit(1);
-
-    if (!user) {
-      [user] = await deps.db
-        .insert(users)
-        .values({ email, name: email.split('@')[0] ?? 'User' })
-        .returning();
-    }
-    if (!user) return c.json({ error: 'Failed to create user' }, 500);
-
-    // Store magic link token in sessions
     const expiresAt = new Date(Date.now() + EMAIL_CODE_TTL_MS);
-    await deps.db.insert(sessions).values({
-      userId: user.id,
-      token: magicToken,
-      channel: 'email_pending',
+    const requestIntent = await persistEmailRequestIntent(deps, {
+      email,
+      magicToken,
       expiresAt,
-    });
+    }).catch(() => null);
+
+    if (!requestIntent) {
+      return c.json({ error: 'failed to persist email request evidence' }, 500);
+    }
 
     // Send email with the code + link. In dev (noop provider), also return code in response.
     const appUrl = process.env['APP_URL'] ?? 'http://localhost:3000';
@@ -227,18 +217,15 @@ export function authRoutes(deps: GatewayDeps) {
       if (deps.emailProvider) {
         await deps.emailProvider.sendMagicLink({ to: email, code, linkUrl });
       }
-      await recordAuthAudit(deps, {
-        action: 'auth.email.request',
-        actor: email,
-        verdict: 'allow',
-        reason: 'magic_code_issued',
-      });
     } catch (err) {
       const log = (await import('@pilot/shared/logger')).createLogger('auth');
-      log.error({ err, email }, 'Failed to send magic link email');
+      log.error(
+        { err, emailHash: stableAuthEvidenceHash(email) },
+        'Failed to send magic link email',
+      );
       await recordAuthAudit(deps, {
         action: 'auth.email.request',
-        actor: email,
+        actor: authEmailActor(email),
         verdict: 'deny',
         reason: 'email_delivery_failed',
       });
@@ -252,6 +239,8 @@ export function authRoutes(deps: GatewayDeps) {
     return c.json({
       sent: true,
       email,
+      evidenceLedgerState: requestIntent.evidenceLedgerState,
+      ...(requestIntent.evidenceItemId ? { evidenceItemId: requestIntent.evidenceItemId } : {}),
       // Dev-only: return code in response when the provider is noop.
       // In production (resend/smtp), the code is delivered via email only.
       ...(isDev && deps.emailProvider?.kind === 'noop' ? { code } : {}),
@@ -284,7 +273,7 @@ export function authRoutes(deps: GatewayDeps) {
       await recordFailedMagicCodeAttempt(deps, pendingSessions);
       await recordAuthAudit(deps, {
         action: 'auth.email.verify',
-        actor: email,
+        actor: authEmailActor(email),
         verdict: 'deny',
         reason: 'invalid_or_expired_code',
       });
@@ -746,6 +735,141 @@ function normalizeEmail(email: unknown): string {
 
 function stableAuthEvidenceHash(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function authEmailActor(email: string): string {
+  return `email_hash:${stableAuthEvidenceHash(email)}`;
+}
+
+async function persistEmailRequestIntent(
+  deps: GatewayDeps,
+  input: { email: string; magicToken: string; expiresAt: Date },
+): Promise<{
+  userId: string;
+  evidenceLedgerState: 'workspace_linked' | 'pre_workspace_audit_only';
+  evidenceItemId?: string;
+}> {
+  const requestId = randomUUID();
+  return deps.db.transaction(async (tx) => {
+    let [user] = await tx.select().from(users).where(eq(users.email, input.email)).limit(1);
+    let userCreated = false;
+
+    if (!user) {
+      [user] = await tx
+        .insert(users)
+        .values({ email: input.email, name: input.email.split('@')[0] ?? 'User' })
+        .returning();
+      userCreated = Boolean(user);
+    }
+    if (!user) throw new Error('failed to create user');
+
+    await tx.insert(sessions).values({
+      userId: user.id,
+      token: input.magicToken,
+      channel: 'email_pending',
+      expiresAt: input.expiresAt,
+    });
+
+    const [membership] = await tx
+      .select()
+      .from(workspaceMembers)
+      .where(eq(workspaceMembers.userId, user.id))
+      .limit(1);
+
+    const baseMetadata = {
+      requestId,
+      userId: user.id,
+      userCreated,
+      expiresAt: input.expiresAt.toISOString(),
+      emailHash: stableAuthEvidenceHash(input.email),
+      emailStoredInEvidence: false,
+      magicCodeStoredInEvidence: false,
+      magicSessionTokenStoredInEvidence: false,
+      magicLinkUrlStoredInEvidence: false,
+    };
+
+    if (!membership) {
+      await tx.insert(auditLog).values({
+        workspaceId: null,
+        action: 'AUTH_EMAIL_REQUESTED',
+        actor: authEmailActor(input.email),
+        target: 'email_login',
+        verdict: 'allow',
+        reason: 'magic_code_issued_pre_workspace',
+        metadata: {
+          evidenceType: 'auth_email_requested',
+          evidenceLedgerState: 'pre_workspace_audit_only',
+          evidenceItemId: null,
+          workspaceLinked: false,
+          ...baseMetadata,
+        },
+      });
+
+      return {
+        userId: user.id,
+        evidenceLedgerState: 'pre_workspace_audit_only',
+      };
+    }
+
+    const auditEventId = randomUUID();
+    const replayRef = `auth-email:${membership.workspaceId}:${user.id}:requested:${requestId}`;
+    const evidenceMetadata = {
+      workspaceId: membership.workspaceId,
+      workspaceLinked: true,
+      ...baseMetadata,
+    };
+
+    await tx.insert(auditLog).values({
+      id: auditEventId,
+      workspaceId: membership.workspaceId,
+      action: 'AUTH_EMAIL_REQUESTED',
+      actor: `user:${user.id}`,
+      target: membership.workspaceId,
+      verdict: 'allow',
+      reason: 'magic_code_issued',
+      metadata: {
+        evidenceType: 'auth_email_requested',
+        evidenceLedgerState: 'workspace_linked',
+        replayRef,
+        evidenceItemId: null,
+        ...evidenceMetadata,
+      },
+    });
+
+    const evidenceItemId = await appendEvidenceItem(tx, {
+      workspaceId: membership.workspaceId,
+      auditEventId,
+      evidenceType: 'auth_email_requested',
+      sourceType: 'gateway_auth',
+      title: 'Email login requested',
+      summary:
+        'A magic-code email login was requested; email, code, pending token, and link URL were not stored in evidence.',
+      redactionState: 'redacted',
+      sensitivity: 'sensitive',
+      contentHash: `sha256:${stableAuthEvidenceHash(JSON.stringify(evidenceMetadata))}`,
+      replayRef,
+      metadata: evidenceMetadata,
+    });
+
+    await tx
+      .update(auditLog)
+      .set({
+        metadata: {
+          evidenceType: 'auth_email_requested',
+          evidenceLedgerState: 'workspace_linked',
+          replayRef,
+          evidenceItemId,
+          ...evidenceMetadata,
+        },
+      })
+      .where(and(eq(auditLog.workspaceId, membership.workspaceId), eq(auditLog.id, auditEventId)));
+
+    return {
+      userId: user.id,
+      evidenceLedgerState: 'workspace_linked',
+      evidenceItemId,
+    };
+  });
 }
 
 function createMagicCodeSessionToken(email: string, code: string): string {
