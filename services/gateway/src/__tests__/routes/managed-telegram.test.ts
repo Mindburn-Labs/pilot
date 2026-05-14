@@ -50,7 +50,12 @@ type ManagedTelegramApprovalRequester = {
 };
 
 function makeManagedTelegramActionDb(
-  options: { failEvidenceInsert?: boolean; failEvidenceType?: string; activeBot?: boolean } = {},
+  options: {
+    failEvidenceInsert?: boolean;
+    failEvidenceType?: string;
+    failAuditFailureUpdate?: boolean;
+    activeBot?: boolean;
+  } = {},
 ) {
   const inserts: Array<{ table: unknown; value: unknown }> = [];
   const updates: Array<{ table: unknown; value: unknown }> = [];
@@ -126,6 +131,13 @@ function makeManagedTelegramActionDb(
   };
 
   const updateTable = (table: unknown, values: Record<string, unknown>) => {
+    if (
+      table === auditLog &&
+      options.failAuditFailureUpdate &&
+      (values as { verdict?: string }).verdict === 'failed'
+    ) {
+      throw new Error('audit failure update unavailable');
+    }
     updates.push({ table, value: values });
     operations.push({ kind: 'update', table, value: values });
     if (table === managedTelegramBots) {
@@ -577,6 +589,71 @@ describe('managed Telegram service governance', () => {
     expect(messageUpdateIndex).toBeGreaterThan(approvalIndex);
   });
 
+  it('records approval notifier failures as redacted failed evidence', async () => {
+    const { db, state, inserts, updates } = makeManagedTelegramActionDb();
+    const service = new ManagedTelegramBotService({ db });
+    const notifier = vi.fn(async () => {
+      throw new Error('approval notifier unavailable');
+    });
+    service.setApprovalNotifier(notifier);
+
+    await (service as unknown as ManagedTelegramApprovalRequester).requestReplyApproval(
+      state.message,
+      'Draft approval reply',
+    );
+
+    expect(notifier).toHaveBeenCalledWith(
+      'ws-1',
+      'approval-1',
+      TELEGRAM_MANAGED_ACTIONS.SEND_MESSAGE,
+      'Support reply draft for Telegram user tg-user-1',
+    );
+    expect(state.message).toMatchObject({
+      approvalId: 'approval-1',
+      replyStatus: 'awaiting_approval',
+      error: 'approval notifier unavailable',
+      governanceMetadata: {
+        approvalRequestEvidence: {
+          auditEventId: expect.any(String),
+          evidenceItemId: 'evidence-send-item',
+        },
+        approvalNotificationFailedEvidence: {
+          auditEventId: expect.any(String),
+          evidenceItemId: 'evidence-send-item',
+        },
+      },
+    });
+
+    const failureEvidence = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_send_approval_notification_failed',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(failureEvidence).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_send_approval_notification_failed',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'confidential',
+      metadata: expect.objectContaining({
+        messageId: 'msg-1',
+        approvalId: 'approval-1',
+        notificationChannel: 'approval_notifier',
+        notificationStatus: 'failed',
+        error: 'approval notifier unavailable',
+        rawTelegramIdentityStoredInEvidence: false,
+        rawNotifierPayloadStoredInEvidence: false,
+      }),
+    });
+    expect(JSON.stringify(failureEvidence.metadata)).not.toContain('Draft approval reply');
+    expect(JSON.stringify(failureEvidence.metadata)).not.toContain('Need help');
+    expect(JSON.stringify(failureEvidence.metadata)).not.toContain('tg-user-1');
+    expect(updates.filter((update) => update.table === auditLog).at(-1)?.value).toMatchObject({
+      verdict: 'failed',
+      reason: 'approval notifier unavailable',
+    });
+  });
+
   it('fails closed before requesting managed Telegram send approval when evidence fails', async () => {
     const { db, state, inserts, updates } = makeManagedTelegramActionDb({
       failEvidenceType: 'managed_telegram_send_approval_requested',
@@ -706,6 +783,66 @@ describe('managed Telegram service governance', () => {
     expect(ctx.reply).toHaveBeenCalledWith('Thanks. Your message reached the founder team.');
   });
 
+  it('records support notifier failures as redacted failed evidence', async () => {
+    const { db, state, inserts, updates } = makeManagedTelegramActionDb();
+    state.bot['responseMode'] = 'intake_only';
+    const service = new ManagedTelegramBotService({ db });
+    const notifier = vi.fn(async () => {
+      throw new Error('support notifier unavailable');
+    });
+    service.setSupportNotifier(notifier);
+    const ctx = {
+      from: { id: 777, username: 'founder_user', first_name: 'Founder' },
+      chat: { id: 888 },
+      message: { message_id: 42, text: 'Can Pilot deploy this?' },
+      reply: vi.fn(async () => ({ message_id: 4242 })),
+    };
+
+    await (service as unknown as ManagedTelegramSupportCapturer).captureSupportMessage(
+      'bot-1',
+      ctx,
+    );
+
+    expect(ctx.reply).toHaveBeenCalledWith('Thanks. Your message reached the founder team.');
+    expect(notifier).toHaveBeenCalledWith('ws-1', state.message['id'], 'pilot_launch_bot');
+    expect(state.message).toMatchObject({
+      error: 'support notifier unavailable',
+      governanceMetadata: {
+        supportNotificationFailedEvidence: {
+          auditEventId: expect.any(String),
+          evidenceItemId: 'evidence-send-item',
+        },
+      },
+    });
+
+    const failureEvidence = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_support_notification_failed',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(failureEvidence).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_support_notification_failed',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'confidential',
+      metadata: expect.objectContaining({
+        messageId: state.message['id'],
+        notificationChannel: 'support_notifier',
+        notificationStatus: 'failed',
+        error: 'support notifier unavailable',
+        rawTelegramIdentityStoredInEvidence: false,
+        rawNotifierPayloadStoredInEvidence: false,
+      }),
+    });
+    expect(JSON.stringify(failureEvidence.metadata)).not.toContain('founder_user');
+    expect(JSON.stringify(failureEvidence.metadata)).not.toContain('Can Pilot deploy this?');
+    expect(updates.filter((update) => update.table === auditLog).at(-1)?.value).toMatchObject({
+      verdict: 'failed',
+      reason: 'support notifier unavailable',
+    });
+  });
+
   it('fails closed before acknowledging support intake when evidence persistence fails', async () => {
     const { db, inserts } = makeManagedTelegramActionDb({ failEvidenceInsert: true });
     const service = new ManagedTelegramBotService({ db });
@@ -722,6 +859,48 @@ describe('managed Telegram service governance', () => {
 
     expect(ctx.reply).not.toHaveBeenCalled();
     expect(inserts.some((insert) => insert.table === approvals)).toBe(false);
+  });
+
+  it('does not fall back to approval when autonomous send failure cannot update audit state', async () => {
+    const { db, state, inserts, updates } = makeManagedTelegramActionDb({
+      failAuditFailureUpdate: true,
+    });
+    state.bot['responseMode'] = 'autonomous_helm';
+    const helmClient = {
+      evaluate: vi.fn(async () => ({
+        receipt: {
+          decisionId: 'dec-send',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+      })),
+    };
+    const service = new ManagedTelegramBotService({ db, helmClient: helmClient as never });
+    const ctx = {
+      from: { id: 777, username: 'founder_user', first_name: 'Founder' },
+      chat: { id: 888 },
+      message: { message_id: 42, text: 'Can Pilot deploy this?' },
+      reply: vi
+        .fn()
+        .mockResolvedValueOnce({ message_id: 4242 })
+        .mockRejectedValueOnce(new Error('telegram send failed')),
+    };
+
+    await expect(
+      (service as unknown as ManagedTelegramSupportCapturer).captureSupportMessage('bot-1', ctx),
+    ).rejects.toThrow('audit failure update unavailable');
+
+    expect(ctx.reply).toHaveBeenCalledTimes(2);
+    expect(inserts.some((insert) => insert.table === approvals)).toBe(false);
+    expect(
+      updates.some(
+        (update) =>
+          update.table === managedTelegramBotMessages &&
+          (update.value as { replyStatus?: string }).replyStatus === 'awaiting_approval',
+      ),
+    ).toBe(false);
+    expect(state.message['replyStatus']).toBe('drafted');
   });
 
   it('fails closed for production support drafts without governed LLM metadata', async () => {
@@ -996,6 +1175,111 @@ describe('managed Telegram service governance', () => {
     expect(botInsertIndex).toBeGreaterThan(claimEvidenceIndex);
     expect(webhookEvidenceIndex).toBeGreaterThan(botInsertIndex);
     expect(activeIndex).toBeGreaterThan(webhookEvidenceIndex);
+  });
+
+  it('records child bot command setup failures without hiding activation state', async () => {
+    const { db, state, inserts, operations } = makeManagedTelegramActionDb({ activeBot: false });
+    state.provisioningRequest = {
+      id: 'request-1',
+      workspaceId: 'ws-1',
+      requestedByUserId: 'user-1',
+      creatorTelegramId: '999',
+      suggestedName: 'Acme Launch Support',
+      suggestedUsername: 'acme_launch_bot',
+      managerBotUsername: 'Manager',
+      creationUrl: 'https://t.me/newbot/Manager/acme_launch_bot?name=Acme',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + 60_000),
+      createdAt: new Date('2026-05-05T00:00:00Z'),
+      updatedAt: new Date('2026-05-05T00:00:00Z'),
+    };
+    const helmClient = {
+      evaluate: vi.fn(async (input: { action: string }) => ({
+        receipt: {
+          decisionId: input.action === TELEGRAM_MANAGED_ACTIONS.CLAIM ? 'dec-claim' : 'dec-webhook',
+          verdict: 'ALLOW',
+          reason: 'allowed',
+          policyVersion: 'founder-ops-v1',
+        },
+      })),
+    };
+    const secrets = {
+      set: vi.fn(async () => true),
+    };
+    const service = new ManagedTelegramBotService({
+      db,
+      helmClient: helmClient as never,
+      managerBotToken: 'manager-token',
+      appUrl: 'https://pilot.example.com/',
+    });
+    Object.defineProperty(service as unknown as { secrets?: unknown }, 'secrets', {
+      value: secrets,
+    });
+    const fetch = vi.fn(async (url: URL | RequestInfo) => {
+      const target = String(url);
+      if (target.includes('/getManagedBotToken')) {
+        return Response.json({ ok: true, result: 'child-token' });
+      }
+      if (target.includes('/setMyCommands')) {
+        return Response.json({ ok: false, description: 'commands unavailable' });
+      }
+      return Response.json({ ok: true, result: true });
+    });
+    vi.stubGlobal('fetch', fetch);
+
+    const bot = await service.claimManagedBot({
+      creatorTelegramId: '999',
+      bot: { id: 123, username: 'pilot_launch_bot', firstName: 'Pilot Launch Bot' },
+    });
+
+    expect(bot.status).toBe('active');
+    expect(state.bot['governanceMetadata']).toMatchObject({
+      setWebhook: {
+        commandSetupFailedEvidence: {
+          auditEventId: expect.any(String),
+          evidenceItemId: 'evidence-send-item',
+        },
+      },
+    });
+
+    const commandFailureEvidence = inserts.find(
+      (insert) =>
+        insert.table === evidenceItems &&
+        (insert.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_commands_setup_failed',
+    )?.value as { metadata: Record<string, unknown> };
+    expect(commandFailureEvidence).toMatchObject({
+      workspaceId: 'ws-1',
+      evidenceType: 'managed_telegram_commands_setup_failed',
+      sourceType: 'managed_telegram_control',
+      sensitivity: 'restricted',
+      metadata: expect.objectContaining({
+        setupAction: 'setMyCommands',
+        setupStatus: 'failed',
+        error: 'commands unavailable',
+        rawTelegramApiResponseStoredInEvidence: false,
+        rawTelegramBotIdStoredInEvidence: false,
+        rawTokenSecretRefStoredInEvidence: false,
+      }),
+    });
+    expect(JSON.stringify(commandFailureEvidence.metadata)).not.toContain('child-token');
+    expect(JSON.stringify(commandFailureEvidence.metadata)).not.toContain('pilot.example.com');
+
+    const commandFailureIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'insert' &&
+        operation.table === evidenceItems &&
+        (operation.value as { evidenceType?: string }).evidenceType ===
+          'managed_telegram_commands_setup_failed',
+    );
+    const activeIndex = operations.findIndex(
+      (operation) =>
+        operation.kind === 'update' &&
+        operation.table === managedTelegramBots &&
+        (operation.value as { status?: string }).status === 'active',
+    );
+    expect(commandFailureIndex).toBeGreaterThanOrEqual(0);
+    expect(activeIndex).toBeGreaterThan(commandFailureIndex);
   });
 
   it('fails closed before claiming managed Telegram bots when claim evidence fails', async () => {
