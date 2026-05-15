@@ -48,8 +48,8 @@ export class HelmEscalationError extends Error {
 
 /**
  * Thrown when the client is asked to perform an operation that the installed
- * helm-oss version does not yet support (e.g. generic evaluate() against
- * helm-oss v0.3.0 before the upstream `/api/v1/guardian/evaluate` endpoint
+ * helm-ai-kernel version does not yet support (e.g. generic evaluate() against
+ * helm-ai-kernel v0.3.0 before the upstream `/api/v1/guardian/evaluate` endpoint
  * ships).
  */
 export class HelmNotImplementedError extends Error {

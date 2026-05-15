@@ -9,7 +9,7 @@ import { taskRuns } from './tasking.js';
 // optional signed evidence pack that can be verified offline via Ed25519.
 //
 // This table is a local mirror. The authoritative proof graph lives inside
-// helm-oss; Pilot fetches and caches to power the founder-facing Governance
+// helm-ai-kernel; Pilot fetches and caches to power the founder-facing Governance
 // surface without blocking on HELM every query.
 
 /**

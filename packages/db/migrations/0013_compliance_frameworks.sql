@@ -1,11 +1,11 @@
 -- 0013 — Phase 14 Track B: compliance framework overlays
 --
--- Per-workspace enablement of helm-oss-defined compliance packs
+-- Per-workspace enablement of helm-ai-kernel-defined compliance packs
 -- (SOC2 Type II, HIPAA Covered Entity, PCI DSS 4, EU AI Act
 -- High-Risk, ISO 42001). Each framework:
 --   - Extends retention for evidence_packs via the retention scheduler
 --     (services/orchestrator/src/retention.ts, follow-up commit).
---   - Pulls a P2 overlay fragment from helm-oss reference_packs/*.v1.json
+--   - Pulls a P2 overlay fragment from helm-ai-kernel reference_packs/*.v1.json
 --     and composes it on top of founder_ops. P2 overlays narrow only,
 --     never widen — the guardian enforces this.
 --   - Unlocks a framework-specific dashboard panel at /compliance/<id>.

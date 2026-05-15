@@ -10,10 +10,10 @@ import { findMcpTool, mcpToolDescriptors } from './tools.js';
 // Bearer-token auth (constant-time compare) — no anonymous calls. The
 // DB-only tool whitelist in ./tools.ts is mounted verbatim; HELM
 // governance wraps each handler when the caller sets `HELM_EVALUATE_*`
-// env vars upstream (deferred until helm-oss v0.3.1 merges #43).
+// env vars upstream (deferred until helm-ai-kernel v0.3.1 merges #43).
 //
 // OAuth 2.0 resource metadata stub at /.well-known/oauth-protected-resource
-// mirrors the shape helm-oss uses so Claude Desktop / Cursor / Gemini CLI
+// mirrors the shape helm-ai-kernel uses so Claude Desktop / Cursor / Gemini CLI
 // can auto-discover the auth scheme.
 
 export interface McpAppConfig {

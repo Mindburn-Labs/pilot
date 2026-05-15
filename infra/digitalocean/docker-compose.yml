@@ -23,7 +23,7 @@ services:
 
   helm:
     container_name: pilot-helm
-    image: ${HELM_IMAGE:-ghcr.io/mindburn-labs/helm-oss:latest}
+    image: ${HELM_IMAGE:-ghcr.io/mindburn-labs/helm-ai-kernel:latest}
     expose:
       - '8080'
       - '8081'
@@ -41,8 +41,8 @@ services:
       HELM_UPSTREAM_URL: ${HELM_UPSTREAM_URL:-https://openrouter.ai/api/v1}
       EVIDENCE_SIGNING_KEY: ${EVIDENCE_SIGNING_KEY:?set EVIDENCE_SIGNING_KEY in .env.production.helm}
       DATABASE_URL: postgres://${POSTGRES_USER:-helm}:${POSTGRES_PASSWORD:-helm}@postgres:5432/${HELM_POSTGRES_DB:-helm_governance}?sslmode=disable
-      HELM_OSS_EVIDENCE_DIR: /home/helm/data/evidence
-      HELM_OSS_RECEIPTS_DIR: /home/helm/data/receipts
+      HELM_EVIDENCE_DIR: /home/helm/data/evidence
+      HELM_RECEIPTS_DIR: /home/helm/data/receipts
     volumes:
       - helm_data:/home/helm/data
       - ../../packs/founder_ops.v1.json:/home/helm/packs/founder_ops.v1.json:ro

@@ -27,7 +27,7 @@ ENV_HELM_FILE="${ENV_HELM_FILE:-$ENV_DIR/.env.production.helm}"
 ENV_PILOT_FILE="${ENV_PILOT_FILE:-$ENV_DIR/.env.production.pilot}"
 COMPOSE_PROFILES="${COMPOSE_PROFILES:-backup}"
 COMPOSE=(docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml)
-HELM_OSS_DIR="${HELM_OSS_DIR:-$ROOT_DIR/../helm-oss}"
+HELM_KERNEL_DIR="${HELM_OSS_DIR:-${HELM_KERNEL_DIR:-$ROOT_DIR/../helm-ai-kernel}}"
 HELM_DOCKERFILE="${HELM_DOCKERFILE:-Dockerfile.slim}"
 HELM_DOCKER_PLATFORM="${HELM_DOCKER_PLATFORM:-linux/amd64}"
 HELM_IMAGE_ARCHIVE="${HELM_IMAGE_ARCHIVE:-}"
@@ -62,7 +62,7 @@ HELM preload:
   preload-helm builds HELM_IMAGE from .env.production.shared, copies it to the
   Droplet, and runs docker load. By default HELM_PRELOAD_MODE=binary cross-compiles
   the HELM binary locally and packages it into a runtime image. Set
-  HELM_PRELOAD_MODE=docker to build HELM_OSS_DIR with HELM_DOCKERFILE, or set
+  HELM_PRELOAD_MODE=docker to build HELM_KERNEL_DIR with HELM_DOCKERFILE, or set
   HELM_IMAGE_ARCHIVE to upload an existing docker save tar.
 USAGE
 }
@@ -230,8 +230,8 @@ preload_helm_image() {
     archive="$HELM_IMAGE_ARCHIVE"
     [[ -f "$archive" ]] || die "HELM_IMAGE_ARCHIVE not found: $archive"
   else
-    [[ -d "$HELM_OSS_DIR" ]] || die "HELM_OSS_DIR not found: $HELM_OSS_DIR"
-    [[ -f "$HELM_OSS_DIR/$HELM_DOCKERFILE" ]] || die "HELM_DOCKERFILE not found: $HELM_OSS_DIR/$HELM_DOCKERFILE"
+    [[ -d "$HELM_KERNEL_DIR" ]] || die "HELM_KERNEL_DIR not found: $HELM_KERNEL_DIR"
+    [[ -f "$HELM_KERNEL_DIR/$HELM_DOCKERFILE" ]] || die "HELM_DOCKERFILE not found: $HELM_KERNEL_DIR/$HELM_DOCKERFILE"
     archive="$(mktemp "${TMPDIR:-/tmp}/helm-sidecar-image.XXXXXX.tar")"
     cleanup_archive=1
     case "$HELM_PRELOAD_MODE" in
@@ -241,7 +241,7 @@ preload_helm_image() {
         target_os="${HELM_DOCKER_PLATFORM%%/*}"
         target_arch="${HELM_DOCKER_PLATFORM##*/}"
         echo "Cross-compiling HELM sidecar binary for $target_os/$target_arch ..."
-        (cd "$HELM_OSS_DIR/core" && CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" go build -ldflags="-s -w" -trimpath -o "$build_dir/helm" ./cmd/helm/)
+        (cd "$HELM_KERNEL_DIR/core" && CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_arch" go build -ldflags="-s -w" -trimpath -o "$build_dir/helm" ./cmd/helm/)
         cat >"$build_dir/Dockerfile" <<'DOCKERFILE'
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata && \
@@ -258,8 +258,8 @@ DOCKERFILE
         rm -rf "$build_dir"
         ;;
       docker)
-        echo "Building HELM sidecar image $image from $HELM_OSS_DIR/$HELM_DOCKERFILE ..."
-        docker build --platform "$HELM_DOCKER_PLATFORM" -f "$HELM_OSS_DIR/$HELM_DOCKERFILE" -t "$image" "$HELM_OSS_DIR"
+        echo "Building HELM sidecar image $image from $HELM_KERNEL_DIR/$HELM_DOCKERFILE ..."
+        docker build --platform "$HELM_DOCKER_PLATFORM" -f "$HELM_KERNEL_DIR/$HELM_DOCKERFILE" -t "$image" "$HELM_KERNEL_DIR"
         ;;
       *)
         die "HELM_PRELOAD_MODE must be binary or docker"

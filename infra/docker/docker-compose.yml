@@ -19,18 +19,18 @@ services:
       retries: 5
 
   # ── HELM Governance Sidecar ──────────────────────────────────────────
-  # Runs helm-oss as a fail-closed governance engine. Pilot's LLM calls are
+  # Runs HELM AI Kernel as a fail-closed governance engine. Pilot's LLM calls are
   # proxied through helm at /v1/chat/completions; Guardian inspects every
   # request, attaches signed receipt headers (X-Helm-Decision-ID, X-Helm-Verdict,
   # X-Helm-Policy-Version, X-Helm-Decision-Hash), and denies with 403 when
   # policy blocks an action.
   #
-  # Build context points to the sibling helm-oss repo (not a submodule).
+  # Build context points to the sibling helm-ai-kernel repo (not a submodule).
   # If HELM_IMAGE is set in .env, that published image is used instead.
   helm:
     image: ${HELM_IMAGE:-}
     build:
-      context: ../../../helm-oss
+      context: ../../../helm-ai-kernel
       dockerfile: Dockerfile.slim
     ports:
       - '${HELM_PORT:-8420}:8080'
@@ -46,8 +46,8 @@ services:
       EVIDENCE_SIGNING_KEY: '${EVIDENCE_SIGNING_KEY:-pilot-dev-ephemeral-key-change-me}'
       # HELM uses its own DB namespace in the shared Postgres instance
       DATABASE_URL: 'postgres://helm:helm@postgres:5432/helm_governance?sslmode=disable'
-      HELM_OSS_EVIDENCE_DIR: '/home/helm/data/evidence'
-      HELM_OSS_RECEIPTS_DIR: '/home/helm/data/receipts'
+      HELM_EVIDENCE_DIR: '/home/helm/data/evidence'
+      HELM_RECEIPTS_DIR: '/home/helm/data/receipts'
     volumes:
       - helm_data:/home/helm/data
       # Mount the founder_ops policy pack read-only so HELM can load it at startup

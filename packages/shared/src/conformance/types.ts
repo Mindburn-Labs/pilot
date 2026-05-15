@@ -1,7 +1,7 @@
 // ─── Conformance types (Phase 15 Track M) ───
 //
 // Minimal certification surface for Pilot subagents. Levels mirror
-// helm-oss's L1/L2/L3 ladder:
+// helm-ai-kernel's L1/L2/L3 ladder:
 //
 //   L1 — structural integrity. Evidence pack has required fields,
 //        JCS-canonical manifest, SHA-256 decision hash, signed blob
@@ -10,7 +10,7 @@
 //        decisionHash when replayed with the same inputs; parent
 //        chain reconciles without gaps.
 //   L3 — adversarial resilience. 60+ tests across 6 gates — NOT
-//        implemented in Pilot; certification requires the helm-oss
+//        implemented in Pilot; certification requires the helm-ai-kernel
 //        Go harness. We ship the hook so operators can opt in.
 
 export type CertificationLevel = 'L1' | 'L2' | 'L3';

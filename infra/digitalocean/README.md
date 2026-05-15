@@ -68,7 +68,7 @@ bash infra/digitalocean/deploy.sh preload-helm
 bash infra/digitalocean/deploy.sh deploy
 ```
 
-`preload-helm` defaults to `HELM_PRELOAD_MODE=binary`: it cross-compiles the local `../helm-oss` sidecar for Linux amd64, packages it as `HELM_IMAGE`, copies it to the Droplet, and runs `docker load`. Set `HELM_PRELOAD_MODE=docker` to build from the HELM Dockerfile instead, or set `HELM_IMAGE_ARCHIVE` to upload an existing `docker save` tar.
+`preload-helm` defaults to `HELM_PRELOAD_MODE=binary`: it cross-compiles the local `../helm-ai-kernel` sidecar for Linux amd64, packages it as `HELM_IMAGE`, copies it to the Droplet, and runs `docker load`. Set `HELM_PRELOAD_MODE=docker` to build from the HELM Dockerfile instead, or set `HELM_IMAGE_ARCHIVE` to upload an existing `docker save` tar.
 
 `deploy` copies this checkout to `/opt/pilot/releases/<git-sha>`, writes the split production env files, pulls the pinned production images, starts Postgres, waits for both Pilot and HELM databases to accept connections, runs the production migration CLI once, starts the stack, and points `/opt/pilot/current` at the successful release. It starts `COMPOSE_PROFILES=backup` by default so encrypted scheduled backups run in production:
 

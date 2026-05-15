@@ -5,7 +5,7 @@ import { apiFetch, isAuthenticated } from '../../../lib/api';
 
 // ─── Governance cost attribution dashboard (Phase 14 Track F) ───
 //
-// Surfaces helm-oss /economic/charges + /economic/allocations.
+// Surfaces helm-ai-kernel /economic/charges + /economic/allocations.
 // Operators see USD spend per workspace per subagent over the last 7
 // days alongside any per-workspace allocation envelopes.
 

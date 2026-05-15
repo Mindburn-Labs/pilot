@@ -104,7 +104,7 @@ export const HELM_ADMIN_ENDPOINT_ACTION_CATALOG = {
 } as const;
 
 /**
- * Thin TypeScript client for helm-oss v0.3.0+.
+ * Thin TypeScript client for helm-ai-kernel v0.3.0+.
  *
  * Fail-closed discipline:
  *   - 2xx with governance headers + verdict=ALLOW → return the response + receipt
@@ -426,9 +426,9 @@ export class HelmClient {
     };
   }
 
-  // ─── Phase 14 Track F — helm-oss endpoint integration ───
+  // ─── Phase 14 Track F — helm-ai-kernel endpoint integration ───
   //
-  // Thin wrappers around helm-oss HTTP endpoints. All use governedFetch
+  // Thin wrappers around helm-ai-kernel HTTP endpoints. All use governedFetch
   // for retries + failClosed semantics + 403 handling. Read-only inspection
   // endpoints are explicitly classified in HELM_ADMIN_ENDPOINT_ACTION_CATALOG
   // as E1/no-receipt; write endpoints must pass evaluate() before POST.

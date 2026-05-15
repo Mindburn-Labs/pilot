@@ -5,7 +5,7 @@ import { apiFetch, isAuthenticated } from '../../../lib/api';
 
 // ─── Governance budget + merkle dashboard (Phase 14 Track F) ───
 //
-// Surfaces helm-oss /budget/status + /merkle/root in one place. Founders
+// Surfaces helm-ai-kernel /budget/status + /merkle/root in one place. Founders
 // can verify proof-graph integrity (merkle root) and see live HELM-side
 // spend ceilings + alerts.
 

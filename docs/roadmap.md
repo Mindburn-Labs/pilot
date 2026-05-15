@@ -62,7 +62,7 @@ Production-readiness source of truth: this roadmap is not a production autonomy 
 
 ## Upstream dependencies
 
-- `helm-oss` governance parity — keep `POST /api/v1/evaluate` and the `/api/v1/guardian/evaluate` compatibility alias covered by contract tests; migration `0012_reverify_spawn_receipts.sql` remains available for re-signing older Path-A rows.
+- `helm-ai-kernel` governance parity — keep `POST /api/v1/evaluate` and the `/api/v1/guardian/evaluate` compatibility alias covered by contract tests; migration `0012_reverify_spawn_receipts.sql` remains available for re-signing older Path-A rows.
 
 ## How to propose changes
 

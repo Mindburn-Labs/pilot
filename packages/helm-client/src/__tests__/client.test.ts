@@ -302,7 +302,7 @@ describe('HelmClient.evaluate', () => {
     }
   });
 
-  it('posts to canonical helm-oss evaluate and returns a synthesized receipt', async () => {
+  it('posts to canonical helm-ai-kernel evaluate and returns a synthesized receipt', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       makeResponse({
         status: 200,
@@ -337,7 +337,7 @@ describe('HelmClient.evaluate', () => {
     );
   });
 
-  it('throws HelmDeniedError when helm-oss returns allow=false', async () => {
+  it('throws HelmDeniedError when helm-ai-kernel returns allow=false', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       makeResponse({
         status: 200,

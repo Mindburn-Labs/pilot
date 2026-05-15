@@ -184,7 +184,7 @@ export function governanceRoutes(deps: GatewayDeps) {
     return c.json({ taskId, nodes, edges });
   });
 
-  // ─── Phase 14 Track F — helm-oss endpoint surface ───
+  // ─── Phase 14 Track F — helm-ai-kernel endpoint surface ───
   // Proxy thin reads of HelmClient endpoints into the gateway so the
   // web dashboard can render budget / cost / merkle / boundary widgets
   // without speaking the HELM admin protocol directly.

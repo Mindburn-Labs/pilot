@@ -1,10 +1,10 @@
 > **Launch boundary note**
 >
-> Pilot is an experimental downstream application. It is not part of HELM OSS
-> and should not be used to evaluate HELM kernel readiness, HELM OSS
+> Pilot is an experimental downstream application. It is not part of HELM AI Kernel
+> and should not be used to evaluate HELM kernel readiness, HELM AI Kernel
 > conformance, or the HELM launch surface.
 >
-> For HELM OSS, use: https://github.com/Mindburn-Labs/helm-oss
+> For HELM AI Kernel, see: https://github.com/Mindburn-Labs/helm-ai-kernel
 
 # Pilot
 
@@ -41,7 +41,7 @@ eval evidence.
 ## What Pilot Is Not
 
 - Not a HELM replacement. Production Pilot runs behind a HELM sidecar.
-- Not a HELM OSS conformance surface.
+- Not a HELM AI Kernel conformance surface.
 - Not a multi-tenant SaaS.
 - Not a general scraping framework.
 - Not a place for ad-hoc tool calls, raw SQL, or new ORMs.

@@ -557,7 +557,7 @@ export class Conductor {
         return packId;
       });
       // v1.2.1 — L1 structural integrity check. Non-fatal; warnings
-      // logged. Signed-blob check is off until upstream helm-oss#43 lands.
+      // logged. Signed-blob check is off until upstream helm-ai-kernel#43 lands.
       try {
         const result = validateL1({
           id,

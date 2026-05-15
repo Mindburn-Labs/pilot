@@ -1,7 +1,7 @@
 /**
  * HELM governance client types.
  *
- * These types mirror what helm-oss v0.3.0 exposes via:
+ * These types mirror what helm-ai-kernel v0.3.0 exposes via:
  *   - POST /v1/chat/completions   → LLM call with Guardian enforcement
  *   - GET  /healthz               → health
  *   - GET  /api/v1/version        → version
@@ -9,7 +9,7 @@
  * Generic tool/deploy governance uses `POST /api/v1/evaluate`.
  */
 
-/** CPI verdict — matches helm-oss `core/pkg/contracts/verdict.go`. */
+/** CPI verdict — matches helm-ai-kernel `core/pkg/contracts/verdict.go`. */
 export type HelmVerdict = 'ALLOW' | 'DENY' | 'ESCALATE';
 
 /**
@@ -219,8 +219,8 @@ export interface HelmClientConfig {
   onReceipt?: (receipt: HelmReceipt) => void | Promise<void>;
 }
 
-// ─── Phase 14 Track F — helm-oss endpoint response shapes ───
-// These types mirror the helm-oss HTTP endpoint payloads Pilot consumes.
+// ─── Phase 14 Track F — helm-ai-kernel endpoint response shapes ───
+// These types mirror the helm-ai-kernel HTTP endpoint payloads Pilot consumes.
 
 export interface Soc2BundleResult {
   /** JCS-canonical bundle, base64-encoded tar.gz for transport. */

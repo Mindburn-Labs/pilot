@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 // ─── Compliance frameworks (Phase 14 Track B) ───
 //
-// Metadata for each regulated compliance pack available in helm-oss.
+// Metadata for each regulated compliance pack available in helm-ai-kernel.
 // Workspaces opt in by adding a framework code to
 // `workspaces.compliance_frameworks` (migration 0013).
 //
@@ -26,7 +26,7 @@ export interface ComplianceFramework {
   description: string;
   /** Retention window for evidence packs under this framework, in days. */
   retentionDays: number;
-  /** helm-oss reference pack file name (for overlay composition). */
+  /** helm-ai-kernel reference pack file name (for overlay composition). */
   helmPack: string;
   /** One-word category for dashboard grouping. */
   category: 'security' | 'health' | 'finance' | 'ai' | 'general';

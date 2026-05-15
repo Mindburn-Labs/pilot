@@ -18,7 +18,7 @@ import {
 //   4. `receivedAt` is monotone non-decreasing from parent → child.
 //
 // Replay verification against a deterministic engine is out of scope
-// for Pilot-side L2; helm-oss ships the canonical replay harness. We
+// for Pilot-side L2; helm-ai-kernel ships the canonical replay harness. We
 // assert the evidence is REPLAY-READY — any downstream verifier can
 // pick the chain up and rehash.
 

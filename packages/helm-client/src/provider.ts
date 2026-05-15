@@ -5,7 +5,7 @@ import type { HelmReceipt } from './types.js';
 
 export interface HelmLlmProviderOptions {
   /**
-   * Required. HELM-governed client that owns the proxy hop to helm-oss.
+   * Required. HELM-governed client that owns the proxy hop to helm-ai-kernel.
    */
   helm: HelmClient;
   /**
