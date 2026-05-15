@@ -26,7 +26,7 @@ ENV_SHARED_FILE="${ENV_SHARED_FILE:-$ENV_DIR/.env.production.shared}"
 ENV_HELM_FILE="${ENV_HELM_FILE:-$ENV_DIR/.env.production.helm}"
 ENV_PILOT_FILE="${ENV_PILOT_FILE:-$ENV_DIR/.env.production.pilot}"
 COMPOSE_PROFILES="${COMPOSE_PROFILES:-backup}"
-COMPOSE=(docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml)
+COMPOSE=(docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml)
 HELM_KERNEL_DIR="${HELM_OSS_DIR:-${HELM_KERNEL_DIR:-$ROOT_DIR/../helm-ai-kernel}}"
 HELM_DOCKERFILE="${HELM_DOCKERFILE:-Dockerfile.slim}"
 HELM_DOCKER_PLATFORM="${HELM_DOCKER_PLATFORM:-linux/amd64}"
@@ -403,35 +403,35 @@ deploy_to() {
     set -euo pipefail
     cd '$release_dir'
     find packages services apps -type d \( -name dist -o -name .next \) -prune -exec rm -rf {} +
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml config >/dev/null
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml pull postgres caddy backup-cron pilot web
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml pull helm || {
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml config >/dev/null
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml pull postgres caddy backup-cron pilot web
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml pull helm || {
       echo 'HELM image pull failed; continuing only if HELM_IMAGE was preloaded on the Droplet.'
-      COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml config >/dev/null
+      COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml config >/dev/null
     }
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml up -d postgres
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml up -d postgres
     for attempt in \$(seq 1 60); do
-      if COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml exec -T postgres sh -c 'pg_isready -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" && pg_isready -U \"\$POSTGRES_USER\" -d \"\$HELM_POSTGRES_DB\"' >/dev/null 2>&1; then
+      if COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml exec -T postgres sh -c 'pg_isready -U \"\$POSTGRES_USER\" -d \"\$POSTGRES_DB\" && pg_isready -U \"\$POSTGRES_USER\" -d \"\$HELM_POSTGRES_DB\"' >/dev/null 2>&1; then
         break
       fi
       if [ \"\$attempt\" -eq 60 ]; then
-        COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml logs --tail=100 postgres
+        COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml logs --tail=100 postgres
         echo 'Postgres did not become ready before migrations.' >&2
         exit 1
       fi
       sleep 2
     done
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml run --rm --no-deps pilot node packages/db/dist/migrate-production.js
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml up -d
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml up -d --no-deps --force-recreate caddy
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml exec -T caddy caddy reload --config /etc/caddy/Caddyfile ||
-      COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml restart caddy
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml run --rm --no-deps pilot node packages/db/dist/migrate-production.js
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml up -d
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml up -d --no-deps --force-recreate caddy
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml exec -T caddy caddy reload --config /etc/caddy/Caddyfile ||
+      COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml restart caddy
     if [ -e '$REMOTE_DIR' ] && [ ! -L '$REMOTE_DIR' ]; then
       mv '$REMOTE_DIR' '$REMOTE_DIR.bootstrap.\$(date -u +%Y%m%d%H%M%S)'
     fi
     ln -sfnT '$release_dir' '$REMOTE_DIR'
     ls -1dt '$REMOTE_RELEASES_DIR'/* 2>/dev/null | tail -n +4 | xargs -r rm -rf
-    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml ps
+    COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml ps
   "
 
   echo "Deployed. Verify with:"
@@ -442,7 +442,7 @@ status_remote() {
   local ip
   ip="$(droplet_ip)"
   [[ -n "$ip" ]] || die "set DO_DROPLET_IP or create a droplet named $DROPLET_NAME"
-  ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$ip" "cd '$REMOTE_DIR' && COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml ps"
+  ssh "${SSH_OPTS[@]}" "$REMOTE_USER@$ip" "cd '$REMOTE_DIR' && COMPOSE_PROFILES='$COMPOSE_PROFILES' docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml ps"
 }
 
 rollback_remote() {
@@ -474,10 +474,10 @@ fi
   exit 1
 }
 cd "$target"
-COMPOSE_PROFILES="$COMPOSE_PROFILES" docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml config >/dev/null
-COMPOSE_PROFILES="$COMPOSE_PROFILES" docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml up -d
+COMPOSE_PROFILES="$COMPOSE_PROFILES" docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml config >/dev/null
+COMPOSE_PROFILES="$COMPOSE_PROFILES" docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml up -d
 ln -sfnT "$target" "$REMOTE_DIR"
-COMPOSE_PROFILES="$COMPOSE_PROFILES" docker compose -p pilot --env-file .env.production.shared -f infra/digitalocean/docker-compose.yml ps
+COMPOSE_PROFILES="$COMPOSE_PROFILES" docker compose -p pilot --env-file .env.production.shared --env-file .env.production.helm --env-file .env.production.pilot -f infra/digitalocean/docker-compose.yml ps
 echo "Rolled back to $target"
 REMOTE
 }
