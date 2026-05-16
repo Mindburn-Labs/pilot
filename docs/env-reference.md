@@ -173,7 +173,7 @@ When using local storage, Pilot also persists:
 | `POSTGRES_IMAGE`    | Prod     | `pgvector/pgvector:0.8.0-pg17`          | Pinned pgvector PostgreSQL image                      |
 | `CADDY_IMAGE`       | Prod     | `caddy:2.10.2-alpine`                   | Pinned Caddy TLS proxy image                          |
 | `OFELIA_IMAGE`      | Prod     | `mcuadros/ofelia:0.3.22`                | Pinned backup scheduler image                         |
-| `HELM_IMAGE`        | Prod     | `ghcr.io/mindburn-labs/helm-ai-kernel:0.4.0`  | Published HELM sidecar image pulled by the Droplet    |
+| `HELM_IMAGE`        | Prod     | `ghcr.io/mindburn-labs/helm-ai-kernel:0.5.0`  | Published HELM sidecar image pulled by the Droplet    |
 | `PILOT_IMAGE`       | Prod     | `ghcr.io/mindburn-labs/pilot:<tag>`     | Published Pilot gateway image pulled by the Droplet   |
 | `WEB_IMAGE`         | Prod     | `ghcr.io/mindburn-labs/pilot-web:<tag>` | Published Next.js web image pulled by the Droplet     |
 
