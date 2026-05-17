@@ -24,6 +24,27 @@
       "docs_origin_hint": "pilot.docs.mindburn.org/self-hosting"
     },
     {
+      "slug": "platform",
+      "title": "Pilot Platform and DevOps",
+      "section": "platform",
+      "source_path": "docs/platform.md",
+      "docs_origin_hint": "pilot.docs.mindburn.org/platform"
+    },
+    {
+      "slug": "backend",
+      "title": "Pilot Backend and Protocols",
+      "section": "backend",
+      "source_path": "docs/backend.md",
+      "docs_origin_hint": "pilot.docs.mindburn.org/backend"
+    },
+    {
+      "slug": "frontend",
+      "title": "Pilot Frontend and Console",
+      "section": "frontend",
+      "source_path": "docs/frontend.md",
+      "docs_origin_hint": "pilot.docs.mindburn.org/frontend"
+    },
+    {
       "slug": "architecture",
       "title": "Pilot Architecture",
       "section": "architecture",
