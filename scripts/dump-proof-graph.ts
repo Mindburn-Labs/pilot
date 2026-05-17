@@ -115,7 +115,7 @@ function verdictFill(verdict: string): string {
   const v = verdict.toUpperCase();
   if (v === 'ALLOW') return '#d5f5e3';
   if (v === 'DENY') return '#fadbd8';
-  if (v === 'ESCALATE' || v === 'REQUIRE_APPROVAL') return '#fdebd0';
+  if (v === 'ESCALATE' || v === 'ESCALATE') return '#fdebd0';
   return '#e8e8e8';
 }
 

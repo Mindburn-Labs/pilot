@@ -270,7 +270,7 @@ function verdictColor(verdict: string): string {
   const v = verdict.toUpperCase();
   if (v === 'ALLOW') return '#3ec28f';
   if (v === 'DENY') return '#e27a7a';
-  if (v === 'ESCALATE' || v === 'REQUIRE_APPROVAL') return '#e2a84a';
+  if (v === 'ESCALATE' || v === 'ESCALATE') return '#e2a84a';
   return '#888';
 }
 

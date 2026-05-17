@@ -1,7 +1,7 @@
 /**
  * VoxCPM TTS client — tokenizer-free multilingual speech (OpenBMB/VoxCPM, Apache-2.0).
  *
- * Thin HTTP client for the VoxCPM FastAPI server hosted by helm-compiler-lab
+ * Thin HTTP client for the VoxCPM FastAPI server hosted by orggenome-compiler
  * (serving/voxcpm/). Scaffold only — the upstream endpoint returns 501 until
  * the model is wired.
  *

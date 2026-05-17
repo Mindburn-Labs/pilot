@@ -6,7 +6,7 @@
 - HELM normative status: Non-normative for HELM conformance. Pilot may consume HELM but does not define HELM.
 - Current status: Active reference implementation with its own docs and service code.
 - Implemented capabilities: Pilot-specific gateway/service/docs behavior as present in repo.
-- Not implemented: No HELM conformance authority, no HELM Commercial availability claim, no public proof-console claim.
+- Not implemented: No HELM conformance authority, no HELM AI Enterprise availability claim, no public proof-console claim.
 - Public claims: Pilot is reference context only.
 - Claim evidence: Repo source, docs, tests, Mindburn company product map.
 - Tests that prove each claim: Repo-local tests for Pilot services; Mindburn public copy checks for non-normative framing.
